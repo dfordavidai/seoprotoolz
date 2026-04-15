@@ -7,7 +7,12 @@
     "api/click-link.js":         { "maxDuration": 60,  "memory": 1024 },
     "api/captcha.js":            { "maxDuration": 180, "memory": 512  },
     "api/index.js":              { "maxDuration": 60,  "memory": 256  },
-    "api/**/*.js":               { "maxDuration": 30,  "memory": 256  }
+    "api/proxy.js":              { "maxDuration": 30,  "memory": 256  },
+    "api/health.js":             { "maxDuration": 30,  "memory": 256  },
+    "api/headers.js":            { "maxDuration": 30,  "memory": 256  },
+    "api/whois.js":              { "maxDuration": 30,  "memory": 256  },
+    "api/ping.js":               { "maxDuration": 30,  "memory": 256  },
+    "api/supabase.js":           { "maxDuration": 30,  "memory": 256  }
   },
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1" },

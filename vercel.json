@@ -2,17 +2,17 @@
   "version": 2,
   "name": "seo-parasite-pro",
   "functions": {
-    "api/register.mjs":           { "maxDuration": 120, "memory": 1024 },
-    "api/universal-register.mjs": { "maxDuration": 120, "memory": 1024 },
-    "api/click-link.mjs":         { "maxDuration": 60,  "memory": 1024 },
-    "api/captcha.mjs":            { "maxDuration": 180, "memory": 512  },
-    "api/index.mjs":              { "maxDuration": 60,  "memory": 256  },
-    "api/proxy.mjs":              { "maxDuration": 30,  "memory": 256  },
-    "api/health.mjs":             { "maxDuration": 30,  "memory": 256  },
-    "api/headers.mjs":            { "maxDuration": 30,  "memory": 256  },
-    "api/whois.mjs":              { "maxDuration": 30,  "memory": 256  },
-    "api/ping.mjs":               { "maxDuration": 30,  "memory": 256  },
-    "api/supabase.mjs":           { "maxDuration": 30,  "memory": 256  }
+    "api/register.js":           { "maxDuration": 120, "memory": 1024 },
+    "api/universal-register.js": { "maxDuration": 120, "memory": 1024 },
+    "api/click-link.js":         { "maxDuration": 60,  "memory": 1024 },
+    "api/captcha.js":            { "maxDuration": 180, "memory": 512  },
+    "api/index.js":              { "maxDuration": 60,  "memory": 256  },
+    "api/proxy.js":              { "maxDuration": 30,  "memory": 256  },
+    "api/health.js":             { "maxDuration": 30,  "memory": 256  },
+    "api/headers.js":            { "maxDuration": 30,  "memory": 256  },
+    "api/whois.js":              { "maxDuration": 30,  "memory": 256  },
+    "api/ping.js":               { "maxDuration": 30,  "memory": 256  },
+    "api/supabase.js":           { "maxDuration": 30,  "memory": 256  }
   },
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1" },

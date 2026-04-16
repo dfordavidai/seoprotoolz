@@ -1,6 +1,3 @@
-
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -11573,7 +11570,7 @@ async function pmFetchSrc(src){
   return[];
 }
 
-async function pmScanAll(){
+async function pmScanAll(autoTest=false){
   if(PROXY_STATE.scanning){pmLog('Already scanning...','warn');return;}
   PROXY_STATE.scanning=true;
   pmUpdateScanBtn(true);
@@ -11592,31 +11589,110 @@ async function pmScanAll(){
   pmUpdateScanBtn(false);
   pmLog('Scan done. '+total+' new proxies. Total: '+PROXY_STATE.proxies.length,'success');
   pmRenderTable();
+  if(autoTest && total > 0){
+    pmLog('Auto-testing '+Math.min(total,200)+' freshly scanned proxies...','info');
+    await pmTestAll();
+  }
 }
 function pmStopScan(){PROXY_STATE.scanning=false;pmUpdateScanBtn(false);pmLog('Scan stopped.','warn');}
 
+// ══════════════════════════════════════════════════════════════════════
+// REAL proxy tester — routes the test request THROUGH the proxy via
+// the Vercel backend (which supports HTTP CONNECT tunnelling).
+// Falls back to a direct corsproxy check for SOCKS5 proxies.
+// ══════════════════════════════════════════════════════════════════════
 async function pmTestProxy(p){
-  const start=Date.now();
-  // Try reliable test endpoints in cascade
-  const testUrls=[
+  const start = Date.now();
+  const proxyUrl = p.protocol + '://' + p.ip + ':' + p.port;
+  const testTargets = [
     'https://api.ipify.org?format=json',
+    'https://httpbin.org/ip',
     'https://ipecho.net/plain',
-    'https://checkip.amazonaws.com/',
   ];
-  for(const testUrl of testUrls){
-    try{
-      const r=await fetch('https://corsproxy.io/?'+encodeURIComponent(testUrl),{signal:AbortSignal.timeout(8000)});
-      if(r.ok){
-        const ms=Date.now()-start;
-        p.speed=ms;
-        p.status='alive';
-        p.speedLabel=ms<800?'fast':ms<2000?'medium':'slow';
-        p.lastTest=Date.now();p.failCount=0;
-        return true;
-      }
-    }catch(e){}
+  // ── Strategy 1: Route through our Vercel backend — real tunnel test ──
+  const vercelUrl = settingGet('vercel_url');
+  const vercelSecret = settingGet('vercel_secret');
+  if(vercelUrl){
+    const endpoint = vercelUrl.replace(/\/+$/,'') + '/api/proxy-check';
+    for(const target of testTargets){
+      try{
+        const r = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(vercelSecret ? {'x-api-key': vercelSecret, 'x-secret': vercelSecret} : {})
+          },
+          body: JSON.stringify({ proxy: proxyUrl, target }),
+          signal: AbortSignal.timeout(15000)
+        });
+        if(r.status === 200){
+          const data = await r.json().catch(()=>({}));
+          if(data.ok){
+            const ms = data.ms || (Date.now() - start);
+            p.speed = ms; p.status = 'alive'; p._noVercel = false;
+            p.speedLabel = ms < 800 ? 'fast' : ms < 2500 ? 'medium' : 'slow';
+            p.lastTest = Date.now(); p.failCount = 0;
+            if(data.ip) p.detectedIp = data.ip;
+            pmLog('  '+p.ip+':'+p.port+' → ✅ ALIVE via tunnel ('+ms+'ms)'+(data.ip?' detected-ip:'+data.ip:''),'success');
+            return true;
+          } else {
+            pmLog('  '+p.ip+':'+p.port+' → ❌ DEAD ('+(data.error||'tunnel failed')+')','error');
+            break;
+          }
+        }
+        if(r.status === 403){ pmLog('Vercel auth failed — check your secret key','error'); break; }
+      }catch(e){}
+    }
+    p.speed = null; p.status = 'dead'; p.speedLabel = '';
+    p.lastTest = Date.now(); p.failCount = (p.failCount||0) + 1;
+    return false;
   }
-  p.speed=null;p.status='dead';p.speedLabel='';p.lastTest=Date.now();p.failCount=(p.failCount||0)+1;
+  // ── Strategy 2 (no Vercel): Use AllOrigins CORS proxy as a speed gauge ──
+  // NOTE: This does NOT test the proxy itself — it tests network reachability.
+  // It will score all proxies as "alive" with similar speeds (corsproxy latency).
+  // Set up your Vercel backend URL in Settings > Infrastructure for real testing.
+  const corsProxies = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?',
+    'https://api.codetabs.com/v1/proxy?quest=',
+  ];
+  for(const cp of corsProxies){
+    for(const target of testTargets){
+      try{
+        const r = await fetch(cp + encodeURIComponent(target), {signal: AbortSignal.timeout(8000)});
+        if(r.ok){
+          const ms = Date.now() - start;
+          p.speed = ms; p.status = 'alive';
+          p.speedLabel = ms < 800 ? 'fast' : ms < 2000 ? 'medium' : 'slow';
+          p.lastTest = Date.now(); p.failCount = 0;
+          // Tag so UI can warn user this wasn't a real proxy test
+          p._noVercel = true;
+          return true;
+        }
+      }catch(e){}
+    }
+  }
+  p.speed = null; p.status = 'dead'; p.speedLabel = '';
+  p.lastTest = Date.now(); p.failCount = (p.failCount||0) + 1;
+  return false;
+}
+
+// ── Auto-activate the fastest alive elite proxy after scan+test ──────
+function pmAutoActivateBest(){
+  const candidates = PROXY_STATE.proxies
+    .filter(p => p.status === 'alive')
+    .sort((a,b) => {
+      // Elite first, then anonymous, then transparent
+      const anon = p => p.anonymity === 'elite' ? 0 : p.anonymity === 'anonymous' ? 1 : 2;
+      if(anon(a) !== anon(b)) return anon(a) - anon(b);
+      return (a.speed||9999) - (b.speed||9999);
+    });
+  if(candidates.length){
+    PROXY_STATE.activeProxy = candidates[0];
+    pmUpdateActiveDisplay();
+    pmLog('✅ Auto-activated best proxy: '+candidates[0].ip+':'+candidates[0].port+' ('+candidates[0].anonymity+', '+candidates[0].speed+'ms)','success');
+    return true;
+  }
   return false;
 }
 
@@ -11624,6 +11700,10 @@ async function pmTestAll(){
   if(PROXY_STATE.testing){pmLog('Already testing...','warn');return;}
   const list=PROXY_STATE.proxies.filter(p=>p.status==='untested'||p.status==='dead');
   if(!list.length){pmLog('No proxies to test.','warn');return;}
+  const hasVercel = !!settingGet('vercel_url');
+  if(!hasVercel){
+    pmLog('⚠ No Vercel backend configured — proxy tests will check network reachability only, not actual proxy tunnel. Add your Vercel URL in Settings for real testing.','warn');
+  }
   PROXY_STATE.testing=true;
   const btn=document.getElementById('pm-test-btn');
   if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Testing...';}
@@ -11645,6 +11725,10 @@ async function pmTestAll(){
   if(btn){btn.disabled=false;btn.innerHTML='🧪 Test All';}
   pmLog('Testing done: '+alive+' alive, '+dead+' dead','success');
   pmUpdateStats();
+  // Auto-activate best proxy if none currently set
+  if(!PROXY_STATE.activeProxy && alive > 0){
+    pmAutoActivateBest();
+  }
 }
 function pmStopTest(){PROXY_STATE.testing=false;pmLog('Testing stopped.','warn');}
 
@@ -11735,6 +11819,7 @@ function pmRefreshRow(id){
   const row=document.getElementById('pm-row-'+id);if(!row)return;
   const isActive=PROXY_STATE.activeProxy&&PROXY_STATE.activeProxy.id===id;
   const sb={alive:'<span class="badge badge-g">✅ Alive</span>',dead:'<span class="badge badge-r">❌ Dead</span>',untested:'<span class="badge badge-y">⏳ Untested</span>',testing:'<span class="badge badge-b"><span class="spinner"></span> Testing</span>'}[p.status]||p.status;
+  const noVercelWarn = p._noVercel ? ' <span class="badge" style="font-size:8px;background:#997700;color:#fff" title="Tested via CORS proxy — not a real tunnel test">⚠ CORS only</span>' : '';
   const anonBadge=p.anonymity==='elite'?'<span class="badge badge-g" style="font-size:8px">ELITE</span>':p.anonymity==='anonymous'?'<span class="badge badge-b" style="font-size:8px">ANON</span>':p.anonymity?'<span class="badge" style="font-size:8px;background:#555;color:#fff">TRANSP</span>':'';
   const speedBadge=p.speed?(p.speedLabel==='fast'?'<span class="badge badge-g">🟢 '+p.speed+'ms</span>':p.speedLabel==='medium'?'<span class="badge badge-y">🟡 '+p.speed+'ms</span>':'<span class="badge badge-r">🔴 '+p.speed+'ms</span>'):'-';
   row.innerHTML=`<td>${isActive?'<span class="badge badge-g">★</span>':''}</td>
@@ -11742,7 +11827,7 @@ function pmRefreshRow(id){
     <td><span class="badge badge-p">${p.protocol.toUpperCase()}</span></td>
     <td>${p.flag||''} ${p.country?`<span class="badge badge-b">${p.country}</span>`:'-'}</td>
     <td>${anonBadge||'-'}</td>
-    <td>${sb}</td>
+    <td>${sb}${noVercelWarn}</td>
     <td>${speedBadge}</td>
     <td class="xs tm">${p.source||''}</td>
     <td>
@@ -11796,10 +11881,16 @@ function renderProxyManagerPage(el){
       <div class="card">
         <div class="card-title">🔍 Scanner Controls</div>
         <div class="notice notice-warn" style="margin-bottom:12px">${PROXY_SOURCES.length} sources · Western countries only · ip-api.com geo-batch filter · Elite proxy priority</div>
+        ${settingGet('vercel_url')
+          ? `<div class="notice notice-info" style="margin-bottom:10px;font-size:10px">✅ <strong>Vercel backend connected</strong> — proxies will be tested by routing real requests through them via your backend. Results are accurate.</div>`
+          : `<div class="notice notice-warn" style="margin-bottom:10px;font-size:10px">⚠ <strong>No Vercel backend</strong> — proxy tests can only verify network reachability, not actual proxy tunnel. For real testing, add your Vercel URL in <a href="#" onclick="switchPage('settings')" style="color:var(--accent)">Settings</a>.</div>`
+        }
         <div class="row" style="flex-wrap:wrap;gap:8px">
-          <button id="pm-scan-btn" class="btn btn-primary" onclick="pmScanAll()">🔍 Scan All Sources</button>
+          <button id="pm-scan-btn" class="btn btn-primary" onclick="pmScanAll(false)">🔍 Scan Sources</button>
+          <button class="btn btn-primary" style="background:#006600;border-color:#004400" onclick="pmScanAll(true)">⚡ Scan + Test + Use Best</button>
           <button id="pm-stop-btn" class="btn btn-danger" onclick="pmStopScan()" style="display:none">⏹ Stop Scan</button>
           <button id="pm-test-btn" class="btn btn-blue" onclick="pmTestAll()">🧪 Test All</button>
+          <button class="btn btn-ghost" onclick="pmAutoActivateBest()">★ Use Best Alive</button>
           <button class="btn btn-ghost" onclick="pmClearDead()">🗑 Remove Dead</button>
           <button class="btn btn-ghost" onclick="pmExportAlive()">📥 Export Alive</button>
           <button class="btn btn-danger btn-sm" onclick="pmClearAll()">⚠ Clear All</button>
@@ -12575,7 +12666,6 @@ const LI_SERVICES = [
   { id:'linklicious', name:'Linklicious', icon:'🔗', protocol:'REST API', desc:'Link juice drip indexer', free:false },
   { id:'backlinks_indexer', name:'BacklinksIndexer', icon:'📌', protocol:'REST API', desc:'Backlink-focused indexer', free:false },
   { id:'gindex', name:'Google Indexing API', icon:'🔴', protocol:'OAuth2 API', desc:'Direct Google Indexing (Job postings)', free:true },
-  { id:'instantindexer', name:'InstantIndexer', icon:'🚀', protocol:'Session Cookie', desc:'InstantIndexer.org — 50 URLs/batch, instant index', free:true },
 ];
 
 async function liSubmitBatch(){
@@ -12594,34 +12684,6 @@ async function liSubmitBatch(){
   for(const svc of selected){
     const svcInfo = LI_SERVICES.find(s=>s.id===svc);
     liLog(`→ [${svcInfo?.name}] Starting batch…`, 't-accent');
-
-    // InstantIndexer supports up to 50 URLs per POST — handle in bulk
-    if(svc === 'instantindexer'){
-      const iiCookie = settingGet('li_instantIndexerCookie') || '';
-      if(!iiCookie){ liLog(`  ℹ [InstantIndexer] Session cookie required — add PHPSESSID in Settings → Link Indexer`, 't-warn'); failed += urls.length; urls.forEach(u=>LI_STATE.jobs.unshift({url:u,service:'InstantIndexer',status:'skipped',time:ts()})); liRenderTable(); continue; }
-      const BATCH_SIZE = 50;
-      for(let i = 0; i < urls.length; i += BATCH_SIZE){
-        const batch = urls.slice(i, i + BATCH_SIZE);
-        const urlsStr = batch.join('\n');
-        liLog(`  → Batch ${Math.floor(i/BATCH_SIZE)+1}: submitting ${batch.length} URL(s)…`, 't-info');
-        try{
-          const formBody = new URLSearchParams({ project:'', urls: urlsStr, instant:'on', submit_urls:'' }).toString();
-          const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent('https://instantindexer.org/dashboard.php');
-          const r = await fetch(proxyUrl, {
-            method:'POST',
-            headers:{ 'Content-Type':'application/x-www-form-urlencoded', 'Cookie': iiCookie },
-            body: formBody,
-            signal: AbortSignal.timeout(20000)
-          });
-          const ok = r.status === 200 || r.status === 302;
-          batch.forEach(u=>{ if(ok){submitted++;}else{failed++;} LI_STATE.jobs.unshift({url:u,service:'InstantIndexer',status:ok?'submitted':'failed',time:ts()}); });
-          liLog(`  ${ok?'✔ Batch submitted':'✗ Batch failed'} (${r.status})`, ok?'t-info':'t-warn');
-          liRenderTable();
-        }catch(e){ batch.forEach(u=>{ failed++; LI_STATE.jobs.unshift({url:u,service:'InstantIndexer',status:'failed',time:ts()}); }); liLog(`  ✗ Batch error: ${e.message}`, 't-warn'); liRenderTable(); }
-        if(i + BATCH_SIZE < urls.length) await sleep(2000 + Math.random()*1000);
-      }
-      continue; // skip per-URL loop for this service
-    }
 
     for(const url of urls){
       await sleep(150 + Math.random() * 200);
@@ -12649,19 +12711,6 @@ async function liSubmitBatch(){
             body: JSON.stringify({url, type:'URL_UPDATED'}), signal:AbortSignal.timeout(10000)
           });
           ok = r.ok;
-        } else if(svc === 'instantindexer'){
-          // InstantIndexer.org — POST form submission via session cookie
-          const iiCookie = settingGet('li_instantIndexerCookie') || '';
-          if(!iiCookie){ liLog(`  ℹ [InstantIndexer] Session cookie required — add PHPSESSID in Settings → Link Indexer`, 't-warn'); failed++; LI_STATE.jobs.unshift({url,service:'InstantIndexer',status:'skipped',time:ts()}); liRenderTable(); continue; }
-          const formBody = new URLSearchParams({ project:'', urls:url, instant:'on', submit_urls:'' }).toString();
-          const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent('https://instantindexer.org/dashboard.php');
-          const r = await fetch(proxyUrl, {
-            method:'POST',
-            headers:{ 'Content-Type':'application/x-www-form-urlencoded', 'Cookie': iiCookie },
-            body: formBody,
-            signal: AbortSignal.timeout(15000)
-          });
-          ok = r.status === 200 || r.status === 302;
         } else {
           // Paid services: log that API key is required
           if(!apiKey){ liLog(`  ℹ [${svcInfo?.name}] API key required for paid service`, 't-warn'); failed++; LI_STATE.jobs.unshift({url,service:svcInfo?.name,status:'skipped',time:ts()}); liRenderTable(); continue; }
@@ -16713,7 +16762,6 @@ const SETTINGS_DEFAULTS = {
   li_bingIndexNow:       true,
   li_indexNowKey:        '',
   li_gscOAuthToken:      '',
-  li_instantIndexerCookie: '',
   li_batchSize:          50,
   li_delayBetween:       800,
 
@@ -17201,7 +17249,6 @@ function renderSettings(el) {
     sField('li_bingIndexNow','Bing IndexNow','toggle',{hint:'Submit URLs via Bing IndexNow API'}) +
     sField('li_indexNowKey','IndexNow API Key','text',{ph:'your-indexnow-key',hint:'Get from Bing Webmaster Tools',width:'220px'}) +
     sField('li_gscOAuthToken','GSC OAuth Token','password',{ph:'ya29.xxx... Google OAuth token',hint:'Google Search Console — needed for GSC Inspector too'}) +
-    sField('li_instantIndexerCookie','InstantIndexer Session Cookie','password',{ph:'PHPSESSID=xxxxx',hint:'Copy from DevTools → Network → Request Headers → Cookie after logging into instantindexer.org',width:'340px'}) +
     sField('li_batchSize','Batch Size','number',{min:10,max:500,unit:'URLs',hint:'URLs per submission batch'}) +
     sField('li_delayBetween','Delay Between Batches','number',{min:200,max:5000,step:100,unit:'ms'})
   )}
@@ -19180,7 +19227,12 @@ function rtExportCSV(){
 const BLM = { items:[], running:false };
 
 function renderBacklinkMonitor(el){
-  if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
+  if(!el) el=document.getElementById('page-backlink_monitor');
+  if(!el) return;
+  // Preserve terminal content across re-renders so logs stay visible
+  const prevTermHTML = document.getElementById('blm-terminal')?.innerHTML||'';
+  const prevProgWidth = document.getElementById('blm-prog')?.style.width||'0%';
+  const prevInput = document.getElementById('blm-input')?.value||'';
   el.innerHTML=`
   <div class="page-title">🔍 Backlink Monitor</div>
   <div class="page-sub">// Monitor your live parasite URLs — detect when pages go 404, get de-indexed, or change anchor text</div>
@@ -19210,6 +19262,13 @@ function renderBacklinkMonitor(el){
       </table>
     </div>
   </div>`;
+  // Restore terminal logs, progress bar, and textarea input across re-renders
+  const term=document.getElementById('blm-terminal');
+  const prog=document.getElementById('blm-prog');
+  const inp=document.getElementById('blm-input');
+  if(term && prevTermHTML) term.innerHTML=prevTermHTML;
+  if(prog && prevProgWidth) prog.style.width=prevProgWidth;
+  if(inp && prevInput) inp.value=prevInput;
 }
 
 function blmStats(){
@@ -19224,7 +19283,7 @@ function blmRenderRows(){
   return BLM.items.map((b,i)=>`
     <tr>
       <td><a href="${esc(b.url)}" target="_blank" class="ta mono xs" style="text-decoration:none;max-width:220px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.url.replace('https://','').slice(0,50))}</a></td>
-      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':'? UNKNOWN'}</span></td>
+      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':b.lastChecked?'~ PROXY ERR':'? UNKNOWN'}</span></td>
       <td class="mono xs" style="color:${b.httpCode>=400?'#cc0000':b.httpCode>=300?'#997700':'#006600'}">${b.httpCode||'—'}</td>
       <td class="mono xs">${esc(b.anchor||'—')}</td>
       <td class="mono xs">${esc(b.platform||'—')}</td>
@@ -19239,7 +19298,10 @@ function blmAddUrls(){
   lines.forEach(url=>{ if(url.startsWith('http')&&!BLM.items.find(b=>b.url===url)){ BLM.items.push({url,status:'unknown',httpCode:null,anchor:null,platform:null,lastChecked:null}); added++; }});
   document.getElementById('blm-input').value='';
   toast(added+' URLs added','s');
-  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
 }
 
 function blmImport(){
@@ -19247,42 +19309,96 @@ function blmImport(){
   let added=0;
   live.forEach(c=>{ if(!BLM.items.find(b=>b.url===c.url)){ BLM.items.push({url:c.url,status:'unknown',httpCode:null,anchor:c.keyword,platform:c.platform,lastChecked:null}); added++; }});
   toast(added+' URLs imported from campaigns','s');
-  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
 }
 
-function blmRemove(i){ BLM.items.splice(i,1); renderBacklinkMonitor(document.getElementById('page-backlink_monitor')); }
-function blmClearDead(){ BLM.items=BLM.items.filter(b=>b.status!=='dead'); renderBacklinkMonitor(document.getElementById('page-backlink_monitor')); toast('Dead URLs removed','s'); }
+function blmRemove(i){
+  BLM.items.splice(i,1);
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
+}
+function blmClearDead(){
+  BLM.items=BLM.items.filter(b=>b.status!=='dead');
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
+  toast('Dead URLs removed','s');
+}
+
+// ── Robust URL checker: tries multiple CORS proxies, falls back HEAD→GET ──
+async function blmFetchUrl(url){
+  const PROXIES = [
+    u => 'https://corsproxy.io/?' + encodeURIComponent(u),
+    u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+    u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+  ];
+  const TIMEOUT = 10000;
+  const signal = () => AbortSignal.timeout ? AbortSignal.timeout(TIMEOUT) : (() => { const c=new AbortController(); setTimeout(()=>c.abort(),TIMEOUT); return c.signal; })();
+
+  for(const proxyFn of PROXIES){
+    // Try HEAD first (fast, low-bandwidth)
+    for(const method of ['HEAD','GET']){
+      try{
+        const res = await fetch(proxyFn(url), { method, signal: signal() });
+        // allorigins wraps everything in 200 — check for explicit 404/5xx only
+        if(res.status === 0) continue; // network-level fail, try next
+        return { ok: res.ok || res.status < 400, status: res.status };
+      } catch(e){
+        // timeout or network error — try next proxy/method
+      }
+    }
+  }
+  // All proxies failed — mark as unknown rather than dead to avoid false positives
+  return { ok: null, status: 0 };
+}
 
 async function blmCheckAll(){
   if(BLM.running){ toast('Already running','w'); return; }
   if(!BLM.items.length){ toast('Add URLs first','w'); return; }
   BLM.running=true;
+  // Ensure the page is rendered before we start updating it in-place
+  const pageEl=document.getElementById('page-backlink_monitor');
+  renderBacklinkMonitor(pageEl);
   const term=document.getElementById('blm-terminal');
   const prog=document.getElementById('blm-prog');
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
   function log(msg,cls='t-info'){ if(term) term.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${msg}</span></div>`; if(term) term.scrollTop=9999; }
   log('Checking '+BLM.items.length+' URLs...');
-  const corsProxy=settingGet('corsProxy')||'https://corsproxy.io/?';
   for(let i=0;i<BLM.items.length;i++){
     const b=BLM.items[i];
     if(prog) prog.style.width=((i+1)/BLM.items.length*100)+'%';
-    try {
-      const res=await fetch(corsProxy+encodeURIComponent(b.url),{method:'HEAD'});
-      b.httpCode=res.status;
-      b.status=res.ok?'live':res.status>=400?'dead':'changed';
-      b.lastChecked=ts();
-      log(`  ${b.url.slice(0,50)} → ${res.status} ${b.status}`,b.status==='live'?'t-success':'t-error');
-    } catch(e){
-      b.httpCode=0; b.status='dead'; b.lastChecked=ts();
-      log(`  ${b.url.slice(0,50)} → FAILED`,'t-error');
+    log(`  Checking ${b.url.slice(0,50)}...`, 't-info');
+    const {ok, status} = await blmFetchUrl(b.url);
+    b.lastChecked = ts();
+    if(ok === null){
+      // All proxies failed — don't call it dead, mark unknown
+      b.httpCode = 0; b.status = 'unknown';
+      log(`  ${b.url.slice(0,50)} → All proxies failed (marked unknown)`, 't-warn');
+    } else {
+      b.httpCode = status;
+      b.status = ok ? 'live' : status >= 400 ? 'dead' : 'changed';
+      log(`  ${b.url.slice(0,50)} → HTTP ${status} ${b.status.toUpperCase()}`, b.status==='live'?'t-success':b.status==='dead'?'t-error':'t-warn');
     }
-    await sleep(800);
+    // Real-time update: refresh table row and stats in-place without re-rendering
+    if(tbody) tbody.innerHTML=blmRenderRows();
+    if(statsEl) statsEl.textContent=blmStats();
+    await sleep(400);
   }
   BLM.running=false;
   const dead=BLM.items.filter(b=>b.status==='dead').length;
+  const unk=BLM.items.filter(b=>b.status==='unknown'&&b.lastChecked).length;
   if(dead>0) toast(dead+' dead URLs found!','e');
+  else if(unk>0) toast('All reachable URLs live ✓ ('+unk+' proxy failures)','w');
   else toast('All URLs live ✓','s');
   supaAutoSync('backlinks', BLM.items);
-  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
+  if(statsEl) statsEl.textContent=blmStats();
 }
 
 function blmExportCSV(){

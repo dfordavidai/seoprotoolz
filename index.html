@@ -1773,8 +1773,8 @@ class VercelAPI {
           url: targetUrl,
           method,
           headers,
-          body: body ? JSON.stringify(body) : null,
-          timeout: 30
+          body: body || null,
+          timeout: 55
         })
       });
       if(!proxyResp.ok) throw new Error('Vercel backend proxy failed: HTTP '+proxyResp.status);

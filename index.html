@@ -1,5 +1,3 @@
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -13810,7 +13808,7 @@ function renderAccountCreator(el){
   <!-- ══════════════════════════════════════════════════════════ -->
   <!-- TAB: PRESET PLATFORMS                                       -->
   <!-- ══════════════════════════════════════════════════════════ -->
-  <div id="ac-pane-platforms" style="display:${activeTab==='platforms'?'block':'none'}">
+  <div id="ac-panel-platforms" style="display:none">
     <div class="notice notice-info" style="margin-bottom:10px">
       <strong>ℹ Preset Platform Engine:</strong> Pre-configured registrations for ${AC_PLATFORMS.length} high-DA platforms (Reddit, Medium, WordPress, etc.) routed through your Vercel <code>/api/register</code> endpoint.
     </div>
@@ -13884,7 +13882,7 @@ function renderAccountCreator(el){
   <!-- ══════════════════════════════════════════════════════════ -->
   <!-- TAB: BACKEND SETUP                                          -->
   <!-- ══════════════════════════════════════════════════════════ -->
-  <div id="ac-pane-backend" style="display:${activeTab==='backend'?'block':'none'}">
+  <div id="ac-panel-backend" style="display:none">
     <div class="notice notice-warn" style="margin-bottom:12px">
       <strong>🔧 One-time Vercel setup required for Universal Creator.</strong> Deploy these 2 files to your Vercel project. It uses <code>@sparticuz/chromium</code> + <code>playwright-core</code> for serverless Playwright.
     </div>
@@ -16584,7 +16582,7 @@ const SETTINGS_DEFAULTS = {
 
   // ── GROQ AI ──
   groq_api_key:          '',
-  groq_model:            'llama3-70b-8192',
+  groq_model:            'llama-3.3-70b-versatile',
 
   // ── SESSION MANAGER ──
   csm_rotateOnFail:      true,
@@ -16689,6 +16687,113 @@ function resetAllSettings() {
   Object.keys(SETTINGS_DEFAULTS).forEach(k => SETTINGS[k] = SETTINGS_DEFAULTS[k]);
   saveSETTINGS();
   renderPage('settings');
+}
+
+// ── SAVE ALL SETTINGS (localStorage + Supabase) ──────────────────────────────
+async function saveAllSettingsNow() {
+  const msg = document.getElementById('settings-save-msg');
+  if(msg) msg.innerHTML = '<span style="color:var(--win-yellow)">⏳ Saving...</span>';
+
+  // 1. Always save to localStorage
+  saveSETTINGS();
+
+  // 2. If Supabase is connected, also persist there
+  let supaOk = false;
+  if(settingGet('supa_connected') && settingGet('supa_url') && settingGet('supa_anon_key')) {
+    try {
+      const prefix = settingGet('supa_prefix') || 'seo_';
+      const url = settingGet('supa_url').replace(/\/$/, '');
+      const key = settingGet('supa_anon_key');
+      const table = prefix + 'app_settings';
+      const payload = { id: 'global', data: JSON.stringify(SETTINGS), updated_at: new Date().toISOString() };
+      const r = await fetch(`${url}/rest/v1/${table}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': key,
+          'Authorization': 'Bearer ' + key,
+          'Prefer': 'resolution=merge-duplicates'
+        },
+        body: JSON.stringify(payload)
+      });
+      supaOk = r.ok || r.status === 200 || r.status === 201;
+    } catch(e) { supaOk = false; }
+  }
+
+  const supaMsg = settingGet('supa_connected')
+    ? (supaOk ? ' + ⚡ Supabase synced' : ' · ⚠ Supabase sync failed')
+    : '';
+
+  if(msg) {
+    msg.innerHTML = `<span style="color:var(--win-green)">✅ Saved to localStorage${supaMsg}</span>`;
+    setTimeout(() => { if(msg) msg.innerHTML = ''; }, 4000);
+  }
+  toast('✅ Settings saved' + supaMsg, supaOk || !settingGet('supa_connected') ? 's' : 'w');
+}
+
+// ── CAPTCHA KEY TESTERS (Settings page) ─────────────────────────────────────
+async function test2CaptchaKeyFromSettings() {
+  const key = settingGet('cap_2captchaKey') || '';
+  const msg = document.getElementById('cap-2captcha-test-msg');
+  if(!key) { if(msg) msg.innerHTML = '<span style="color:var(--win-red)">⚠ No key entered</span>'; return; }
+  if(msg) msg.innerHTML = '<span style="color:var(--win-yellow)">⏳ Testing...</span>';
+  try {
+    const r = await fetch(`https://2captcha.com/res.php?action=getbalance&key=${key}&json=1`);
+    const d = await r.json();
+    if(d.status === 1) {
+      const bal = parseFloat(d.request).toFixed(3);
+      if(msg) msg.innerHTML = `<span style="color:var(--win-green)">✅ Connected — Balance: $${bal}</span>`;
+      settingSet('cap_2captchaKey', key); // ensure saved
+    } else {
+      if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ ${d.request || 'Invalid key'}</span>`;
+    }
+  } catch(e) {
+    if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ Network error: ${e.message}</span>`;
+  }
+}
+
+async function testAntiCaptchaKeyFromSettings() {
+  const key = settingGet('cap_antiCaptchaKey') || '';
+  const msg = document.getElementById('cap-anticaptcha-test-msg');
+  if(!key) { if(msg) msg.innerHTML = '<span style="color:var(--win-red)">⚠ No key entered</span>'; return; }
+  if(msg) msg.innerHTML = '<span style="color:var(--win-yellow)">⏳ Testing...</span>';
+  try {
+    const r = await fetch('https://api.anti-captcha.com/getBalance', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({clientKey: key})
+    });
+    const d = await r.json();
+    if(d.errorId === 0) {
+      const bal = parseFloat(d.balance).toFixed(3);
+      if(msg) msg.innerHTML = `<span style="color:var(--win-green)">✅ Connected — Balance: $${bal}</span>`;
+    } else {
+      if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ ${d.errorDescription || 'Invalid key'}</span>`;
+    }
+  } catch(e) {
+    if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ Network error: ${e.message}</span>`;
+  }
+}
+
+async function testCapSolverKeyFromSettings() {
+  const key = settingGet('cap_capSolverKey') || '';
+  const msg = document.getElementById('cap-capsolver-test-msg');
+  if(!key) { if(msg) msg.innerHTML = '<span style="color:var(--win-red)">⚠ No key entered</span>'; return; }
+  if(msg) msg.innerHTML = '<span style="color:var(--win-yellow)">⏳ Testing...</span>';
+  try {
+    const r = await fetch('https://api.capsolver.com/getBalance', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({clientKey: key})
+    });
+    const d = await r.json();
+    if(d.errorId === 0) {
+      const bal = parseFloat(d.balance).toFixed(3);
+      if(msg) msg.innerHTML = `<span style="color:var(--win-green)">✅ Connected — Balance: $${bal}</span>`;
+    } else {
+      if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ ${d.errorDescription || 'Invalid key'}</span>`;
+    }
+  } catch(e) {
+    if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ Network error: ${e.message}</span>`;
+  }
 }
 
 function exportSettings() {
@@ -16921,8 +17026,20 @@ function renderSettings(el) {
   ${sSection('🔓','CAPTCHA Solver','API keys &amp; polling configuration',
     sField('cap_provider','Default Provider','select',{choices:[['2captcha','2captcha'],['anticaptcha','Anti-Captcha'],['capsolver','CapSolver']],hint:'Active provider used for solve requests'}) +
     sField('cap_2captchaKey','2Captcha API Key','password',{ph:'2captcha.com API key',hint:'2captcha.com → Dashboard → API Key'}) +
+    `<div class="set-row" style="padding-left:120px;margin-top:-4px;margin-bottom:6px">
+      <button class="btn btn-sm" onclick="test2CaptchaKeyFromSettings()" style="border-color:#f55036;color:#f55036;font-weight:700">⚡ Test 2Captcha Key</button>
+      <span id="cap-2captcha-test-msg" style="margin-left:10px;font-size:10px;font-family:var(--mono)"></span>
+    </div>` +
     sField('cap_antiCaptchaKey','Anti-Captcha Key','password',{ph:'anti-captcha.com API key'}) +
+    `<div class="set-row" style="padding-left:120px;margin-top:-4px;margin-bottom:6px">
+      <button class="btn btn-sm" onclick="testAntiCaptchaKeyFromSettings()" style="border-color:#f55036;color:#f55036;font-weight:700">⚡ Test Anti-Captcha Key</button>
+      <span id="cap-anticaptcha-test-msg" style="margin-left:10px;font-size:10px;font-family:var(--mono)"></span>
+    </div>` +
     sField('cap_capSolverKey','CapSolver Key','password',{ph:'capsolver.com API key'}) +
+    `<div class="set-row" style="padding-left:120px;margin-top:-4px;margin-bottom:6px">
+      <button class="btn btn-sm" onclick="testCapSolverKeyFromSettings()" style="border-color:#f55036;color:#f55036;font-weight:700">⚡ Test CapSolver Key</button>
+      <span id="cap-capsolver-test-msg" style="margin-left:10px;font-size:10px;font-family:var(--mono)"></span>
+    </div>` +
     sField('cap_pollInterval','Poll Interval','number',{min:2000,max:15000,step:500,unit:'ms',hint:'How often to check if CAPTCHA is solved'}) +
     sField('cap_maxPollAttempts','Max Poll Attempts','number',{min:5,max:60,unit:'×',hint:'Give up after this many checks'})
   )}
@@ -16980,11 +17097,12 @@ function renderSettings(el) {
       </div>
       <div class="fg" style="margin-bottom:6px">
         <label class="set-label">Model</label>
-        <select id="setting-groq_model" onchange="settingSet('groq_model',this.value)" style="width:260px">
-          <option value="llama3-70b-8192" ${(settingGet('groq_model')||'llama3-70b-8192')==='llama3-70b-8192'?'selected':''}>llama3-70b-8192 (best quality)</option>
-          <option value="llama3-8b-8192" ${settingGet('groq_model')==='llama3-8b-8192'?'selected':''}>llama3-8b-8192 (fastest)</option>
-          <option value="mixtral-8x7b-32768" ${settingGet('groq_model')==='mixtral-8x7b-32768'?'selected':''}>mixtral-8x7b-32768 (long context)</option>
-          <option value="gemma2-9b-it" ${settingGet('groq_model')==='gemma2-9b-it'?'selected':''}>gemma2-9b-it</option>
+        <select id="setting-groq_model" onchange="settingSet('groq_model',this.value)" style="width:300px">
+          <option value="llama-3.3-70b-versatile" ${(settingGet('groq_model')||'llama-3.3-70b-versatile')==='llama-3.3-70b-versatile'?'selected':''}>llama-3.3-70b-versatile ★ (best quality)</option>
+          <option value="llama-3.1-8b-instant" ${settingGet('groq_model')==='llama-3.1-8b-instant'?'selected':''}>llama-3.1-8b-instant (fastest)</option>
+          <option value="llama3-70b-8192" ${settingGet('groq_model')==='llama3-70b-8192'?'selected':''}>llama3-70b-8192 (legacy)</option>
+          <option value="llama3-8b-8192" ${settingGet('groq_model')==='llama3-8b-8192'?'selected':''}>llama3-8b-8192 (legacy fast)</option>
+          <option value="gemma2-9b-it" ${settingGet('groq_model')==='gemma2-9b-it'?'selected':''}>gemma2-9b-it (Google)</option>
         </select>
       </div>
       <div style="font-size:10px;color:var(--win-text-muted);font-family:var(--mono);margin-top:6px">
@@ -17103,6 +17221,18 @@ function renderSettings(el) {
     <div style="padding:8px 12px;font-size:10px;color:var(--win-text-muted);border-top:1px solid var(--win-border)">
       💡 Missing API keys? <a href="#" onclick="switchPage('help');setTimeout(()=>document.getElementById('help-api-keys')?.scrollIntoView({behavior:'smooth'}),200);return false" style="color:var(--win-blue);font-weight:700">View the API Keys guide →</a>
     </div>
+  </div>
+
+  <div style="position:sticky;bottom:0;z-index:50;background:var(--win-dark);border-top:2px solid var(--win-border-sh);padding:10px 16px;display:flex;align-items:center;gap:10px;box-shadow:0 -2px 8px rgba(0,0,0,0.15)">
+    <button class="btn btn-primary" onclick="saveAllSettingsNow()" style="font-weight:700;font-size:12px;padding:6px 18px;background:var(--win-blue);color:#fff;border-color:var(--win-blue2)">
+      💾 Save All Settings
+    </button>
+    <button class="btn btn-sm" onclick="exportSettings()" style="border-color:#666;color:#444">📤 Export</button>
+    <button class="btn btn-sm" onclick="importSettings()" style="border-color:#666;color:#444">📥 Import</button>
+    <button class="btn btn-sm" onclick="resetAllSettings()" style="border-color:var(--win-red);color:var(--win-red)">🗑 Reset Defaults</button>
+    <span id="settings-save-msg" style="font-size:10px;font-family:var(--mono);margin-left:6px"></span>
+    <div style="flex:1"></div>
+    <span style="font-size:10px;color:var(--win-text-muted);font-family:var(--mono)">Settings auto-save on change · Save button also syncs to Supabase if connected</span>
   </div>
   `;
 }

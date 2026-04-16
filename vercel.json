@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "name": "seo-parasite-pro",
+  "functions": {
+    "api/register.js":            { "maxDuration": 120, "memory": 1024 },
+    "api/universal-register.js":  { "maxDuration": 120, "memory": 1024 },
+    "api/click-link.js":          { "maxDuration": 60,  "memory": 1024 },
+    "api/captcha.js":             { "maxDuration": 180, "memory": 512  },
+    "api/index.js":               { "maxDuration": 10,  "memory": 256  },
+    "api/proxy.js":               { "maxDuration": 30,  "memory": 256  },
+    "api/health.js":              { "maxDuration": 10,  "memory": 256  },
+    "api/headers.js":             { "maxDuration": 30,  "memory": 256  },
+    "api/whois.js":               { "maxDuration": 30,  "memory": 256  },
+    "api/ping.js":                { "maxDuration": 30,  "memory": 256  },
+    "api/supabase.js":            { "maxDuration": 30,  "memory": 256  }
+  },
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/$1" },
+    { "src": "/",         "dest": "/index.html" },
+    { "src": "/(.*)",     "dest": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin",  "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET,POST,OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type,X-API-Key,Authorization" }
+      ]
+    }
+  ]
+}

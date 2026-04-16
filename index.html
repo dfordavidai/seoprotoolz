@@ -1,3 +1,6 @@
+
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -12572,6 +12575,7 @@ const LI_SERVICES = [
   { id:'linklicious', name:'Linklicious', icon:'🔗', protocol:'REST API', desc:'Link juice drip indexer', free:false },
   { id:'backlinks_indexer', name:'BacklinksIndexer', icon:'📌', protocol:'REST API', desc:'Backlink-focused indexer', free:false },
   { id:'gindex', name:'Google Indexing API', icon:'🔴', protocol:'OAuth2 API', desc:'Direct Google Indexing (Job postings)', free:true },
+  { id:'instantindexer', name:'InstantIndexer', icon:'🚀', protocol:'Session Cookie', desc:'InstantIndexer.org — 50 URLs/batch, instant index', free:true },
 ];
 
 async function liSubmitBatch(){
@@ -12590,6 +12594,34 @@ async function liSubmitBatch(){
   for(const svc of selected){
     const svcInfo = LI_SERVICES.find(s=>s.id===svc);
     liLog(`→ [${svcInfo?.name}] Starting batch…`, 't-accent');
+
+    // InstantIndexer supports up to 50 URLs per POST — handle in bulk
+    if(svc === 'instantindexer'){
+      const iiCookie = settingGet('li_instantIndexerCookie') || '';
+      if(!iiCookie){ liLog(`  ℹ [InstantIndexer] Session cookie required — add PHPSESSID in Settings → Link Indexer`, 't-warn'); failed += urls.length; urls.forEach(u=>LI_STATE.jobs.unshift({url:u,service:'InstantIndexer',status:'skipped',time:ts()})); liRenderTable(); continue; }
+      const BATCH_SIZE = 50;
+      for(let i = 0; i < urls.length; i += BATCH_SIZE){
+        const batch = urls.slice(i, i + BATCH_SIZE);
+        const urlsStr = batch.join('\n');
+        liLog(`  → Batch ${Math.floor(i/BATCH_SIZE)+1}: submitting ${batch.length} URL(s)…`, 't-info');
+        try{
+          const formBody = new URLSearchParams({ project:'', urls: urlsStr, instant:'on', submit_urls:'' }).toString();
+          const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent('https://instantindexer.org/dashboard.php');
+          const r = await fetch(proxyUrl, {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded', 'Cookie': iiCookie },
+            body: formBody,
+            signal: AbortSignal.timeout(20000)
+          });
+          const ok = r.status === 200 || r.status === 302;
+          batch.forEach(u=>{ if(ok){submitted++;}else{failed++;} LI_STATE.jobs.unshift({url:u,service:'InstantIndexer',status:ok?'submitted':'failed',time:ts()}); });
+          liLog(`  ${ok?'✔ Batch submitted':'✗ Batch failed'} (${r.status})`, ok?'t-info':'t-warn');
+          liRenderTable();
+        }catch(e){ batch.forEach(u=>{ failed++; LI_STATE.jobs.unshift({url:u,service:'InstantIndexer',status:'failed',time:ts()}); }); liLog(`  ✗ Batch error: ${e.message}`, 't-warn'); liRenderTable(); }
+        if(i + BATCH_SIZE < urls.length) await sleep(2000 + Math.random()*1000);
+      }
+      continue; // skip per-URL loop for this service
+    }
 
     for(const url of urls){
       await sleep(150 + Math.random() * 200);
@@ -12617,6 +12649,19 @@ async function liSubmitBatch(){
             body: JSON.stringify({url, type:'URL_UPDATED'}), signal:AbortSignal.timeout(10000)
           });
           ok = r.ok;
+        } else if(svc === 'instantindexer'){
+          // InstantIndexer.org — POST form submission via session cookie
+          const iiCookie = settingGet('li_instantIndexerCookie') || '';
+          if(!iiCookie){ liLog(`  ℹ [InstantIndexer] Session cookie required — add PHPSESSID in Settings → Link Indexer`, 't-warn'); failed++; LI_STATE.jobs.unshift({url,service:'InstantIndexer',status:'skipped',time:ts()}); liRenderTable(); continue; }
+          const formBody = new URLSearchParams({ project:'', urls:url, instant:'on', submit_urls:'' }).toString();
+          const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent('https://instantindexer.org/dashboard.php');
+          const r = await fetch(proxyUrl, {
+            method:'POST',
+            headers:{ 'Content-Type':'application/x-www-form-urlencoded', 'Cookie': iiCookie },
+            body: formBody,
+            signal: AbortSignal.timeout(15000)
+          });
+          ok = r.status === 200 || r.status === 302;
         } else {
           // Paid services: log that API key is required
           if(!apiKey){ liLog(`  ℹ [${svcInfo?.name}] API key required for paid service`, 't-warn'); failed++; LI_STATE.jobs.unshift({url,service:svcInfo?.name,status:'skipped',time:ts()}); liRenderTable(); continue; }
@@ -16668,6 +16713,7 @@ const SETTINGS_DEFAULTS = {
   li_bingIndexNow:       true,
   li_indexNowKey:        '',
   li_gscOAuthToken:      '',
+  li_instantIndexerCookie: '',
   li_batchSize:          50,
   li_delayBetween:       800,
 
@@ -17155,6 +17201,7 @@ function renderSettings(el) {
     sField('li_bingIndexNow','Bing IndexNow','toggle',{hint:'Submit URLs via Bing IndexNow API'}) +
     sField('li_indexNowKey','IndexNow API Key','text',{ph:'your-indexnow-key',hint:'Get from Bing Webmaster Tools',width:'220px'}) +
     sField('li_gscOAuthToken','GSC OAuth Token','password',{ph:'ya29.xxx... Google OAuth token',hint:'Google Search Console — needed for GSC Inspector too'}) +
+    sField('li_instantIndexerCookie','InstantIndexer Session Cookie','password',{ph:'PHPSESSID=xxxxx',hint:'Copy from DevTools → Network → Request Headers → Cookie after logging into instantindexer.org',width:'340px'}) +
     sField('li_batchSize','Batch Size','number',{min:10,max:500,unit:'URLs',hint:'URLs per submission batch'}) +
     sField('li_delayBetween','Delay Between Batches','number',{min:200,max:5000,step:100,unit:'ms'})
   )}
@@ -19133,12 +19180,7 @@ function rtExportCSV(){
 const BLM = { items:[], running:false };
 
 function renderBacklinkMonitor(el){
-  if(!el) el=document.getElementById('page-backlink_monitor');
-  if(!el) return;
-  // Preserve terminal content across re-renders so logs stay visible
-  const prevTermHTML = document.getElementById('blm-terminal')?.innerHTML||'';
-  const prevProgWidth = document.getElementById('blm-prog')?.style.width||'0%';
-  const prevInput = document.getElementById('blm-input')?.value||'';
+  if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
   el.innerHTML=`
   <div class="page-title">🔍 Backlink Monitor</div>
   <div class="page-sub">// Monitor your live parasite URLs — detect when pages go 404, get de-indexed, or change anchor text</div>
@@ -19168,13 +19210,6 @@ function renderBacklinkMonitor(el){
       </table>
     </div>
   </div>`;
-  // Restore terminal logs, progress bar, and textarea input across re-renders
-  const term=document.getElementById('blm-terminal');
-  const prog=document.getElementById('blm-prog');
-  const inp=document.getElementById('blm-input');
-  if(term && prevTermHTML) term.innerHTML=prevTermHTML;
-  if(prog && prevProgWidth) prog.style.width=prevProgWidth;
-  if(inp && prevInput) inp.value=prevInput;
 }
 
 function blmStats(){
@@ -19189,7 +19224,7 @@ function blmRenderRows(){
   return BLM.items.map((b,i)=>`
     <tr>
       <td><a href="${esc(b.url)}" target="_blank" class="ta mono xs" style="text-decoration:none;max-width:220px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.url.replace('https://','').slice(0,50))}</a></td>
-      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':b.lastChecked?'~ PROXY ERR':'? UNKNOWN'}</span></td>
+      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':'? UNKNOWN'}</span></td>
       <td class="mono xs" style="color:${b.httpCode>=400?'#cc0000':b.httpCode>=300?'#997700':'#006600'}">${b.httpCode||'—'}</td>
       <td class="mono xs">${esc(b.anchor||'—')}</td>
       <td class="mono xs">${esc(b.platform||'—')}</td>
@@ -19204,10 +19239,7 @@ function blmAddUrls(){
   lines.forEach(url=>{ if(url.startsWith('http')&&!BLM.items.find(b=>b.url===url)){ BLM.items.push({url,status:'unknown',httpCode:null,anchor:null,platform:null,lastChecked:null}); added++; }});
   document.getElementById('blm-input').value='';
   toast(added+' URLs added','s');
-  const tbody=document.getElementById('blm-tbody');
-  const statsEl=document.getElementById('blm-stats');
-  if(tbody) tbody.innerHTML=blmRenderRows();
-  if(statsEl) statsEl.textContent=blmStats();
+  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
 }
 
 function blmImport(){
@@ -19215,96 +19247,42 @@ function blmImport(){
   let added=0;
   live.forEach(c=>{ if(!BLM.items.find(b=>b.url===c.url)){ BLM.items.push({url:c.url,status:'unknown',httpCode:null,anchor:c.keyword,platform:c.platform,lastChecked:null}); added++; }});
   toast(added+' URLs imported from campaigns','s');
-  const tbody=document.getElementById('blm-tbody');
-  const statsEl=document.getElementById('blm-stats');
-  if(tbody) tbody.innerHTML=blmRenderRows();
-  if(statsEl) statsEl.textContent=blmStats();
+  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
 }
 
-function blmRemove(i){
-  BLM.items.splice(i,1);
-  const tbody=document.getElementById('blm-tbody');
-  const statsEl=document.getElementById('blm-stats');
-  if(tbody) tbody.innerHTML=blmRenderRows();
-  if(statsEl) statsEl.textContent=blmStats();
-}
-function blmClearDead(){
-  BLM.items=BLM.items.filter(b=>b.status!=='dead');
-  const tbody=document.getElementById('blm-tbody');
-  const statsEl=document.getElementById('blm-stats');
-  if(tbody) tbody.innerHTML=blmRenderRows();
-  if(statsEl) statsEl.textContent=blmStats();
-  toast('Dead URLs removed','s');
-}
-
-// ── Robust URL checker: tries multiple CORS proxies, falls back HEAD→GET ──
-async function blmFetchUrl(url){
-  const PROXIES = [
-    u => 'https://corsproxy.io/?' + encodeURIComponent(u),
-    u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
-    u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
-  ];
-  const TIMEOUT = 10000;
-  const signal = () => AbortSignal.timeout ? AbortSignal.timeout(TIMEOUT) : (() => { const c=new AbortController(); setTimeout(()=>c.abort(),TIMEOUT); return c.signal; })();
-
-  for(const proxyFn of PROXIES){
-    // Try HEAD first (fast, low-bandwidth)
-    for(const method of ['HEAD','GET']){
-      try{
-        const res = await fetch(proxyFn(url), { method, signal: signal() });
-        // allorigins wraps everything in 200 — check for explicit 404/5xx only
-        if(res.status === 0) continue; // network-level fail, try next
-        return { ok: res.ok || res.status < 400, status: res.status };
-      } catch(e){
-        // timeout or network error — try next proxy/method
-      }
-    }
-  }
-  // All proxies failed — mark as unknown rather than dead to avoid false positives
-  return { ok: null, status: 0 };
-}
+function blmRemove(i){ BLM.items.splice(i,1); renderBacklinkMonitor(document.getElementById('page-backlink_monitor')); }
+function blmClearDead(){ BLM.items=BLM.items.filter(b=>b.status!=='dead'); renderBacklinkMonitor(document.getElementById('page-backlink_monitor')); toast('Dead URLs removed','s'); }
 
 async function blmCheckAll(){
   if(BLM.running){ toast('Already running','w'); return; }
   if(!BLM.items.length){ toast('Add URLs first','w'); return; }
   BLM.running=true;
-  // Ensure the page is rendered before we start updating it in-place
-  const pageEl=document.getElementById('page-backlink_monitor');
-  renderBacklinkMonitor(pageEl);
   const term=document.getElementById('blm-terminal');
   const prog=document.getElementById('blm-prog');
-  const tbody=document.getElementById('blm-tbody');
-  const statsEl=document.getElementById('blm-stats');
   function log(msg,cls='t-info'){ if(term) term.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${msg}</span></div>`; if(term) term.scrollTop=9999; }
   log('Checking '+BLM.items.length+' URLs...');
+  const corsProxy=settingGet('corsProxy')||'https://corsproxy.io/?';
   for(let i=0;i<BLM.items.length;i++){
     const b=BLM.items[i];
     if(prog) prog.style.width=((i+1)/BLM.items.length*100)+'%';
-    log(`  Checking ${b.url.slice(0,50)}...`, 't-info');
-    const {ok, status} = await blmFetchUrl(b.url);
-    b.lastChecked = ts();
-    if(ok === null){
-      // All proxies failed — don't call it dead, mark unknown
-      b.httpCode = 0; b.status = 'unknown';
-      log(`  ${b.url.slice(0,50)} → All proxies failed (marked unknown)`, 't-warn');
-    } else {
-      b.httpCode = status;
-      b.status = ok ? 'live' : status >= 400 ? 'dead' : 'changed';
-      log(`  ${b.url.slice(0,50)} → HTTP ${status} ${b.status.toUpperCase()}`, b.status==='live'?'t-success':b.status==='dead'?'t-error':'t-warn');
+    try {
+      const res=await fetch(corsProxy+encodeURIComponent(b.url),{method:'HEAD'});
+      b.httpCode=res.status;
+      b.status=res.ok?'live':res.status>=400?'dead':'changed';
+      b.lastChecked=ts();
+      log(`  ${b.url.slice(0,50)} → ${res.status} ${b.status}`,b.status==='live'?'t-success':'t-error');
+    } catch(e){
+      b.httpCode=0; b.status='dead'; b.lastChecked=ts();
+      log(`  ${b.url.slice(0,50)} → FAILED`,'t-error');
     }
-    // Real-time update: refresh table row and stats in-place without re-rendering
-    if(tbody) tbody.innerHTML=blmRenderRows();
-    if(statsEl) statsEl.textContent=blmStats();
-    await sleep(400);
+    await sleep(800);
   }
   BLM.running=false;
   const dead=BLM.items.filter(b=>b.status==='dead').length;
-  const unk=BLM.items.filter(b=>b.status==='unknown'&&b.lastChecked).length;
   if(dead>0) toast(dead+' dead URLs found!','e');
-  else if(unk>0) toast('All reachable URLs live ✓ ('+unk+' proxy failures)','w');
   else toast('All URLs live ✓','s');
   supaAutoSync('backlinks', BLM.items);
-  if(statsEl) statsEl.textContent=blmStats();
+  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
 }
 
 function blmExportCSV(){

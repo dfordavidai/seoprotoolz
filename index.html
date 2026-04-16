@@ -1792,16 +1792,10 @@ class VercelAPI {
   }
   getUser(){ return this.req('GET','/v2/user'); }
   async createDeployment(name,htmlContent){
-    // Compute SHA1 for Vercel file manifest
-    const encoder=new TextEncoder();
-    const data=encoder.encode(htmlContent);
-    const hashBuf=await crypto.subtle.digest('SHA-1',data);
-    const sha1=Array.from(new Uint8Array(hashBuf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-    const bytes2=new TextEncoder().encode(htmlContent);
-    const encoded=btoa(Array.from(bytes2).map(b=>String.fromCharCode(b)).join(''));
+    // Vercel v13 deployments API: files array takes {file, data} only — no sha, no encoding field
     return this.req('POST','/v13/deployments',{
       name:slug(name),
-      files:[{file:'index.html',data:encoded,encoding:'base64',sha:sha1}],
+      files:[{file:'index.html',data:htmlContent}],
       projectSettings:{framework:null},
       target:'production'
     });

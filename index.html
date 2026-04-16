@@ -949,10 +949,11 @@ tr:hover td{background:#c8d8f0}
       <div class="nav-group" id="nav-group-s1">
         <div class="nav-item active" data-page="dashboard"><span class="nav-icon">⚡</span>Dashboard</div>
         <div class="nav-item" data-page="setup"><span class="nav-icon">⚙</span>Setup / Connect</div>
+        <div class="nav-item" data-page="keywords"><span class="nav-icon">🔑</span>Keywords<span class="nav-badge" id="kw-badge">0</span></div>
         <div class="nav-item" data-page="campaign"><span class="nav-icon">▶</span>Run Campaign</div>
         <div class="nav-item" data-page="global_blast"><span class="nav-icon">🌍</span>Global Blast<span class="nav-badge red">HOT</span></div>
-        <div class="nav-item" data-page="keywords"><span class="nav-icon">🔑</span>Keywords<span class="nav-badge" id="kw-badge">0</span></div>
         <div class="nav-item" data-page="links"><span class="nav-icon">🔗</span>Links Manager<span class="nav-badge blue" id="link-badge">0</span></div>
+        <div class="nav-item" data-page="internal_links"><span class="nav-icon">🔗</span>Internal Link Builder</div>
         <div class="nav-item" data-page="export"><span class="nav-icon">📤</span>Export Center<span class="nav-badge" id="export-badge">0</span></div>
       </div>
 
@@ -971,7 +972,6 @@ tr:hover td{background:#c8d8f0}
         <div class="nav-item" data-page="comment_blaster"><span class="nav-icon">💬</span>Link Blaster<span class="nav-badge red">AUTO</span></div>
         <div class="nav-item" data-page="pdf_tools"><span class="nav-icon">📄</span>PDF SEO<span class="nav-badge red">HOT</span></div>
         <div class="nav-item" data-page="parasite_finder"><span class="nav-icon">🦠</span>Parasite Finder<span class="nav-badge red">NEW</span></div>
-        <div class="nav-item" data-page="internal_links"><span class="nav-icon">🔗</span>Internal Link Builder</div>
         <div class="nav-item" data-page="sitemap_generator"><span class="nav-icon">🗺</span>Sitemap Generator</div>
         <div class="nav-item" data-page="backlink_monitor"><span class="nav-icon">🔍</span>Backlink Monitor</div>
         <div class="nav-item" data-page="comment_sites" style="display:none"><span class="nav-icon">🌐</span>Comment Sites</div>
@@ -1083,6 +1083,7 @@ function saveState(){
       accounts:  S.accounts,
       keywords:  S.keywords,
       links:     S.links,
+      backlinkVault: S.backlinkVault,
       campaigns: S.campaigns.slice(-500),
       contentOverride: S.contentOverride,
     }));
@@ -1097,6 +1098,7 @@ function loadState(){
     if(Array.isArray(d.accounts)  && d.accounts.length)  S.accounts  = d.accounts;
     if(Array.isArray(d.keywords)  && d.keywords.length)  S.keywords  = d.keywords;
     if(Array.isArray(d.links)     && d.links.length)     S.links     = d.links;
+    if(Array.isArray(d.backlinkVault))                   S.backlinkVault = d.backlinkVault;
     if(Array.isArray(d.campaigns) && d.campaigns.length) S.campaigns = d.campaigns;
     if(d.contentOverride && typeof d.contentOverride === 'object')
       S.contentOverride = Object.assign({}, S.contentOverride, d.contentOverride);
@@ -1109,6 +1111,7 @@ const S = {
   accounts: [],
   keywords: [],
   links: [],
+  backlinkVault: [],   // [{id, url, anchor, notes}] — money page URLs embedded in auto-generated content
   campaigns: [],
   contentOverride: { title:'', body:'', tags:'', category:'', excerpt:'', slug:'', format:'markdown', visibility:'public' },
 };
@@ -1211,6 +1214,20 @@ function getAccount(pid){ return S.accounts.find(a=>a.platform===pid); }
 // ═══════════════════════════════════════════════════════════════
 // CONTENT GENERATION
 // ═══════════════════════════════════════════════════════════════
+// Returns the active backlink list for content generation.
+// Uses backlinkVault if it has entries, falls back to S.links.
+function getActiveBacklinks(){
+  if(S.backlinkVault && S.backlinkVault.length){
+    return S.backlinkVault.map(v=>({
+      id:   v.id,
+      label: v.anchor || v.url,
+      url:  v.url,
+      target:'both'
+    }));
+  }
+  return S.links || [];
+}
+
 function buildMdLinks(links){
   const f=(links||[]).filter(l=>l.target==='readme'||l.target==='both');
   if(!f.length) return '';
@@ -1310,7 +1327,9 @@ function generateMarkdown(kw, links, tplIdx, allKws, username, domain){
 // Supports: title, body, tags, category, excerpt, slug, format, visibility.
 // {keyword} / {kw} / {year} are substituted everywhere.
 function getEffectiveContent(kw, links, tplIdx, allKws, username, domain){
-  const autoBody  = generateMarkdown(kw, links, tplIdx, allKws, username, domain);
+  // Always prefer backlinkVault over whatever links array was passed in
+  const effectiveLinks = getActiveBacklinks();
+  const autoBody  = generateMarkdown(kw, effectiveLinks, tplIdx, allKws, username, domain);
   const autoTitle = kw + ': Complete Guide ' + year();
   const autoSlug  = slug(kw);
   const autoExcerpt = 'Comprehensive guide to ' + kw + '. Expert tips, best practices & resources for ' + year() + '.';
@@ -1484,7 +1503,7 @@ function contentFieldsPreview(prefix){
   const kw = (prefix==='blast'
     ? (document.getElementById('blast-kw')||{value:''}).value.trim()
     : null) || S.keywords[0] || 'your-keyword';
-  const ec = getEffectiveContent(kw, S.links, 0, S.keywords, 'user', 'site.com');
+  const ec = getEffectiveContent(kw, getActiveBacklinks(), 0, S.keywords, 'user', 'site.com');
   const set = (id, val) => { const el = document.getElementById(prefix+'-cf-preview-'+id); if(el) el.textContent = val || '—'; };
   set('kw',      '(keyword: "' + kw + '")');
   set('title',   ec.title);
@@ -1792,10 +1811,16 @@ class VercelAPI {
   }
   getUser(){ return this.req('GET','/v2/user'); }
   async createDeployment(name,htmlContent){
-    // Vercel v13 deployments API: files array takes {file, data} only — no sha, no encoding field
+    // Compute SHA1 for Vercel file manifest
+    const encoder=new TextEncoder();
+    const data=encoder.encode(htmlContent);
+    const hashBuf=await crypto.subtle.digest('SHA-1',data);
+    const sha1=Array.from(new Uint8Array(hashBuf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+    const bytes2=new TextEncoder().encode(htmlContent);
+    const encoded=btoa(Array.from(bytes2).map(b=>String.fromCharCode(b)).join(''));
     return this.req('POST','/v13/deployments',{
       name:slug(name),
-      files:[{file:'index.html',data:htmlContent}],
+      files:[{file:'index.html',data:encoded,encoding:'base64',sha:sha1}],
       projectSettings:{framework:null},
       target:'production'
     });
@@ -3964,6 +3989,40 @@ function renderLinks(el){
         <button class="btn btn-ghost" style="width:100%" onclick="lmImportCSV()">📥 Import from CSV</button>
       </div>
 
+      <!-- BACKLINK VAULT CARD -->
+      <div class="card" id="lm-vault-card">
+        <div class="card-title">🎯 Backlink Vault
+          <span class="badge badge-g" style="font-size:8px;margin-left:6px" id="vault-badge">${S.backlinkVault.length} URLs</span>
+          <span class="badge badge-b" style="font-size:8px;margin-left:4px" title="Auto-embedded in all generated content when vault is active">AUTO-INJECT</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted2);font-family:var(--mono);margin-bottom:10px;line-height:1.5">
+          Money-page URLs embedded as anchor links inside <strong>all auto-generated content</strong> (campaigns, global blast, content studio). These override S.links when set.
+        </div>
+
+        <!-- ADD FORM -->
+        <div class="grid2" style="gap:8px;margin-bottom:8px">
+          <div class="fg" style="margin:0"><label class="lbl">Target URL <span style="color:var(--accent2)">*</span></label>
+            <input type="url" id="vault-url" placeholder="https://yourmoney.com/page" /></div>
+          <div class="fg" style="margin:0"><label class="lbl">Anchor Text</label>
+            <input type="text" id="vault-anchor" placeholder="best creatine supplement" /></div>
+        </div>
+        <div class="fg" style="margin-bottom:8px"><label class="lbl">Notes / Context <span class="xs tm">(optional)</span></label>
+          <input type="text" id="vault-notes" placeholder="Homepage, tier-1 target, etc." /></div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <button class="btn btn-primary" style="flex:1" onclick="vaultAdd()">➕ Add to Vault</button>
+          <button class="btn btn-ghost btn-sm" onclick="vaultImportBulk()" title="Paste multiple URLs at once">📋 Bulk</button>
+        </div>
+
+        <!-- VAULT TABLE -->
+        <div id="vault-table-wrap" style="max-height:260px;overflow-y:auto"></div>
+
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn btn-ghost btn-xs" onclick="vaultClearAll()" style="color:var(--accent2)">🗑 Clear All</button>
+          <span style="flex:1"></span>
+          <span id="vault-status" style="font-size:9px;font-family:var(--mono);color:var(--muted2);align-self:center"></span>
+        </div>
+      </div>
+
       <!-- LOG CARD -->
       <div class="card">
         <div class="card-title">🖥 Activity Log</div>
@@ -4081,7 +4140,85 @@ function renderLinks(el){
   setTimeout(()=>{
     lmAuthToggle('api_key');
     lmUpdatePlatHint(document.getElementById('lm-add-plat')?.value||'wordpress_com');
+    vaultRender();
   },50);
+}
+
+// ─── BACKLINK VAULT ──────────────────────────────────────────────────────────
+function vaultRender(){
+  const wrap=document.getElementById('vault-table-wrap');
+  if(!wrap) return;
+  const badge=document.getElementById('vault-badge');
+  if(badge) badge.textContent=S.backlinkVault.length+' URLs';
+  const status=document.getElementById('vault-status');
+  if(status) status.textContent=S.backlinkVault.length
+    ? '✅ Active — embedded in all generated content'
+    : '⚠ Empty — add URLs to enable auto-injection';
+  if(!S.backlinkVault.length){
+    wrap.innerHTML='<div style="text-align:center;padding:24px 0;font-family:var(--mono);font-size:10px;color:var(--muted2)">No vault entries yet — add money-page URLs above</div>';
+    return;
+  }
+  wrap.innerHTML=`<table style="width:100%;border-collapse:collapse;font-size:10px">
+    <thead><tr style="border-bottom:1px solid var(--border)">
+      <th style="text-align:left;padding:4px 6px;color:var(--muted2);font-weight:600">URL</th>
+      <th style="text-align:left;padding:4px 6px;color:var(--muted2);font-weight:600">Anchor</th>
+      <th style="text-align:left;padding:4px 6px;color:var(--muted2);font-weight:600">Notes</th>
+      <th style="padding:4px 6px"></th>
+    </tr></thead>
+    <tbody>${S.backlinkVault.map(v=>`
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 6px;font-family:var(--mono);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          <a href="${esc(v.url)}" target="_blank" title="${esc(v.url)}" style="color:var(--accent)">${esc(v.url)}</a></td>
+        <td style="padding:5px 6px;font-family:var(--mono);color:var(--fg)">${esc(v.anchor||'<auto>')}</td>
+        <td style="padding:5px 6px;color:var(--muted2)">${esc(v.notes||'')}</td>
+        <td style="padding:5px 6px;text-align:right"><button class="btn btn-ghost btn-xs" style="color:var(--accent2)" onclick="vaultRemove('${v.id}')">✕</button></td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`;
+}
+
+function vaultAdd(){
+  const url=(document.getElementById('vault-url')?.value||'').trim();
+  const anchor=(document.getElementById('vault-anchor')?.value||'').trim();
+  const notes=(document.getElementById('vault-notes')?.value||'').trim();
+  if(!url){ toast('Enter a target URL','w'); return; }
+  if(S.backlinkVault.find(v=>v.url===url)){ toast('URL already in vault','w'); return; }
+  S.backlinkVault.push({id:uid(),url,anchor,notes});
+  saveState();
+  document.getElementById('vault-url').value='';
+  document.getElementById('vault-anchor').value='';
+  document.getElementById('vault-notes').value='';
+  vaultRender();
+  toast('Added to Backlink Vault ✅','s');
+}
+
+function vaultRemove(id){
+  S.backlinkVault=S.backlinkVault.filter(v=>v.id!==id);
+  saveState(); vaultRender();
+}
+
+function vaultClearAll(){
+  if(!confirm('Clear all '+S.backlinkVault.length+' vault entries?')) return;
+  S.backlinkVault=[]; saveState(); vaultRender();
+  toast('Vault cleared','w');
+}
+
+function vaultImportBulk(){
+  const raw=prompt('Paste URLs (one per line, optional: URL|anchor text|notes):');
+  if(!raw) return;
+  let added=0;
+  raw.split('\n').forEach(line=>{
+    line=line.trim(); if(!line) return;
+    const parts=line.split('|');
+    const url=parts[0].trim();
+    const anchor=(parts[1]||'').trim();
+    const notes=(parts[2]||'').trim();
+    if(!url||S.backlinkVault.find(v=>v.url===url)) return;
+    S.backlinkVault.push({id:uid(),url,anchor,notes});
+    added++;
+  });
+  saveState(); vaultRender();
+  toast('Added '+added+' URLs to vault','s');
 }
 
 // ─── SETUP ───────────────────────────────────────────────────
@@ -4298,6 +4435,17 @@ function renderCampaign(el){
     <strong>${esc(p.name)} posting method:</strong> ${esc(meta.hint||p.desc)}
   </div>
 
+  ${S.backlinkVault.length
+    ? `<div class="notice notice-info" style="margin-bottom:14px;border-color:var(--accent);background:rgba(0,200,100,0.07)">
+        🎯 <strong>Backlink Vault active</strong> — ${S.backlinkVault.length} money-page URL${S.backlinkVault.length>1?'s':''} will be auto-injected into all generated content.
+        <a href="#" onclick="event.preventDefault();renderPage('links')" style="color:var(--accent);margin-left:8px">Manage →</a>
+       </div>`
+    : `<div class="notice notice-warn" style="margin-bottom:14px">
+        ⚠ <strong>Backlink Vault empty</strong> — No money-page URLs set. Generated content won't contain backlinks to your targets.
+        <a href="#" onclick="event.preventDefault();renderPage('links')" style="color:var(--accent2);margin-left:8px">Add URLs →</a>
+       </div>`
+  }
+
   ${pid==='reddit'?`<div class="notice notice-warn">⚠ Reddit enforces strict rate limits and spam detection. Post only to relevant, active subreddits. Your account must have sufficient karma.</div>`:''}
   ${pid==='codepen'?`<div class="notice notice-info">ℹ CodePen has no public write API. After running, click each generated URL to open the editor with your content pre-loaded — then press Save.</div>`:''}
   ${pid==='issuu'?`<div class="notice notice-info">ℹ Issuu creates a publication draft via API. You must upload a PDF file through the Issuu dashboard to complete and publish each draft.</div>`:''}
@@ -4407,7 +4555,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   const p=getPlatform(pid);
   const sl=slug((extraVal||'seo')+'-'+kw);
   // Resolve all content fields once for this keyword
-  const _ec=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,p.domain);
+  const _ec=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,p.domain);
   const _tags=_ec.tags.split(',').map(t=>t.trim().toLowerCase()).filter(Boolean);
   const _category=_ec.category||'General';
   term.add(`[${idx+1}/${S.keywords.length}] ${p.icon} ${p.name}: "${kw}"`, 'info');
@@ -4419,15 +4567,15 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const api=new GitHubAPI(account.token);
     const repoName=slug((extraVal||'seo')+'-'+kw).slice(0,100)||'seo-page';
     const pageUrl='https://'+account.login+'.github.io/'+repoName+'/';
-    try{ await api.createRepo(repoName,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title); await sleep(1500); }
+    try{ await api.createRepo(repoName,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title); await sleep(1500); }
     catch(e){
       if(e.message.includes('already exists')||e.message.includes('422')||e.message.includes('name already exists')){
         term.add('  Repo exists — updating content','warn');
       } else throw e;
     }
     await sleep(1000);
-    const readme=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'github.io').body;
-    const html=generateHtmlPage(kw,account.login,repoName,S.links,'github');
+    const readme=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'github.io').body;
+    const html=generateHtmlPage(kw,account.login,repoName,getActiveBacklinks(),'github');
     const sitemap=`<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${pageUrl}</loc><lastmod>${new Date().toISOString().split('T')[0]}</lastmod><priority>1.0</priority></url></urlset>`;
     const existRM=await api.getFile(account.login,repoName,'README.md');
     await api.putFile(account.login,repoName,'README.md',readme,'SEO: update README',existRM&&existRM.sha||null);
@@ -4450,15 +4598,15 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const projSlug=slug((extraVal||'seo')+'-'+kw).slice(0,100)||'seo-page';
     const pageUrl='https://'+account.login+'.gitlab.io/'+projSlug+'/';
     let proj;
-    try{ proj=await api.createProject(projSlug,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title); await sleep(1500); }
+    try{ proj=await api.createProject(projSlug,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title); await sleep(1500); }
     catch(e){
       if(e.message&&(e.message.includes('already been taken')||e.message.includes('already exists'))){
         term.add('  Project exists — updating content','warn');
         proj={id:null,name:projSlug}; // will fail on file ops but user can handle
       } else throw e;
     }
-    const readme=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'gitlab.io').body;
-    const html=generateHtmlPage(kw,account.login,projSlug,S.links,'gitlab');
+    const readme=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'gitlab.io').body;
+    const html=generateHtmlPage(kw,account.login,projSlug,getActiveBacklinks(),'gitlab');
     // CI pipeline: copy index.html into /public, enable Pages artifact
     const ci=`image: alpine\npages:\n  stage: deploy\n  script:\n    - mkdir -p public\n    - cp index.html public/index.html\n  artifacts:\n    paths:\n      - public\n  rules:\n    - if: $CI_COMMIT_BRANCH == "main"\n`;
     if(proj.id){
@@ -4476,7 +4624,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='netlify'){
     // Netlify: create site → deploy with index.html file via SHA1 manifest
     const api=new NetlifyAPI(account.token);
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'netlify');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'netlify');
     const siteName=sl.slice(0,63).replace(/[^a-z0-9-]/g,'-').replace(/^-|-$/g,'')||'seo-site';
     term.add('  Creating Netlify site...','info');
     const site=await api.createSite(siteName);
@@ -4490,7 +4638,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='vercel'){
     // Vercel: create deployment with index.html encoded as base64
     const api=new VercelAPI(account.token);
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'vercel');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'vercel');
     const projName=sl.slice(0,52)||'seo-page';
     term.add('  Deploying to Vercel...','info');
     const dep=await api.createDeployment(projName,html);
@@ -4503,7 +4651,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const acctId=(document.getElementById('camp-cfacct')||{value:''}).value.trim()||account.extra||'';
     if(!acctId) throw new Error('Cloudflare Account ID is required — enter it in the Campaign Settings above.');
     const api=new CloudflareAPI(account.token,acctId);
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'cloudflare');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'cloudflare');
     const projName=sl.slice(0,28).replace(/[^a-z0-9-]/g,'-').replace(/^-|-$/g,'')||'seo-page';
     term.add('  Creating Cloudflare Pages project...','info');
     let proj;
@@ -4533,10 +4681,10 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     term.add('  Getting Medium user ID...','info');
     const u=await api.getUser();
     const userId=u.data&&u.data.id; if(!userId) throw new Error('Could not get Medium user ID — check your Integration Token');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'medium.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'medium.com').body;
     const tags=(extraVal||'seo,guide').split(',').map(t=>t.trim()).filter(Boolean).slice(0,5);
     term.add('  Publishing article...','info');
-    const res=await api.createPost(userId,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,content,tags);
+    const res=await api.createPost(userId,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content,tags);
     return (res.data&&res.data.url)||'https://medium.com/@'+account.login;
   }
 
@@ -4545,9 +4693,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const subdomain=extraVal||account.extra||account.login||'';
     if(!subdomain) throw new Error('Substack subdomain is required (e.g. "yourname" from yourname.substack.com)');
     const api=new SubstackAPI(account.token,subdomain);
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'substack');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'substack');
     term.add('  Publishing to Substack ('+subdomain+'.substack.com)...','info');
-    const res=await api.createPost(getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,html);
+    const res=await api.createPost(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,html);
     return res.url||res.canonical_url||'https://'+subdomain+'.substack.com';
   }
 
@@ -4558,10 +4706,10 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const sites=await api.getSites();
     const siteId=sites.sites&&sites.sites[0]&&sites.sites[0].ID;
     if(!siteId) throw new Error('No WordPress.com site found on this account');
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'wordpress');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'wordpress');
     const tags=(extraVal||'seo,guide').split(',').map(t=>t.trim()).filter(Boolean);
     term.add('  Publishing post...','info');
-    const res=await api.createPost(siteId,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,html,tags);
+    const res=await api.createPost(siteId,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,html,tags);
     return res.URL||res.link||'https://wordpress.com';
   }
 
@@ -4570,9 +4718,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const api=new BloggerAPI(account.token);
     const blogId=extraVal||account.extra||account.id||'';
     if(!blogId) throw new Error('Blogger Blog ID is required — find it in Blogger Settings → Blog ID');
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'blogger');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'blogger');
     term.add('  Publishing to Blogger...','info');
-    const res=await api.createPost(blogId,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,html,_tags.slice(0,5));
+    const res=await api.createPost(blogId,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,html,_tags.slice(0,5));
     return res.url||'https://blogger.com';
   }
 
@@ -4580,9 +4728,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     // Dev.to: publish a Markdown article via API key
     const api=new DevToAPI(account.token);
     const tags=_tags.slice(0,4);
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'dev.to').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'dev.to').body;
     term.add('  Publishing article to Dev.to...','info');
-    const art=await api.createArticle(getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,content,tags);
+    const art=await api.createArticle(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content,tags);
     return art.url||'https://dev.to/'+account.login;
   }
 
@@ -4596,9 +4744,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
                 : '';
     if(!pubId) throw new Error('Hashnode Publication ID is required and must be a valid 24-character ObjectId — find it in your Hashnode Dashboard → Publication Settings → General');
     const api=new HashnodeAPI(account.token);
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'hashnode.dev').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'hashnode.dev').body;
     term.add('  Publishing to Hashnode...','info');
-    const res=await api.createPost(pubId,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,content,_tags.slice(0,5));
+    const res=await api.createPost(pubId,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content,_tags.slice(0,5));
     return (res&&res.publishPost&&res.publishPost.post&&res.publishPost.post.url)||'https://hashnode.com/@'+account.login;
   }
 
@@ -4607,9 +4755,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const apiUrl=extraVal||account.extra||'';
     if(!apiUrl) throw new Error('Ghost Blog URL is required (e.g. https://yourblog.ghost.io)');
     const api=new GhostAPI(account.token,apiUrl);
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'ghost');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'ghost');
     term.add('  Publishing to Ghost ('+apiUrl+')...','info');
-    const res=await api.createPost(getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,html,_tags.slice(0,5));
+    const res=await api.createPost(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,html,_tags.slice(0,5));
     return (res.posts&&res.posts[0]&&res.posts[0].url)||apiUrl;
   }
 
@@ -4618,9 +4766,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const siteId=extraVal||account.extra||'';
     if(!siteId) throw new Error('Wix Site ID is required — find it in your Wix dashboard URL');
     const api=new WixAPI(account.token,siteId);
-    const htmlContent=generateHtmlPage(kw,account.login,sl,S.links,'wix');
+    const htmlContent=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'wix');
     term.add('  Publishing blog post to Wix...','info');
-    const res=await api.createPost(getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,htmlContent,_tags.slice(0,5));
+    const res=await api.createPost(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,htmlContent,_tags.slice(0,5));
     return (res.post&&res.post.url)||'https://'+account.login+'.wixsite.com';
   }
 
@@ -4628,7 +4776,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     // Tumblr: create a post using OAuth Bearer Token + blog identifier
     const blogId=(extraVal||account.extra||account.login+'.tumblr.com').replace('https://','');
     const api=new TumblrAPI(account.token,blogId);
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'tumblr.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'tumblr.com').body;
     term.add('  Posting to Tumblr blog: '+blogId,'info');
     const post=await api.createPost(blogId,kw,content,_tags.slice(0,5));
     const postId=post.response&&post.response.id||post.id;
@@ -4641,9 +4789,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     // Reddit: submit a self (text) post to the specified subreddit
     const api=new RedditAPI(account.token);
     const subreddit=(extraVal||account.extra||_category||'entrepreneur').replace(/^r\//,'');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'reddit.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'reddit.com').body;
     term.add('  Submitting to r/'+subreddit+'...','info');
-    const res=await api.submit(subreddit,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,content);
+    const res=await api.submit(subreddit,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content);
     const postUrl=res.json&&res.json.data&&res.json.data.url;
     return postUrl||'https://reddit.com/r/'+subreddit;
   }
@@ -4655,19 +4803,19 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const parentId=(extraVal||account.extra||'').replace(/-/g,'');
     if(!parentId) throw new Error('Notion Parent Page ID is required — get it from the page URL (32-char hex string)');
     const api=new NotionAPI(account.token);
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'notion.site').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'notion.site').body;
     term.add('  Creating Notion page...','info');
-    const page=await api.createPage(parentId,getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,content);
+    const page=await api.createPage(parentId,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content);
     return page.url||'https://notion.so/'+account.login;
   }
 
   if(pid==='telegraph'){
     // Telegraph: create an instant page (no account required beyond access token)
     const api=new TelegraphAPI(account.token);
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'telegra.ph').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'telegra.ph').body;
     const authorName=extraVal||account.login||'';
     term.add('  Creating Telegra.ph page...','info');
-    const page=await api.createPage(getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,content,authorName);
+    const page=await api.createPage(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content,authorName);
     return 'https://telegra.ph/'+page.path;
   }
 
@@ -4675,9 +4823,9 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
 
   if(pid==='codepen'){
     // CodePen: generate a prefill URL — no API, user must click and save
-    const html=generateHtmlPage(kw,account.login,sl,S.links,'codepen');
+    const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'codepen');
     const css=`body{font-family:system-ui,sans-serif;max-width:900px;margin:0 auto;padding:24px;background:#f8fafc;color:#1e293b}h1,h2,h3{color:#1e1b4b}a{color:#4f46e5}section{background:white;padding:20px;margin:16px 0;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1)}`;
-    const data=JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,html,css,tags:_tags.slice(0,5),editors:'110'});
+    const data=JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,html,css,tags:_tags.slice(0,5),editors:'110'});
     const penUrl='https://codepen.io/pen/define?data='+encodeURIComponent(data);
     term.add('  ℹ CodePen prefill URL generated — click to open editor and save','warn');
     return penUrl;
@@ -4687,16 +4835,16 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
 
   if(pid==='issuu'){
     const api=new IssuuAPI(account.token);
-    const desc=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'issuu.com').body.slice(0,500);
+    const desc=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'issuu.com').body.slice(0,500);
     term.add('  Creating Issuu draft...','info');
-    const draft=await api.createDraft(getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,desc);
+    const draft=await api.createDraft(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,desc);
     return draft.publicUrl||draft.link||'https://issuu.com/'+account.login;
   }
 
   // ── PASTE / NO-LOGIN PLATFORMS ─────────────────────────────────
 
   if(pid==='bitbin'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','bitbin.it').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','bitbin.it').body;
     const r=await pasteProxyFetch('https://bitbin.it/api/',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       body:new URLSearchParams({content,language:'text',expire:'never'}).toString()});
@@ -4708,10 +4856,10 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='pastelink'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','pastelink.net').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastelink.net').body;
     const r=await pasteProxyFetch('https://pastelink.net/api/paste',{method:'POST',
       contentType:'application/json',asJson:true,
-      body:JSON.stringify({content,title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title})});
+      body:JSON.stringify({content,title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title})});
     if(!r.ok&&!r.text) throw new Error('Pastelink: '+r.error);
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
     const pasteId=d.paste_key||d.id||d.link||d.slug;
@@ -4720,7 +4868,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='ideone'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','ideone.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','ideone.com').body;
     const r=await pasteProxyFetch('https://ideone.com/api/1/service/ideone/createSubmission',{method:'POST',
       contentType:'application/json',asJson:true,
       body:JSON.stringify({user:'guest',pass:'guest',sourceCode:content,language:43,input:'',run:false,private:false,stdRecv:false}, term)});
@@ -4732,10 +4880,10 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='controlc'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','controlc.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','controlc.com').body;
     const r=await pasteProxyFetch('https://controlc.com/index.php',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
-      body:new URLSearchParams({paste_data:content,paste_title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,expire:'0',submit:'Submit'}).toString()});
+      body:new URLSearchParams({paste_data:content,paste_title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,expire:'0',submit:'Submit'}).toString()});
     if(r.redirected && r.text && r.text.includes('controlc.com/')){
       const mu=r.text.match(/controlc\.com\/([a-f0-9]+)/i); if(mu) return 'https://controlc.com/'+mu[1];
     }
@@ -4745,7 +4893,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='rentry'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','rentry.co').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.co').body;
     const editCode=extraVal||Math.random().toString(36).slice(2,10);
     term.add('  Fetching CSRF from rentry.co...','info');
     const csrf_r=await pasteProxyFetch('https://rentry.co/', {}, term);
@@ -4764,7 +4912,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   // ── NEW PASTE PLATFORMS ────────────────────────────────────────
 
   if(pid==='rentryorg'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','rentry.org').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.org').body;
     const editCode=extraVal||Math.random().toString(36).slice(2,10);
     term.add('  Fetching CSRF from rentry.org...','info');
     const csrf_r2=await pasteProxyFetch('https://rentry.org/', {}, term);
@@ -4783,14 +4931,14 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='pastebin'){
     const apiKey=extraVal||account.extra||account.token||'';
     if(!apiKey) throw new Error('Pastebin: API key required — get it free at pastebin.com/doc_api');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','pastebin.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastebin.com').body;
     term.add('  Submitting paste to Pastebin...','info');
     const r=await pasteProxyFetch('https://pastebin.com/api/api_post.php',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       body:new URLSearchParams({
         api_dev_key:apiKey,
         api_paste_code:content,
-        api_paste_name:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,
+        api_paste_name:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
         api_paste_expire_date:'N',
         api_paste_format:'markdown',
         api_paste_private:'0',
@@ -4802,7 +4950,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='dpaste'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','dpaste.org').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','dpaste.org').body;
     term.add('  Submitting paste to dpaste.org...','info');
     const r=await pasteProxyFetch('https://dpaste.org/api/',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
@@ -4813,7 +4961,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='hastebin'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','hastebin.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','hastebin.com').body;
     term.add('  Submitting paste to Hastebin...','info');
     const r=await pasteProxyFetch('https://hastebin.com/documents',{method:'POST',
       contentType:'text/plain',body:content}, term);
@@ -4823,11 +4971,11 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='writeas'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','write.as').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','write.as').body;
     term.add('  Publishing post to Write.as...','info');
     const r=await pasteProxyFetch('https://write.as/api/posts',{method:'POST',
       contentType:'application/json',asJson:true,
-      body:JSON.stringify({body:content,title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,font:'serif',lang:'en'})});
+      body:JSON.stringify({body:content,title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,font:'serif',lang:'en'})});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
     if(!d.data||!d.data.slug) throw new Error('Write.as: '+(r.error||r.text.slice(0,100)));
     return 'https://write.as/'+d.data.slug;
@@ -4836,14 +4984,14 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='pastee'){
     const apiKey=extraVal||account.extra||account.token||'';
     if(!apiKey) throw new Error('Paste.ee: API key required — free at paste.ee/account/api');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','paste.ee').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','paste.ee').body;
     term.add('  Submitting paste to Paste.ee...','info');
     const r=await pasteProxyFetch('https://paste.ee/api',{method:'POST',
       contentType:'application/json',asJson:true,
       extraHeaders:{'X-Auth-Token':apiKey},
       body:JSON.stringify({
         key:'public',
-        description:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,
+        description:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
         sections:[{name:kw,syntax:'text',contents:content}]
       })});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
@@ -4852,7 +5000,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='justpaste'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','justpaste.it').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','justpaste.it').body;
     term.add('  Fetching CSRF from JustPaste.it...','info');
     const homeR=await pasteProxyFetch('https://justpaste.it/', {}, term);
     const homeText=homeR.text||'';
@@ -4863,7 +5011,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const postR=await pasteProxyFetch('https://justpaste.it/api/v1/articles',{method:'POST',
       contentType:'application/json',asJson:true,
       extraHeaders:{'X-CSRF-Token':csrf2},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,body:content,visibility:'public'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,visibility:'public'})});
     let postD={}; try{postD=JSON.parse(postR.text);}catch(e){}
     const alias=postD.alias||postD.id||postD.articleId;
     if(!alias) throw new Error('JustPaste.it: '+(postR.error||postR.text.slice(0,120)));
@@ -4871,7 +5019,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='zerobin'){
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','0bin.net').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','0bin.net').body;
     term.add('  Submitting paste to 0bin.net...','info');
     const r=await pasteProxyFetch('https://0bin.net/paste',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
@@ -4885,7 +5033,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     // GitHub Gist — reuse existing GitHub account token
     const ghAccount=S.accounts.find(a=>a.platform==='github');
     if(!ghAccount) throw new Error('GitHub Gist: Connect a GitHub account first in Setup → GitHub Pages');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,ghAccount.login,'gist.github.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,ghAccount.login,'gist.github.com').body;
     const desc=(extraVal||'SEO guide')+' — '+kw;
     term.add('  Creating public Gist as '+ghAccount.login+'...','info');
     const r=await smartFetch('https://api.github.com/gists',{method:'POST',
@@ -4903,13 +5051,13 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='hackmd'){
     const apiToken=extraVal||account.extra||account.token||'';
     if(!apiToken) throw new Error('HackMD: API token required — create one in HackMD Settings → API');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,'anon','hackmd.io').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','hackmd.io').body;
     term.add('  Creating HackMD note...','info');
     const r=await pasteProxyFetch('https://api.hackmd.io/v1/notes',{method:'POST',
       contentType:'application/json',asJson:true,
       extraHeaders:{'Authorization':'Bearer '+apiToken},
       body:JSON.stringify({
-        title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,
+        title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
         content:content,
         readPermission:'guest',
         writePermission:'owner',
@@ -4926,7 +5074,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     // TechPlanet.today — login then POST article via form
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('TechPlanet: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'techplanet.today').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'techplanet.today').body;
     // Login
     const loginR=await smartFetch('https://techplanet.today/api/login',{method:'POST',
       headers:{'Content-Type':'application/json','Accept':'application/json'},
@@ -4937,7 +5085,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     // Post
     const postR=await smartFetch('https://techplanet.today/api/posts',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+token2,'Accept':'application/json'},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,body:content,status:'published',type:'post'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,status:'published',type:'post'})});
     const postD=await postR.json();
     const postSlug=postD.slug||postD.data&&postD.data.slug;
     return postSlug?'https://techplanet.today/post/'+postSlug:'https://techplanet.today';
@@ -4947,7 +5095,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     // Click4R — login then create post
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('Click4R: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'click4r.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'click4r.com').body;
     const loginR=await smartFetch('https://www.click4r.com/api/auth/login',{method:'POST',
       headers:{'Content-Type':'application/json','Accept':'application/json'},
       body:JSON.stringify({username:account.login,password})});
@@ -4956,7 +5104,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!tok) throw new Error('Click4R login failed: '+(loginD.message||'check credentials'));
     const postR=await smartFetch('https://www.click4r.com/api/posts',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,content,status:'published'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content,status:'published'})});
     const postD=await postR.json();
     const pid2=postD.id||postD.data&&postD.data.id;
     return pid2?'https://www.click4r.com/posts/g/'+pid2+'/':'https://www.click4r.com';
@@ -4965,7 +5113,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='writeonwall'){
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('WriteOnWall: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'writeonwall.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'writeonwall.com').body;
     const loginR=await smartFetch('https://writeonwall.com/api/login',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:account.login,password})});
@@ -4974,7 +5122,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!tok) throw new Error('WriteOnWall login failed');
     const postR=await smartFetch('https://writeonwall.com/api/questions',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,body:content,type:'question'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,type:'question'})});
     const postD=await postR.json();
     const qSlug=postD.slug||postD.id;
     return qSlug?'https://writeonwall.com/question/'+qSlug+'/':'https://writeonwall.com';
@@ -4983,7 +5131,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='snaplant'){
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('Snaplant: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'snaplant.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'snaplant.com').body;
     const loginR=await smartFetch('http://snaplant.com/api/auth/login',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:account.login,password})});
@@ -4992,7 +5140,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!tok) throw new Error('Snaplant login failed');
     const postR=await smartFetch('http://snaplant.com/api/questions',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,body:content})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content})});
     const postD=await postR.json();
     const qSlug=postD.slug||postD.id;
     return qSlug?'http://snaplant.com/question/'+qSlug+'/':'http://snaplant.com';
@@ -5001,7 +5149,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='theprose'){
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('TheProse: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'theprose.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'theprose.com').body;
     const loginR=await smartFetch('https://www.theprose.com/api/v1/session',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({username:account.login,password})});
@@ -5010,7 +5158,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!tok) throw new Error('TheProse login failed');
     const postR=await smartFetch('https://www.theprose.com/api/v1/posts',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,body:content,publish:true})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,publish:true})});
     const postD=await postR.json();
     const postId=postD.id||postD.post&&postD.post.id;
     return postId?'https://www.theprose.com/post/'+postId+'/':'https://www.theprose.com';
@@ -5019,7 +5167,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='onfeetnation'){
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('OnFeetNation: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'onfeetnation.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'onfeetnation.com').body;
     // Login via Ning-style form
     const loginR=await smartFetch('https://www.onfeetnation.com/api/v1/session',{method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -5029,7 +5177,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!tok) throw new Error('OnFeetNation login failed — check username/password');
     const postR=await smartFetch('https://www.onfeetnation.com/api/v1/albums',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,description:content.slice(0,1000),privacy:'public'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,description:content.slice(0,1000),privacy:'public'})});
     const postD=await postR.json();
     const albumId=postD.id||postD.album&&postD.album.id;
     return albumId?'https://www.onfeetnation.com/photo/albums/'+albumId:'https://www.onfeetnation.com';
@@ -5038,7 +5186,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='caribbeanfever'){
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('CaribbeanFever: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'caribbeanfever.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'caribbeanfever.com').body;
     const loginR=await smartFetch('https://caribbeanfever.com/api/v1/session',{method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({email:account.login,password})});
@@ -5047,7 +5195,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!tok) throw new Error('CaribbeanFever login failed — check username/password');
     const postR=await smartFetch('https://caribbeanfever.com/api/v1/albums',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,description:content.slice(0,1000),privacy:'public'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,description:content.slice(0,1000),privacy:'public'})});
     const postD=await postR.json();
     const albumId=postD.id||postD.album&&postD.album.id;
     return albumId?'https://caribbeanfever.com/photo/albums/'+albumId:'https://caribbeanfever.com';
@@ -5056,7 +5204,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='taylorhicks'){
     const password=extraVal||account.extra||'';
     if(!password) throw new Error('TaylorHicks Ning: password required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'taylorhicks.ning.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'taylorhicks.ning.com').body;
     // Ning REST API
     const loginR=await smartFetch('https://external.ningapis.com/xn/rest/taylorhicks/1.0/Token',{method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
@@ -5066,7 +5214,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!tok) throw new Error('TaylorHicks Ning login failed');
     const postR=await smartFetch('https://external.ningapis.com/xn/rest/taylorhicks/1.0/BlogPost',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,description:content,visibility:'public'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,description:content,visibility:'public'})});
     const postD=await postR.json();
     const postId=postD.id||postD.blogPost&&postD.blogPost.id;
     return postId?'https://taylorhicks.ning.com/forum/topics/'+postId:'https://taylorhicks.ning.com';
@@ -5075,10 +5223,10 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='vingle'){
     const interestId=extraVal||account.extra||'';
     if(!interestId) throw new Error('Vingle: Interest ID required');
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'vingle.net').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'vingle.net').body;
     const postR=await smartFetch('https://www.vingle.net/api/cards',{method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+account.token},
-      body:JSON.stringify({title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,body:content,interest_id:interestId,visibility:'public'})});
+      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,interest_id:interestId,visibility:'public'})});
     const postD=await postR.json();
     const cardId=postD.id||postD.card&&postD.card.id;
     return cardId?'https://www.vingle.net/posts/'+cardId:'https://www.vingle.net';
@@ -5086,11 +5234,11 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
 
   if(pid==='deviantart'){
     // DeviantArt: publish journal via OAuth2 token
-    const content=getEffectiveContent(kw,S.links,idx,S.keywords,account.login,'deviantart.com').body;
+    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'deviantart.com').body;
     const r=await smartFetch('https://www.deviantart.com/api/v1/oauth2/stash/publish',{method:'POST',
       headers:{'Authorization':'Bearer '+account.token,'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({
-        title:getEffectiveContent(kw,S.links,idx,S.keywords,'','').title,
+        title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
         artist_comments:content.slice(0,10000),
         is_mature:'false',
         agree_submission:'true',
@@ -5204,6 +5352,16 @@ function renderGlobalBlast(el){
   <div class="page-title" style="color:var(--accent)">🌍 Global Blast</div>
   <div class="page-sub">// post to ALL connected platforms simultaneously — one form, maximum reach</div>
   <div class="notice notice-success">Global Blast publishes all your keywords across every connected platform in a single run. Connect accounts in Setup first.</div>
+  ${S.backlinkVault.length
+    ? `<div class="notice notice-info" style="border-color:var(--accent);background:rgba(0,200,100,0.07)">
+        🎯 <strong>Backlink Vault active</strong> — ${S.backlinkVault.length} money-page URL${S.backlinkVault.length>1?'s':''} auto-injected into all generated content.
+        <a href="#" onclick="event.preventDefault();renderPage('links')" style="color:var(--accent);margin-left:8px">Manage →</a>
+       </div>`
+    : `<div class="notice notice-warn">
+        ⚠ <strong>Backlink Vault empty</strong> — Generated content won't contain backlinks to your money pages.
+        <a href="#" onclick="event.preventDefault();renderPage('links')" style="color:var(--accent2);margin-left:8px">Add URLs in Links Manager →</a>
+       </div>`
+  }
   <div class="grid5" style="margin-bottom:18px">
     ${statBox(connected.length,'Connected','g')}${statBox(_blastSelectedPlatforms.length,'Selected','b')}
     ${statBox(S.keywords.length,'Keywords','y')}${statBox(successCount,'Succeeded','g')}
@@ -5910,7 +6068,7 @@ function generateStudioContent(){
   const key=settingGet('groq_api_key');
   if(!key){
     // Fallback: template-based
-    for(let i=0;i<count;i++) _studioArticles.push(generateMarkdown(kw,S.links,i,S.keywords,'user','site.com'));
+    for(let i=0;i<count;i++) _studioArticles.push(generateMarkdown(kw,getActiveBacklinks(),i,S.keywords,'user','site.com'));
     _studioActiveIdx=0; renderStudioOutput(kw);
     if(btn){ btn.disabled=false; btn.textContent='⚡ Generate Variations'; }
     toast('No Groq key — used template fallback. Add key in Settings for AI content.','w');
@@ -5927,7 +6085,7 @@ function generateStudioContent(){
   Promise.allSettled(tasks).then(results=>{
     results.forEach((r,i)=>{
       if(r.status==='fulfilled'&&r.value) _studioArticles.push(r.value);
-      else _studioArticles.push(generateMarkdown(kw,S.links,i,S.keywords,'user','site.com'));
+      else _studioArticles.push(generateMarkdown(kw,getActiveBacklinks(),i,S.keywords,'user','site.com'));
     });
     _studioActiveIdx=0; renderStudioOutput(kw);
     if(btn){ btn.disabled=false; btn.textContent='⚡ Generate Variations'; }
@@ -19679,7 +19837,32 @@ function renderInternalLinks(el){
   const liveUrls=S.campaigns.filter(c=>c.status==='success'&&c.url);
   el.innerHTML=`
   <div class="page-title">🔗 Internal Link Builder</div>
-  <div class="page-sub">// Build topical clusters by cross-linking your parasite pages to each other</div>
+  <div class="page-sub">// Build topical clusters · cross-link parasite pages · manage campaign link injection</div>
+
+  <!-- VAULT STATUS BANNER -->
+  <div class="card" style="padding:12px 16px;margin-bottom:0">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span style="font-size:13px">🎯</span>
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:11px;font-weight:700;color:var(--fg);margin-bottom:2px">Backlink Vault
+          ${S.backlinkVault.length
+            ? `<span class="badge badge-g" style="font-size:8px;margin-left:6px">${S.backlinkVault.length} URLs ACTIVE</span>`
+            : `<span class="badge badge-y" style="font-size:8px;margin-left:6px">EMPTY</span>`}
+        </div>
+        <div style="font-size:9px;color:var(--muted2);font-family:var(--mono)">
+          ${S.backlinkVault.length
+            ? 'Vault URLs are being auto-injected into all generated content. <a href="#" onclick="event.preventDefault();renderPage(\'links\')" style="color:var(--accent)">Manage vault →</a>'
+            : 'No money-page URLs set. <a href="#" onclick="event.preventDefault();renderPage(\'links\')" style="color:var(--accent)">Add URLs in Links Manager → Backlink Vault →</a>'}
+        </div>
+      </div>
+      ${S.backlinkVault.length ? `
+      <div style="font-size:9px;font-family:var(--mono);max-width:220px;background:var(--term-bg);padding:6px 8px;border-radius:4px;border:1px solid var(--border)">
+        ${S.backlinkVault.slice(0,3).map(v=>`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--term-green)">↳ ${esc(v.url)}</div>`).join('')}
+        ${S.backlinkVault.length>3?`<div style="color:var(--muted2)">+${S.backlinkVault.length-3} more…</div>`:''}
+      </div>` : ''}
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-title">Live URL Cluster <span style="font-size:10px;opacity:.7">${liveUrls.length} live URLs available</span></div>
     ${!liveUrls.length?'<div class="notice notice-info">No live URLs found. Run a campaign to generate parasite pages first.</div>':''}

@@ -19133,7 +19133,12 @@ function rtExportCSV(){
 const BLM = { items:[], running:false };
 
 function renderBacklinkMonitor(el){
-  if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
+  if(!el) el=document.getElementById('page-backlink_monitor');
+  if(!el) return;
+  // Preserve terminal content across re-renders so logs stay visible
+  const prevTermHTML = document.getElementById('blm-terminal')?.innerHTML||'';
+  const prevProgWidth = document.getElementById('blm-prog')?.style.width||'0%';
+  const prevInput = document.getElementById('blm-input')?.value||'';
   el.innerHTML=`
   <div class="page-title">🔍 Backlink Monitor</div>
   <div class="page-sub">// Monitor your live parasite URLs — detect when pages go 404, get de-indexed, or change anchor text</div>
@@ -19163,6 +19168,13 @@ function renderBacklinkMonitor(el){
       </table>
     </div>
   </div>`;
+  // Restore terminal logs, progress bar, and textarea input across re-renders
+  const term=document.getElementById('blm-terminal');
+  const prog=document.getElementById('blm-prog');
+  const inp=document.getElementById('blm-input');
+  if(term && prevTermHTML) term.innerHTML=prevTermHTML;
+  if(prog && prevProgWidth) prog.style.width=prevProgWidth;
+  if(inp && prevInput) inp.value=prevInput;
 }
 
 function blmStats(){
@@ -19192,7 +19204,10 @@ function blmAddUrls(){
   lines.forEach(url=>{ if(url.startsWith('http')&&!BLM.items.find(b=>b.url===url)){ BLM.items.push({url,status:'unknown',httpCode:null,anchor:null,platform:null,lastChecked:null}); added++; }});
   document.getElementById('blm-input').value='';
   toast(added+' URLs added','s');
-  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
 }
 
 function blmImport(){
@@ -19200,18 +19215,39 @@ function blmImport(){
   let added=0;
   live.forEach(c=>{ if(!BLM.items.find(b=>b.url===c.url)){ BLM.items.push({url:c.url,status:'unknown',httpCode:null,anchor:c.keyword,platform:c.platform,lastChecked:null}); added++; }});
   toast(added+' URLs imported from campaigns','s');
-  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
 }
 
-function blmRemove(i){ BLM.items.splice(i,1); renderBacklinkMonitor(document.getElementById('page-backlink_monitor')); }
-function blmClearDead(){ BLM.items=BLM.items.filter(b=>b.status!=='dead'); renderBacklinkMonitor(document.getElementById('page-backlink_monitor')); toast('Dead URLs removed','s'); }
+function blmRemove(i){
+  BLM.items.splice(i,1);
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
+}
+function blmClearDead(){
+  BLM.items=BLM.items.filter(b=>b.status!=='dead');
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
+  if(tbody) tbody.innerHTML=blmRenderRows();
+  if(statsEl) statsEl.textContent=blmStats();
+  toast('Dead URLs removed','s');
+}
 
 async function blmCheckAll(){
   if(BLM.running){ toast('Already running','w'); return; }
   if(!BLM.items.length){ toast('Add URLs first','w'); return; }
   BLM.running=true;
+  // Ensure the page is rendered before we start updating it in-place
+  const pageEl=document.getElementById('page-backlink_monitor');
+  renderBacklinkMonitor(pageEl);
   const term=document.getElementById('blm-terminal');
   const prog=document.getElementById('blm-prog');
+  const tbody=document.getElementById('blm-tbody');
+  const statsEl=document.getElementById('blm-stats');
   function log(msg,cls='t-info'){ if(term) term.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${msg}</span></div>`; if(term) term.scrollTop=9999; }
   log('Checking '+BLM.items.length+' URLs...');
   const corsProxy=settingGet('corsProxy')||'https://corsproxy.io/?';
@@ -19228,6 +19264,9 @@ async function blmCheckAll(){
       b.httpCode=0; b.status='dead'; b.lastChecked=ts();
       log(`  ${b.url.slice(0,50)} → FAILED`,'t-error');
     }
+    // Real-time update: refresh table row and stats in-place without re-rendering
+    if(tbody) tbody.innerHTML=blmRenderRows();
+    if(statsEl) statsEl.textContent=blmStats();
     await sleep(800);
   }
   BLM.running=false;
@@ -19235,7 +19274,7 @@ async function blmCheckAll(){
   if(dead>0) toast(dead+' dead URLs found!','e');
   else toast('All URLs live ✓','s');
   supaAutoSync('backlinks', BLM.items);
-  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
+  if(statsEl) statsEl.textContent=blmStats();
 }
 
 function blmExportCSV(){

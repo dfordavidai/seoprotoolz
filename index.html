@@ -19189,7 +19189,7 @@ function blmRenderRows(){
   return BLM.items.map((b,i)=>`
     <tr>
       <td><a href="${esc(b.url)}" target="_blank" class="ta mono xs" style="text-decoration:none;max-width:220px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.url.replace('https://','').slice(0,50))}</a></td>
-      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':'? UNKNOWN'}</span></td>
+      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':b.lastChecked?'~ PROXY ERR':'? UNKNOWN'}</span></td>
       <td class="mono xs" style="color:${b.httpCode>=400?'#cc0000':b.httpCode>=300?'#997700':'#006600'}">${b.httpCode||'—'}</td>
       <td class="mono xs">${esc(b.anchor||'—')}</td>
       <td class="mono xs">${esc(b.platform||'—')}</td>
@@ -19237,6 +19237,33 @@ function blmClearDead(){
   toast('Dead URLs removed','s');
 }
 
+// ── Robust URL checker: tries multiple CORS proxies, falls back HEAD→GET ──
+async function blmFetchUrl(url){
+  const PROXIES = [
+    u => 'https://corsproxy.io/?' + encodeURIComponent(u),
+    u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+    u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+  ];
+  const TIMEOUT = 10000;
+  const signal = () => AbortSignal.timeout ? AbortSignal.timeout(TIMEOUT) : (() => { const c=new AbortController(); setTimeout(()=>c.abort(),TIMEOUT); return c.signal; })();
+
+  for(const proxyFn of PROXIES){
+    // Try HEAD first (fast, low-bandwidth)
+    for(const method of ['HEAD','GET']){
+      try{
+        const res = await fetch(proxyFn(url), { method, signal: signal() });
+        // allorigins wraps everything in 200 — check for explicit 404/5xx only
+        if(res.status === 0) continue; // network-level fail, try next
+        return { ok: res.ok || res.status < 400, status: res.status };
+      } catch(e){
+        // timeout or network error — try next proxy/method
+      }
+    }
+  }
+  // All proxies failed — mark as unknown rather than dead to avoid false positives
+  return { ok: null, status: 0 };
+}
+
 async function blmCheckAll(){
   if(BLM.running){ toast('Already running','w'); return; }
   if(!BLM.items.length){ toast('Add URLs first','w'); return; }
@@ -19250,28 +19277,31 @@ async function blmCheckAll(){
   const statsEl=document.getElementById('blm-stats');
   function log(msg,cls='t-info'){ if(term) term.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${msg}</span></div>`; if(term) term.scrollTop=9999; }
   log('Checking '+BLM.items.length+' URLs...');
-  const corsProxy=settingGet('corsProxy')||'https://corsproxy.io/?';
   for(let i=0;i<BLM.items.length;i++){
     const b=BLM.items[i];
     if(prog) prog.style.width=((i+1)/BLM.items.length*100)+'%';
-    try {
-      const res=await fetch(corsProxy+encodeURIComponent(b.url),{method:'HEAD'});
-      b.httpCode=res.status;
-      b.status=res.ok?'live':res.status>=400?'dead':'changed';
-      b.lastChecked=ts();
-      log(`  ${b.url.slice(0,50)} → ${res.status} ${b.status}`,b.status==='live'?'t-success':'t-error');
-    } catch(e){
-      b.httpCode=0; b.status='dead'; b.lastChecked=ts();
-      log(`  ${b.url.slice(0,50)} → FAILED`,'t-error');
+    log(`  Checking ${b.url.slice(0,50)}...`, 't-info');
+    const {ok, status} = await blmFetchUrl(b.url);
+    b.lastChecked = ts();
+    if(ok === null){
+      // All proxies failed — don't call it dead, mark unknown
+      b.httpCode = 0; b.status = 'unknown';
+      log(`  ${b.url.slice(0,50)} → All proxies failed (marked unknown)`, 't-warn');
+    } else {
+      b.httpCode = status;
+      b.status = ok ? 'live' : status >= 400 ? 'dead' : 'changed';
+      log(`  ${b.url.slice(0,50)} → HTTP ${status} ${b.status.toUpperCase()}`, b.status==='live'?'t-success':b.status==='dead'?'t-error':'t-warn');
     }
     // Real-time update: refresh table row and stats in-place without re-rendering
     if(tbody) tbody.innerHTML=blmRenderRows();
     if(statsEl) statsEl.textContent=blmStats();
-    await sleep(800);
+    await sleep(400);
   }
   BLM.running=false;
   const dead=BLM.items.filter(b=>b.status==='dead').length;
+  const unk=BLM.items.filter(b=>b.status==='unknown'&&b.lastChecked).length;
   if(dead>0) toast(dead+' dead URLs found!','e');
+  else if(unk>0) toast('All reachable URLs live ✓ ('+unk+' proxy failures)','w');
   else toast('All URLs live ✓','s');
   supaAutoSync('backlinks', BLM.items);
   if(statsEl) statsEl.textContent=blmStats();

@@ -19,14 +19,19 @@ export default async function handler(req, res) {
     targetUrl   = b.url;
     method      = (b.method  || 'GET').toUpperCase();
     reqHeaders  = b.headers  || {};
-    reqBody     = b.body     || null;
-    timeoutSec  = Number(b.timeout) || 20;
+    // Accept body as object OR pre-serialized JSON string — normalize to object
+    if (b.body && typeof b.body === 'string') {
+      try { reqBody = JSON.parse(b.body); } catch (_) { reqBody = b.body; }
+    } else {
+      reqBody = b.body || null;
+    }
+    timeoutSec  = Number(b.timeout) || 55;
   } else if (req.method === 'GET') {
     targetUrl   = req.query?.url;
     method      = 'GET';
     reqHeaders  = {};
     reqBody     = null;
-    timeoutSec  = 20;
+    timeoutSec  = 55;
   } else {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }

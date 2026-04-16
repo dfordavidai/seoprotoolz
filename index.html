@@ -1,3 +1,6 @@
+
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1662,9 +1665,10 @@ async function smartFetch(url, opts = {}) {
   }
 
   // ── 3. All failed — return a synthetic Response so callers don't hard-crash ──
+  // NOTE: status must be 200-599; status:0 throws "Failed to construct Response"
   return new Response(
     JSON.stringify({ error: 'All proxies exhausted', url }),
-    { status: 0, headers: { 'Content-Type': 'application/json' } }
+    { status: 503, headers: { 'Content-Type': 'application/json' } }
   );
 }
 // END smartFetch ─────────────────────────────────────────────────
@@ -1759,7 +1763,34 @@ class VercelAPI {
   constructor(token){ this.token=token; this.base='https://api.vercel.com'; }
   h(){ return {'Authorization':`Bearer ${this.token}`,'Content-Type':'application/json'}; }
   async req(method,path,body){
-    const r=await smartFetch(this.base+path,{method:method,headers:this.h(),body:body?JSON.stringify(body):undefined});
+    const targetUrl = this.base+path;
+    const headers = this.h();
+    // api.vercel.com blocks CORS from browsers — route through own Vercel backend if connected
+    if(vercelEnabled()){
+      const backendUrl = (settingGet('vercel_url')||'').replace(/\/$/,'') + '/api/proxy';
+      const secret = settingGet('vercel_secret')||'';
+      const proxyResp = await fetch(backendUrl, {
+        method:'POST',
+        headers:{'Content-Type':'application/json', ...(secret?{'X-API-Key':secret}:{})},
+        body: JSON.stringify({
+          url: targetUrl,
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : null,
+          timeout: 30
+        })
+      });
+      if(!proxyResp.ok) throw new Error('Vercel backend proxy failed: HTTP '+proxyResp.status);
+      const proxyData = await proxyResp.json();
+      if(!proxyData.ok) {
+        let errMsg = 'HTTP '+proxyData.status;
+        try { const d=JSON.parse(proxyData.text||'{}'); errMsg=(d.error&&d.error.message)||d.message||errMsg; } catch(e){}
+        throw new Error(errMsg);
+      }
+      try { return JSON.parse(proxyData.text||'{}'); } catch(e) { return {}; }
+    }
+    // Fallback: try direct (works in some environments, fails in browser due to CORS)
+    const r=await smartFetch(targetUrl,{method,headers,body:body?JSON.stringify(body):undefined});
     const d=await r.json(); if(!r.ok) throw new Error(d.error&&d.error.message||'HTTP '+r.status); return d;
   }
   getUser(){ return this.req('GET','/v2/user'); }

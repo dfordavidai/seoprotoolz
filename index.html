@@ -1,6 +1,7 @@
 
 
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19050,48 +19051,14 @@ const SUPA = {
   realtimeChannel: null,
 };
 
-// ── Auto-reconnect Supabase on page load if previously connected ──
-(function supaAutoReconnect(){
-  if(!settingGet('supa_connected')) return;
-  const url = (settingGet('supa_url')||'').trim() || _HARDCODED_SUPA_URL;
-  const key  = (settingGet('supa_service_key')||'').trim() ||
-               (settingGet('supa_anon_key')||'').trim()    ||
-               _HARDCODED_SUPA_KEY;
-  if(!url || !key) return;
-  // Silent ping — just restore the in-memory flag if reachable
-  fetch(url + '/rest/v1/', {
-    method:'GET',
-    headers:{ 'apikey': key, 'Authorization': 'Bearer ' + key }
-  }).then(res => {
-    if(res.ok || res.status === 200 || res.status === 404){
-      SUPA.connected = true;
-      // Delay pill update until DOM is ready
-      if(document.readyState === 'loading'){
-        document.addEventListener('DOMContentLoaded', () => supaUpdateHeaderPill());
-      } else {
-        supaUpdateHeaderPill();
-      }
-    }
-  }).catch(()=>{}); // silent — network unavailable is fine
-})();
-
 const _HARDCODED_SUPA_URL = 'https://zamwlorvstesvxvvzijo.supabase.co';
 const _HARDCODED_SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InphbXdsb3J2c3Rlc3Z4dnZ6aWpvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYwMDA1MzQsImV4cCI6MjA5MTU3NjUzNH0.Uk3m073ljJHadb8z1v9ftcUKxOODp-APKSyI0Xh5-Ac';
 function supaUrl(){ return (settingGet('supa_url')||'').trim() || _HARDCODED_SUPA_URL; }
-// Use service key if available (full admin access, bypasses RLS), fallback to anon key, then hardcoded
-function supaKey(useService=false){
-  const serviceKey = (settingGet('supa_service_key')||'').trim();
-  const anonKey    = (settingGet('supa_anon_key')||'').trim();
-  if(useService && serviceKey) return serviceKey;
-  // If user put their service role key in the anon field (common mistake), still use it
-  if(anonKey) return anonKey;
-  if(serviceKey) return serviceKey;
-  return _HARDCODED_SUPA_KEY;
-}
+function supaKey(){ return (settingGet('supa_anon_key')||'').trim() || _HARDCODED_SUPA_KEY; }
 function supaPrefix(){ return settingGet('supa_prefix')||'seo_'; }
 
 function supaHeaders(service=false){
-  const key = supaKey(service);
+  const key = service ? (settingGet('supa_service_key')||supaKey()) : supaKey();
   return {
     'apikey': key,
     'Authorization': 'Bearer ' + key,
@@ -19102,7 +19069,7 @@ function supaHeaders(service=false){
 
 async function supaFetch(endpoint, method='GET', body=null, useService=false){
   const url = supaUrl();
-  if(!url || (!supaKey() && !supaKey(true))) throw new Error('Supabase not configured');
+  if(!url || !supaKey()) throw new Error('Supabase not configured');
   const opts = { method, headers: supaHeaders(useService) };
   if(body) opts.body = JSON.stringify(body);
   const res = await fetch(url + endpoint, opts);
@@ -19117,9 +19084,9 @@ async function supaFetch(endpoint, method='GET', body=null, useService=false){
 }
 
 async function supaTestConnection(){
-  // Use service key if set (better permissions), then anon key, then hardcoded
+  // Always use hardcoded as ultimate fallback
   const url = (supaUrl()||'').trim().replace(/\/+$/, '') || _HARDCODED_SUPA_URL;
-  const key = supaKey(true) || supaKey() || _HARDCODED_SUPA_KEY;
+  const key = (supaKey()||'').trim() || _HARDCODED_SUPA_KEY;
 
   const statusEl = document.getElementById('supa-status-msg');
   if(statusEl) statusEl.innerHTML = '<span style="color:#aaa">⟳ Connecting to Supabase...</span>';
@@ -19141,16 +19108,7 @@ async function supaTestConnection(){
       SUPA.connected = true;
       settingSet('supa_connected', true);
       settingSet('supa_url', url);
-      // Persist whichever key was actually used — normalise so both fields are populated
-      const serviceKeyInput = (settingGet('supa_service_key')||'').trim();
-      const anonKeyInput    = (settingGet('supa_anon_key')||'').trim();
-      if(serviceKeyInput && !anonKeyInput) {
-        // User put service role key in service field, anon field empty — keep service field,
-        // don't overwrite anon field so the app uses the service key going forward
-        settingSet('supa_service_key', key);
-      } else {
-        settingSet('supa_anon_key', key);
-      }
+      settingSet('supa_anon_key', key);
       supaUpdateHeaderPill();
       if(statusEl) statusEl.innerHTML = '<span style="color:var(--sup-green)">✓ Connected to Supabase!</span>';
       toast('✓ Supabase connected!','s');

@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1598,6 +1597,53 @@ ${linkSection}
 // ═══════════════════════════════════════════════════════════════
 const _SF_CORS_DOMAINS = new Set(); // domains confirmed to need proxy
 
+// ── HARDCODED WEBSHARE ROTATING PROXIES (auto-active on every page load) ────
+const _WEBSHARE_PROXIES = [
+  '45.38.107.97:6014',
+  '107.172.163.27:6543',
+  '198.105.121.200:6462',
+  '216.10.27.159:6837',
+  '142.111.67.146:5611',
+  '191.96.254.138:6185',
+  '31.58.9.4:6077',
+  '23.26.71.145:5628',
+];
+let _wsProxyIndex = Math.floor(Math.random() * _WEBSHARE_PROXIES.length);
+function _wsNextProxy() {
+  const p = _WEBSHARE_PROXIES[_wsProxyIndex % _WEBSHARE_PROXIES.length];
+  _wsProxyIndex++;
+  return p;
+}
+async function _wsProxyFetch(targetUrl, opts, proxyHostPort) {
+  opts = opts || {};
+  const vBase = (typeof vercelUrl === 'function' ? vercelUrl() : '').replace(/\/+$/, '');
+  if (!vBase) return null;
+  const secret = (typeof vercelSecret === 'function' ? vercelSecret() : '');
+  const hdrs = { 'Content-Type': 'application/json' };
+  if (secret) hdrs['X-API-Key'] = secret;
+  let bodyVal = opts.body || null;
+  if (bodyVal && typeof bodyVal !== 'string') { try { bodyVal = bodyVal.toString(); } catch(e) { bodyVal = null; } }
+  try {
+    const res = await fetch(vBase + '/api/proxy', {
+      method: 'POST', headers: hdrs,
+      body: JSON.stringify({ url: targetUrl, method: (opts.method || 'GET').toUpperCase(),
+        headers: opts.headers || {}, body: bodyVal, timeout: 25, returnCookies: true,
+        proxy: proxyHostPort }),
+      signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(30000) : undefined,
+    });
+    if (!res.ok) return null;
+    const pd = await res.json();
+    const txt = typeof pd.text === 'string' ? pd.text : JSON.stringify(pd.body || pd);
+    return {
+      ok: pd.ok !== false && (pd.status || 200) < 400, status: pd.status || 200,
+      url: pd.finalUrl || targetUrl, _cookies: pd.cookies || '', _proxy: proxyHostPort,
+      text: async () => txt,
+      json: async () => { try { return JSON.parse(txt); } catch(e) { throw new Error('JSON parse: ' + txt.slice(0, 80)); } },
+      headers: { get: (h) => (pd.headers && pd.headers[h.toLowerCase()]) || null }
+    };
+  } catch(e) { return null; }
+}
+
 // ── VERCEL-FIRST SMART FETCH: patches all platform API calls to route through Vercel proxy ──
 // When Vercel is configured, ALL outbound API calls go through /api/proxy server-side,
 // eliminating CORS failures, rate-limits, and public proxy unreliability in one shot.
@@ -1673,6 +1719,17 @@ async function smartFetch(url, opts = {}) {
       return vResp; // exhausted retries — return last response anyway
     }
     // vResp===null means Vercel itself had an error — fall through to direct/proxy chain
+  }
+
+  // ── TIER 1.5: Webshare rotating proxy (tunnelled via Vercel) ──
+  if (typeof vercelEnabled === 'function' && vercelEnabled() && typeof _wsProxyFetch === 'function') {
+    for (let _wsTry = 0; _wsTry < 2; _wsTry++) {
+      const _wsProxy = _wsNextProxy();
+      const _wsResp = await _wsProxyFetch(url, opts, _wsProxy);
+      if (_wsResp !== null && (_wsResp.ok || (_wsResp.status >= 400 && _wsResp.status < 500))) {
+        return _wsResp;
+      }
+    }
   }
 
   // Build proxy candidate list (same pool as bcProxyFetch / bcGetProxyList)
@@ -8308,6 +8365,18 @@ function bcGetProxyList(targetUrl, isPost, opts){
   // 1. YOUR Vercel proxy FIRST — real server IP, not a known proxy, bypasses Cloudflare
   const vercelProxy = bcGetVercelProxyUrl(targetUrl, isPost, opts && opts.extraCookies);
   list.push(vercelProxy);
+
+  // 1b. Webshare rotating proxies (tunnelled via Vercel) — 3 random ones in the mix
+  if (typeof vercelEnabled === 'function' && vercelEnabled() && typeof _WEBSHARE_PROXIES !== 'undefined' && _WEBSHARE_PROXIES.length) {
+    for (let _wi = 0; _wi < Math.min(3, _WEBSHARE_PROXIES.length); _wi++) {
+      const _wp = _WEBSHARE_PROXIES[(_wsProxyIndex + _wi) % _WEBSHARE_PROXIES.length];
+      const vBase = (typeof vercelUrl === 'function' ? vercelUrl() : '').replace(/\/+$/, '');
+      const secret = (typeof vercelSecret === 'function' ? vercelSecret() : '');
+      list.push({ url: vBase + '/api/proxy', vercel: true, passBody: isPost,
+        label: 'webshare-' + _wp.split(':')[0].split('.').pop(),
+        secret, wsProxy: _wp, extraCookies: (opts && opts.extraCookies) || '' });
+    }
+  }
 
   // 2. Custom proxy second (user-provided Cloudflare Worker or similar)
   if(custom){
@@ -18289,10 +18358,34 @@ function saveSETTINGS() {
   try { localStorage.setItem('spp_settings', JSON.stringify(SETTINGS)); } catch(e) {}
 }
 
+// Debounced Supabase settings sync — batches rapid settingSet calls into one write
+let _supaSettingsSyncTimer = null;
+function _supaSettingsSyncDebounced() {
+  if (_supaSettingsSyncTimer) clearTimeout(_supaSettingsSyncTimer);
+  _supaSettingsSyncTimer = setTimeout(async () => {
+    if (!settingGet('supa_connected') || !settingGet('supa_url')) return;
+    try {
+      const prefix = settingGet('supa_prefix') || 'seo_';
+      const url = settingGet('supa_url').replace(/\/+$/, '');
+      const hdrs = supaHeaders(true);
+      const payload = { id: 'global', data: JSON.stringify(SETTINGS), updated_at: new Date().toISOString() };
+      await fetch(url + '/rest/v1/' + prefix + 'app_settings', {
+        method: 'POST',
+        headers: { ...hdrs, 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(payload)
+      });
+    } catch(e) { /* silent — localStorage is always the source of truth */ }
+  }, 1500);
+}
+
 function settingSet(key, val) {
   SETTINGS[key] = val;
   saveSETTINGS();
   applySettingsToModules();
+  // Auto-sync to Supabase on every setting change (debounced 1.5s)
+  if (settingGet('supa_connected') && settingGet('supa_url') && key !== 'supa_last_sync') {
+    _supaSettingsSyncDebounced();
+  }
 }
 
 function settingGet(key) {
@@ -18368,41 +18461,55 @@ async function saveAllSettingsNow() {
   const msg = document.getElementById('settings-save-msg');
   if(msg) msg.innerHTML = '<span style="color:var(--win-yellow)">⏳ Saving...</span>';
 
-  // 1. Always save to localStorage
+  // 1. Always save to localStorage — never fails
   saveSETTINGS();
 
-  // 2. If Supabase is connected, also persist there
+  // 2. Sync to Supabase if connected — use best available key
   let supaOk = false;
-  if(settingGet('supa_connected') && settingGet('supa_url') && settingGet('supa_anon_key')) {
+  let supaErr = '';
+  const supaConnected = settingGet('supa_connected');
+  const supaUrlVal = (settingGet('supa_url') || '').trim().replace(/\/+$/, '');
+  const serviceKey = (settingGet('supa_service_key') || '').trim();
+  const anonKey    = (settingGet('supa_anon_key')    || '').trim();
+  const bestKey    = serviceKey || anonKey;
+
+  if(supaConnected && supaUrlVal && bestKey) {
     try {
       const prefix = settingGet('supa_prefix') || 'seo_';
-      const url = settingGet('supa_url').replace(/\/$/, '');
-      const key = settingGet('supa_anon_key');
-      const table = prefix + 'app_settings';
       const payload = { id: 'global', data: JSON.stringify(SETTINGS), updated_at: new Date().toISOString() };
-      const r = await fetch(`${url}/rest/v1/${table}`, {
+      const r = await fetch(supaUrlVal + '/rest/v1/' + prefix + 'app_settings', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'apikey': key,
-          'Authorization': 'Bearer ' + key,
-          'Prefer': 'resolution=merge-duplicates'
+          'apikey': bestKey,
+          'Authorization': 'Bearer ' + bestKey,
+          'Prefer': 'resolution=merge-duplicates,return=minimal'
         },
         body: JSON.stringify(payload)
       });
-      supaOk = r.ok || r.status === 200 || r.status === 201;
-    } catch(e) { supaOk = false; }
+      supaOk = r.ok || r.status === 200 || r.status === 201 || r.status === 204;
+      if (!supaOk) {
+        const errText = await r.text().catch(()=>'');
+        if (r.status === 404 || (errText && errText.includes('does not exist'))) {
+          supaErr = 'table missing — run Create Tables in Supabase settings';
+        } else if (r.status === 401 || r.status === 403) {
+          supaErr = 'auth error — check your API key';
+        } else {
+          supaErr = 'HTTP ' + r.status;
+        }
+      }
+    } catch(e) { supaErr = e.message.slice(0, 60); }
   }
 
-  const supaMsg = settingGet('supa_connected')
-    ? (supaOk ? ' + ⚡ Supabase synced' : ' · ⚠ Supabase sync failed')
+  const supaMsg = supaConnected
+    ? (supaOk ? ' + ⚡ Supabase synced' : ' · ⚠ ' + (supaErr || 'sync failed'))
     : '';
-
+  const color = supaConnected && !supaOk ? '#e8a020' : 'var(--win-green)';
   if(msg) {
-    msg.innerHTML = `<span style="color:var(--win-green)">✅ Saved to localStorage${supaMsg}</span>`;
-    setTimeout(() => { if(msg) msg.innerHTML = ''; }, 4000);
+    msg.innerHTML = '<span style="color:' + color + '">✅ Saved locally' + supaMsg + '</span>';
+    setTimeout(() => { if(msg) msg.innerHTML = ''; }, 5000);
   }
-  toast('✅ Settings saved' + supaMsg, supaOk || !settingGet('supa_connected') ? 's' : 'w');
+  toast('✅ Settings saved' + supaMsg, supaOk || !supaConnected ? 's' : 'w');
 }
 
 // ── CAPTCHA KEY TESTERS (Settings page) ─────────────────────────────────────
@@ -18412,17 +18519,17 @@ async function test2CaptchaKeyFromSettings() {
   if(!key) { if(msg) msg.innerHTML = '<span style="color:var(--win-red)">⚠ No key entered</span>'; return; }
   if(msg) msg.innerHTML = '<span style="color:var(--win-yellow)">⏳ Testing...</span>';
   try {
-    const r = await fetch(`https://2captcha.com/res.php?action=getbalance&key=${key}&json=1`);
+    const r = await smartFetch('https://2captcha.com/res.php?action=getbalance&key=' + key + '&json=1');
     const d = await r.json();
     if(d.status === 1) {
       const bal = parseFloat(d.request).toFixed(3);
-      if(msg) msg.innerHTML = `<span style="color:var(--win-green)">✅ Connected — Balance: $${bal}</span>`;
-      settingSet('cap_2captchaKey', key); // ensure saved
+      if(msg) msg.innerHTML = '<span style="color:var(--win-green)">✅ Connected — Balance: $' + bal + '</span>';
+      settingSet('cap_2captchaKey', key);
     } else {
-      if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ ${d.request || 'Invalid key'}</span>`;
+      if(msg) msg.innerHTML = '<span style="color:var(--win-red)">❌ ' + (d.request || 'Invalid key') + ' — check key at 2captcha.com/setting</span>';
     }
   } catch(e) {
-    if(msg) msg.innerHTML = `<span style="color:var(--win-red)">❌ Network error: ${e.message}</span>`;
+    if(msg) msg.innerHTML = '<span style="color:var(--win-red)">❌ Network error: ' + e.message + '</span>';
   }
 }
 
@@ -18796,6 +18903,16 @@ function renderSettings(el) {
     <button class="btn btn-sm" onclick="testVercelConnection()" style="border-color:#0070f3;color:#0070f3;font-weight:700">▲ Test Vercel Connection</button>
     <span id="vercel-status-msg" style="margin-left:10px;font-size:10px;font-family:var(--mono)">${settingGet('vercel_connected')?'<span style="color:var(--sup-green)">✓ Previously connected</span>':'<span style="color:#888">Not tested yet</span>'}</span>
   </div>
+  <div style="margin:0 14px 10px;padding:8px 12px;background:rgba(0,112,243,0.06);border:1px solid rgba(0,112,243,0.25);border-radius:3px;font-size:10px;color:var(--win-text-muted)">
+    <strong style="color:#0070f3">🔄 Webshare Rotating Proxies — Active Automatically</strong><br>
+    8 residential proxies are hardcoded and rotate automatically on every request.
+    When Vercel is configured, all fetches are tunnelled through Webshare → Vercel for maximum reliability.
+    No configuration needed — they activate the moment you set a Vercel URL above.<br>
+    <span style="font-family:monospace;font-size:9px;color:#666;display:block;margin-top:4px">
+      45.38.107.97:6014 · 107.172.163.27:6543 · 198.105.121.200:6462 · 216.10.27.159:6837<br>
+      142.111.67.146:5611 · 191.96.254.138:6185 · 31.58.9.4:6077 · 23.26.71.145:5628
+    </span>
+  </div>
 
   </div></div>
 
@@ -18824,24 +18941,29 @@ function renderSettings(el) {
         </div>
       </div>
       <div class="set-row">
-        <label class="set-label" title="Anon/public key — safe to use in frontend code">Anon / Public Key</label>
+        <label class="set-label" title="Anon/public key — works for reads. If you only have one key, paste it here.">Anon / Public Key</label>
         <div class="set-control">
           <input type="password" id="setting-supa_anon_key" value="${esc(String(settingGet('supa_anon_key')||''))}"
             placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
             oninput="settingSet('supa_anon_key',this.value.trim())" style="width:320px;font-family:monospace">
           <button class="btn btn-ghost btn-xs" onclick="var i=document.getElementById('setting-supa_anon_key');i.type=i.type==='password'?'text':'password'">👁</button>
-          <span class="set-hint">Project Settings → API → anon / public</span>
+          <span class="set-hint">Project Settings → API → anon/public key · <strong style="color:#e8a020">If you only have 1 key, paste here</strong></span>
         </div>
       </div>
       <div class="set-row">
-        <label class="set-label" title="Service role key — admin operations only, never expose publicly">Service Role Key <span style="color:var(--win-red);font-size:9px">(optional)</span></label>
+        <label class="set-label" title="Service role key — required for table creation and writes. Recommended.">Service Role Key <span style="color:var(--sup-green);font-size:9px;font-weight:700">(recommended)</span></label>
         <div class="set-control">
           <input type="password" id="setting-supa_service_key" value="${esc(String(settingGet('supa_service_key')||''))}"
             placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
             oninput="settingSet('supa_service_key',this.value.trim())" style="width:320px;font-family:monospace">
           <button class="btn btn-ghost btn-xs" onclick="var i=document.getElementById('setting-supa_service_key');i.type=i.type==='password'?'text':'password'">👁</button>
-          <span class="set-hint">Project Settings → API → service_role (keep secret!)</span>
+          <span class="set-hint">Project Settings → API → service_role · <strong style="color:var(--sup-green)">Needed for saves &amp; syncs to work</strong></span>
         </div>
+      </div>
+      <div style="padding:6px 0 2px;font-size:10px;color:var(--win-text-muted);line-height:1.6;background:rgba(232,160,32,0.07);border:1px solid rgba(232,160,32,0.3);border-radius:3px;padding:6px 10px;margin-bottom:4px">
+        ⚠ <strong>Key mismatch fix:</strong> The app now auto-detects which key you pasted and uses it correctly.
+        Service key is tried first for all writes. If you accidentally put your service key in the anon field — that's fine, it will still work.
+        Click <strong>⚡ Test Connection</strong> to confirm which key is active.
       </div>
       <div class="set-row">
         <label class="set-label">Table Prefix <span style="color:var(--win-text-muted);font-size:9px">(optional)</span></label>
@@ -18864,10 +18986,11 @@ function renderSettings(el) {
       <div style="padding:10px 12px;background:rgba(62,207,142,0.06);border:1px solid rgba(62,207,142,0.4);font-size:10px;color:var(--win-text-muted);line-height:1.9">
         <strong style="color:#004422">📋 Supabase Setup Steps:</strong><br>
         1. Go to <a href="https://supabase.com" target="_blank" style="color:var(--sup-green);font-weight:700">supabase.com</a> → New Project (free tier works)<br>
-        2. Copy <strong>Project URL</strong> and <strong>anon key</strong> from Project Settings → API<br>
-        3. Paste both fields above and click <strong>⚡ Test Connection</strong><br>
-        4. Click <strong>🗄 Create Tables</strong> to auto-create all required tables via SQL<br>
-        5. Click <strong>🔄 Sync All</strong> to push your local data to Supabase cloud
+        2. Go to Project Settings → API → copy <strong>Project URL</strong> + <strong>service_role key</strong> (not anon!)<br>
+        3. Paste URL in Project URL field + service_role key in <strong>Service Role Key</strong> field<br>
+        4. Click <strong>⚡ Test Connection</strong> — it auto-detects which key works<br>
+        5. Click <strong>🗄 Create Tables</strong> to auto-create all required tables<br>
+        6. Settings now auto-sync to Supabase on every change — no manual save needed
       </div>
     </div>
   </div>
@@ -19570,7 +19693,18 @@ function supaKey(){ return (settingGet('supa_anon_key')||'').trim() || _HARDCODE
 function supaPrefix(){ return settingGet('supa_prefix')||'seo_'; }
 
 function supaHeaders(service=false){
-  const key = service ? (settingGet('supa_service_key')||supaKey()) : supaKey();
+  // Smart key detection: service key trumps anon everywhere
+  const serviceKey = settingGet('supa_service_key') || '';
+  const anonKey    = settingGet('supa_anon_key')    || '';
+  // Detect if user pasted service key into anon field (service keys contain 'service_role')
+  const anonIsService = anonKey.length > 200 && (anonKey.includes('service_role'));
+  let key;
+  if (service) {
+    key = serviceKey || (anonIsService ? anonKey : '') || anonKey || _HARDCODED_SUPA_KEY;
+  } else {
+    key = anonIsService ? anonKey : (anonKey || serviceKey || _HARDCODED_SUPA_KEY);
+  }
+  if (!key) key = _HARDCODED_SUPA_KEY;
   return {
     'apikey': key,
     'Authorization': 'Bearer ' + key,
@@ -19596,46 +19730,52 @@ async function supaFetch(endpoint, method='GET', body=null, useService=false){
 }
 
 async function supaTestConnection(){
-  // Always use hardcoded as ultimate fallback
-  const url = (supaUrl()||'').trim().replace(/\/+$/, '') || _HARDCODED_SUPA_URL;
-  const key = (supaKey()||'').trim() || _HARDCODED_SUPA_KEY;
-
   const statusEl = document.getElementById('supa-status-msg');
   if(statusEl) statusEl.innerHTML = '<span style="color:#aaa">⟳ Connecting to Supabase...</span>';
 
-  try {
-    const res = await fetch(url + '/rest/v1/', {
-      method: 'GET',
-      headers: {
-        'apikey': key,
-        'Authorization': 'Bearer ' + key,
-        'Content-Type': 'application/json'
+  const url = (settingGet('supa_url')||'').trim().replace(/\/+$/, '') || _HARDCODED_SUPA_URL;
+  const serviceKey = (settingGet('supa_service_key')||'').trim();
+  const anonKey    = (settingGet('supa_anon_key')||'').trim() || _HARDCODED_SUPA_KEY;
+
+  // Try service key first (more permissive), then anon key
+  const keysToTry = [];
+  if (serviceKey) keysToTry.push({key: serviceKey, label: 'service key'});
+  if (anonKey && anonKey !== serviceKey) keysToTry.push({key: anonKey, label: 'anon key'});
+  if (!keysToTry.length) keysToTry.push({key: _HARDCODED_SUPA_KEY, label: 'default key'});
+
+  for (const {key, label} of keysToTry) {
+    try {
+      if(statusEl) statusEl.innerHTML = '<span style="color:#aaa">⟳ Trying ' + label + '...</span>';
+      const res = await fetch(url + '/rest/v1/', {
+        method: 'GET',
+        headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' }
+      });
+      const body = await res.text().catch(()=>'');
+      if (res.ok || res.status === 200 || res.status === 404) {
+        SUPA.connected = true;
+        settingSet('supa_connected', true);
+        settingSet('supa_url', url);
+        // Save working key to the correct field
+        if (label === 'service key') { settingSet('supa_service_key', key); }
+        else { settingSet('supa_anon_key', key); }
+        supaUpdateHeaderPill();
+        const proj = url.replace('https://','').split('.')[0];
+        if(statusEl) statusEl.innerHTML = '<span style="color:var(--sup-green)">✓ Connected via ' + label + ' · ' + proj + '.supabase.co</span>';
+        toast('✓ Supabase connected via ' + label + '!','s');
+        _supaSettingsSyncDebounced(); // sync settings now that we are connected
+        return;
+      } else if (res.status === 401) {
+        console.warn('[Supa Test]', label, '401 — trying next key');
+        continue;
+      } else {
+        if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ HTTP ' + res.status + ' — ' + body.slice(0,100) + '</span>';
+        toast('Supabase HTTP ' + res.status,'e');
+        return;
       }
-    });
-
-    const body = await res.text().catch(() => '');
-    console.log('[Supa Test] Status:', res.status, 'Body:', body.slice(0,200));
-
-    if(res.ok || res.status === 200 || res.status === 404){
-      SUPA.connected = true;
-      settingSet('supa_connected', true);
-      settingSet('supa_url', url);
-      settingSet('supa_anon_key', key);
-      supaUpdateHeaderPill();
-      if(statusEl) statusEl.innerHTML = '<span style="color:var(--sup-green)">✓ Connected to Supabase!</span>';
-      toast('✓ Supabase connected!','s');
-    } else if(res.status === 401){
-      if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ 401 — ' + body.slice(0,150) + '</span>';
-      toast('Supabase 401: ' + body.slice(0,80),'e');
-    } else {
-      if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ HTTP ' + res.status + ' — ' + body.slice(0,100) + '</span>';
-      toast('Supabase error: HTTP ' + res.status,'e');
-    }
-  } catch(e){
-    if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ ' + e.message + '</span>';
-    toast('Connection error: ' + e.message,'e');
-    console.error('[Supa Test] Error:', e);
+    } catch(e) { console.warn('[Supa Test]', label, 'error:', e.message); }
   }
+  if(statusEl) statusEl.innerHTML = '<span style="color:#cc4444">✗ All keys failed — check URL & key in Supabase dashboard → Settings → API</span>';
+  toast('Supabase connection failed — check credentials','e');
 }
 
 async function supaSetupTables(){
@@ -19885,122 +20025,207 @@ const CAP_BUILTIN = {
  *   timeout     — max seconds to wait (default: 90)
  * @returns {Promise<{token:string, answer:string, solved:bool, source:string}>}
  */
-async function capSolve(opts={}){
-  const { type='recaptcha_v2', siteKey='', siteUrl='',
-          imageBase64=null, imageUrl=null, textQuestion=null,
-          action='verify', timeout=90 } = opts;
+// ── 2CAPTCHA DIRECT BROWSER SOLVER ─────────────────────────────────────────
+async function cap2CaptchaSolve(opts={}) {
+  const key = settingGet('cap_2captchaKey') || '';
+  if (!key) return null;
+  const { type='recaptcha_v2', siteKey='', siteUrl='', imageBase64=null,
+          imageUrl=null, textQuestion=null, action='verify', timeout=120 } = opts;
+  capLog && capLog('  🔓 2captcha: submitting ' + type, 't-accent');
+  try {
+    let submitParams;
+    if (type === 'image_captcha') {
+      const imgData = imageBase64 || null;
+      if (!imgData) return null;
+      submitParams = 'key=' + key + '&method=base64&body=' + encodeURIComponent(imgData) + '&json=1';
+    } else if (type === 'text_captcha') {
+      submitParams = 'key=' + key + '&method=userrecaptcha&textcaptcha=' + encodeURIComponent(textQuestion||'') + '&json=1';
+    } else if (type === 'hcaptcha') {
+      submitParams = 'key=' + key + '&method=hcaptcha&sitekey=' + encodeURIComponent(siteKey) + '&pageurl=' + encodeURIComponent(siteUrl) + '&json=1';
+    } else if (type === 'turnstile') {
+      submitParams = 'key=' + key + '&method=turnstile&sitekey=' + encodeURIComponent(siteKey) + '&pageurl=' + encodeURIComponent(siteUrl) + '&json=1';
+    } else if (type === 'recaptcha_v3') {
+      submitParams = 'key=' + key + '&method=userrecaptcha&googlekey=' + encodeURIComponent(siteKey) + '&pageurl=' + encodeURIComponent(siteUrl) + '&version=v3&action=' + encodeURIComponent(action) + '&min_score=0.3&json=1';
+    } else {
+      submitParams = 'key=' + key + '&method=userrecaptcha&googlekey=' + encodeURIComponent(siteKey) + '&pageurl=' + encodeURIComponent(siteUrl) + '&json=1';
+    }
+    const submitResp = await smartFetch('https://2captcha.com/in.php', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: submitParams
+    });
+    const submitData = await submitResp.json();
+    if (submitData.status !== 1 || !submitData.request) {
+      capLog && capLog('  ⚠ 2captcha submit failed: ' + (submitData.request||'unknown error'), 't-warn');
+      return null;
+    }
+    const taskId = submitData.request;
+    capLog && capLog('  ⏳ 2captcha task ' + taskId + ' polling...', 'tm');
+    const deadline = Date.now() + timeout * 1000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, settingGet('cap_pollInterval') || 4000));
+      const pollResp = await smartFetch('https://2captcha.com/res.php?key=' + key + '&action=get&id=' + taskId + '&json=1');
+      const pollData = await pollResp.json();
+      if (pollData.status === 1) {
+        const token = pollData.request;
+        capLog && capLog('  ✅ 2captcha solved! len:' + token.length, 't-accent');
+        CAP_BUILTIN.stats.solved++;
+        return { token, answer: token, solved: true, source: '2captcha', taskId };
+      }
+      if (pollData.request !== 'CAPCHA_NOT_READY' && pollData.request !== 'CAPTCHA_NOT_READY') {
+        capLog && capLog('  ✗ 2captcha error: ' + pollData.request, 't-warn');
+        return null;
+      }
+    }
+    capLog && capLog('  ✗ 2captcha timeout ' + timeout + 's', 't-warn');
+    return null;
+  } catch(e) {
+    capLog && capLog('  ✗ 2captcha exception: ' + e.message, 't-warn');
+    return null;
+  }
+}
+
+// ── ANTI-CAPTCHA DIRECT SOLVER ───────────────────────────────────────────────
+async function capAntiCaptchaSolve(opts={}) {
+  const key = settingGet('cap_antiCaptchaKey') || '';
+  if (!key) return null;
+  const { type='recaptcha_v2', siteKey='', siteUrl='', action='verify', timeout=120 } = opts;
+  capLog && capLog('  🔓 Anti-Captcha: submitting ' + type, 't-accent');
+  try {
+    let taskObj;
+    if (type === 'hcaptcha') taskObj = { type: 'HCaptchaTaskProxyless', websiteURL: siteUrl, websiteKey: siteKey };
+    else if (type === 'recaptcha_v3') taskObj = { type: 'RecaptchaV3TaskProxyless', websiteURL: siteUrl, websiteKey: siteKey, minScore: 0.3, pageAction: action };
+    else taskObj = { type: 'RecaptchaV2TaskProxyless', websiteURL: siteUrl, websiteKey: siteKey };
+    const createResp = await smartFetch('https://api.anti-captcha.com/createTask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientKey: key, task: taskObj })
+    });
+    const createData = await createResp.json();
+    if (createData.errorId !== 0 || !createData.taskId) { capLog && capLog('  ⚠ Anti-Captcha: ' + createData.errorDescription, 't-warn'); return null; }
+    const taskId = createData.taskId;
+    const deadline = Date.now() + timeout * 1000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, settingGet('cap_pollInterval') || 4000));
+      const rd = await (await smartFetch('https://api.anti-captcha.com/getTaskResult', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientKey: key, taskId })
+      })).json();
+      if (rd.status === 'ready') {
+        const token = rd.solution && (rd.solution.gRecaptchaResponse || rd.solution.text || rd.solution.token);
+        if (token) { CAP_BUILTIN.stats.solved++; return { token, answer: token, solved: true, source: 'anticaptcha' }; }
+      }
+      if (rd.errorId !== 0) { capLog && capLog('  ✗ Anti-Captcha: ' + rd.errorDescription, 't-warn'); return null; }
+    }
+    return null;
+  } catch(e) { capLog && capLog('  ✗ Anti-Captcha exception: ' + e.message, 't-warn'); return null; }
+}
+
+// ── CAPSOLVER DIRECT SOLVER ──────────────────────────────────────────────────
+async function capCapSolverSolve(opts={}) {
+  const key = settingGet('cap_capSolverKey') || '';
+  if (!key) return null;
+  const { type='recaptcha_v2', siteKey='', siteUrl='', action='verify', timeout=120 } = opts;
+  capLog && capLog('  🔓 CapSolver: submitting ' + type, 't-accent');
+  try {
+    let taskType;
+    if (type === 'hcaptcha') taskType = 'HCaptchaTaskProxyLess';
+    else if (type === 'turnstile') taskType = 'AntiTurnstileTaskProxyLess';
+    else if (type === 'recaptcha_v3') taskType = 'ReCaptchaV3TaskProxyLess';
+    else taskType = 'ReCaptchaV2TaskProxyLess';
+    const createResp = await smartFetch('https://api.capsolver.com/createTask', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientKey: key, task: { type: taskType, websiteURL: siteUrl, websiteKey: siteKey, pageAction: action } })
+    });
+    const cd = await createResp.json();
+    if (cd.errorId !== 0 || !cd.taskId) { capLog && capLog('  ⚠ CapSolver: ' + cd.errorDescription, 't-warn'); return null; }
+    const taskId = cd.taskId;
+    const deadline = Date.now() + timeout * 1000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, settingGet('cap_pollInterval') || 4000));
+      const rd = await (await smartFetch('https://api.capsolver.com/getTaskResult', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientKey: key, taskId })
+      })).json();
+      if (rd.status === 'ready') {
+        const token = rd.solution && (rd.solution.gRecaptchaResponse || rd.solution.text || rd.solution.token);
+        if (token) { CAP_BUILTIN.stats.solved++; return { token, answer: token, solved: true, source: 'capsolver' }; }
+      }
+      if (rd.errorId !== 0) { capLog && capLog('  ✗ CapSolver: ' + rd.errorDescription, 't-warn'); return null; }
+    }
+    return null;
+  } catch(e) { capLog && capLog('  ✗ CapSolver exception: ' + e.message, 't-warn'); return null; }
+}
+
+// ── CAPTCHA SOLVER: tiered 2captcha → anticaptcha → capsolver → vercel → browser ──
+async function capSolve(opts){
+  opts = opts || {};
+  const type         = opts.type         || 'recaptcha_v2';
+  const siteKey      = opts.siteKey      || '';
+  const siteUrl      = opts.siteUrl      || '';
+  const imageBase64  = opts.imageBase64  || null;
+  const imageUrl     = opts.imageUrl     || null;
+  const textQuestion = opts.textQuestion || null;
+  const action       = opts.action       || 'verify';
+  const timeout      = opts.timeout      || 90;
 
   CAP_BUILTIN.stats.total++;
 
-  // 1. Try Vercel backend built-in solver first (most capable)
-  if(vercelEnabled()){
-    try {
-      const res = await backendPost('/captcha/solve', {
-        type, site_key:siteKey, site_url:siteUrl,
-        image_base64:imageBase64, image_url:imageUrl,
-        text_question:textQuestion, action, timeout
-      }, (timeout+10)*1000);
+  // ── TIER 0: Math/text captcha (instant, no API key needed) ──
+  if (type === 'text_captcha' || type === 'math_captcha') {
+    const answer = capSolveMathLocal(textQuestion || '');
+    if (answer) { CAP_BUILTIN.stats.solved++; return { token: answer, answer, solved: true, source: 'local-math' }; }
+  }
 
-      if(res.ok){
-        // For async job, poll for result
-        if(res.job_id && res.status === 'processing'){
-          const result = await capPollJob(res.job_id, timeout);
-          if(result.solved){
-            CAP_BUILTIN.stats.solved++;
-            return {...result, source:'vercel'};
-          }
+  // ── TIER 1: Direct captcha service solvers (highest accuracy, real humans/AI) ──
+  const provider = settingGet('cap_provider') || '2captcha';
+  const has2cap  = !!(settingGet('cap_2captchaKey'));
+  const hasAnti  = !!(settingGet('cap_antiCaptchaKey'));
+  const hasCap   = !!(settingGet('cap_capSolverKey'));
+  const solverOrder = [];
+  if (provider === '2captcha'    && has2cap)  solverOrder.push(function(){ return cap2CaptchaSolve(Object.assign({}, opts, {timeout: timeout})); });
+  if (provider === 'anticaptcha' && hasAnti)  solverOrder.push(function(){ return capAntiCaptchaSolve(Object.assign({}, opts, {timeout: timeout})); });
+  if (provider === 'capsolver'   && hasCap)   solverOrder.push(function(){ return capCapSolverSolve(Object.assign({}, opts, {timeout: timeout})); });
+  if (has2cap  && provider !== '2captcha')    solverOrder.push(function(){ return cap2CaptchaSolve(Object.assign({}, opts, {timeout: timeout})); });
+  if (hasAnti  && provider !== 'anticaptcha') solverOrder.push(function(){ return capAntiCaptchaSolve(Object.assign({}, opts, {timeout: timeout})); });
+  if (hasCap   && provider !== 'capsolver')   solverOrder.push(function(){ return capCapSolverSolve(Object.assign({}, opts, {timeout: timeout})); });
+
+  for (var si = 0; si < solverOrder.length; si++) {
+    var result = await solverOrder[si]();
+    if (result && result.solved) return result;
+  }
+
+  // ── TIER 2: Vercel backend solver (no service API keys needed, server-side) ──
+  if (typeof vercelEnabled === 'function' && vercelEnabled()) {
+    try {
+      var res = await backendPost('/captcha/solve', {
+        type: type, site_key: siteKey, site_url: siteUrl,
+        image_base64: imageBase64, image_url: imageUrl,
+        text_question: textQuestion, action: action, timeout: timeout
+      }, (timeout + 10) * 1000);
+      if (res.ok) {
+        if (res.job_id && res.status === 'processing') {
+          var polled = await capPollJob(res.job_id, timeout);
+          if (polled.solved) { CAP_BUILTIN.stats.solved++; return Object.assign({}, polled, {source: 'vercel'}); }
         }
-        // Synchronous result (text/math types)
-        if(res.solved || res.status==='solved'){
+        if (res.solved || res.status === 'solved') {
           CAP_BUILTIN.stats.solved++;
-          return {token:res.token, answer:res.answer||res.token, solved:true, source:'vercel'};
+          return { token: res.token, answer: res.answer || res.token, solved: true, source: 'vercel' };
         }
       }
-    } catch(e) {
-      capLog && capLog('Vercel solver: '+e.message+' — trying browser fallback','t-warn');
-    }
+    } catch(e) { capLog && capLog('Vercel solver: ' + e.message, 't-warn'); }
   }
 
-  // 2. Browser-side fallbacks (when Vercel not configured)
-  let token = null;
-  let answer = null;
-
+  // ── TIER 3: Browser-side fallbacks (last resort) ──
+  var token = null; var answer = null;
   try {
-    if(type==='text_captcha' || type==='math_captcha'){
-      answer = capSolveMathLocal(textQuestion||'');
-      token = answer;
-    }
-    else if(type==='image_captcha' && imageBase64){
-      answer = await capSolveImageLocal(imageBase64);
-      token = answer;
-    }
-    else if(type==='recaptcha_v2' || type==='recaptcha_v3'){
-      token = await capHarvestRecaptchaToken(siteKey, siteUrl, type);
-    }
-    else if(type==='hcaptcha'){
-      token = await capHarvestHcaptchaToken(siteKey, siteUrl);
-    }
-    else if(type==='turnstile'){
-      token = capGenerateTurnstileToken(siteKey);
-    }
-    else {
-      // Generic fallback: generate a format-valid token
-      token = capGenerateFormatToken(type, siteKey);
-    }
-  } catch(e){
-    capLog && capLog('Browser captcha fallback error: '+e.message,'t-warn');
-  }
+    if (type === 'image_captcha' && imageBase64)              { answer = await capSolveImageLocal(imageBase64); token = answer; }
+    else if (type === 'recaptcha_v2' || type === 'recaptcha_v3') { token = await capHarvestRecaptchaToken(siteKey, siteUrl, type); }
+    else if (type === 'hcaptcha')                             { token = await capHarvestHcaptchaToken(siteKey, siteUrl); }
+    else if (type === 'turnstile')                            { token = capGenerateTurnstileToken(siteKey); }
+    else                                                      { token = capGenerateFormatToken(type, siteKey); }
+  } catch(e) { capLog && capLog('Browser captcha fallback: ' + e.message, 't-warn'); }
 
-  const solved = !!(token || answer);
-  if(solved) CAP_BUILTIN.stats.solved++;
-  else CAP_BUILTIN.stats.failed++;
-
-  return {token, answer: answer||token, solved, source:'browser'};
-}
-
-async function capPollJob(jobId, timeoutSec=90){
-  const deadline = Date.now() + timeoutSec*1000;
-  while(Date.now() < deadline){
-    await new Promise(r=>setTimeout(r,1500));
-    try {
-      const res = await backendGet('/captcha/status/'+jobId);
-      if(res.status === 'solved'){
-        return {token:res.token, answer:res.answer||res.token, solved:true, elapsed:res.elapsed_seconds};
-      }
-      if(res.status === 'failed'){
-        return {token:null, answer:null, solved:false, error:res.error};
-      }
-    } catch(e){ break; }
-  }
-  return {token:null, answer:null, solved:false, error:'Timeout'};
-}
-
-// ── Browser-side CAPTCHA helpers ──────────────────────────────────────────
-
-function capSolveMathLocal(question){
-  const q = question.toLowerCase();
-  const wordNums = {zero:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,
-                    eight:8,nine:9,ten:10,eleven:11,twelve:12};
-  let expr = q
-    .replace(/plus|add|sum/g,'+')
-    .replace(/minus|subtract/g,'-')
-    .replace(/times|multiply|x/g,'*')
-    .replace(/divid\w+/g,'/')
-    .replace(/\?/g,'');
-  // Replace word numbers
-  Object.entries(wordNums).forEach(([w,n])=>{ expr=expr.replace(new RegExp('\b'+w+'\b','g'),n); });
-  const m = expr.match(/(\d+)\s*([\+\-\*\/])\s*(\d+)/);
-  if(m){
-    const [,a,op,b] = m;
-    const n1=parseInt(a), n2=parseInt(b);
-    if(op==='+') return String(n1+n2);
-    if(op==='-') return String(n1-n2);
-    if(op==='*') return String(n1*n2);
-    if(op==='/' && n2!==0) return String(Math.floor(n1/n2));
-  }
-  const digits = q.match(/\d+/g)||[];
-  if(digits.length===1) return digits[0];
-  return null;
+  var solved = !!(token || answer);
+  if (solved) CAP_BUILTIN.stats.solved++; else CAP_BUILTIN.stats.failed++;
+  return { token: token, answer: answer || token, solved: solved, source: 'browser' };
 }
 
 async function capSolveImageLocal(base64Img){
@@ -22345,36 +22570,61 @@ function showModal({title='', body='', buttons=[], wide=false, id=null}={}){
 })();
 // Init blacklist from localStorage — must happen before any BL usage
 try { BL.items = JSON.parse(localStorage.getItem('blacklist')||'[]'); } catch(e){ BL.items=[]; }
-// Auto-connect Supabase on every page load — no localStorage dependency
-settingSet('supa_url', _HARDCODED_SUPA_URL);
-settingSet('supa_anon_key', _HARDCODED_SUPA_KEY);
+// ── AUTO-CONNECT SUPABASE ON BOOT (tries service key first, loads settings from cloud) ──
 (async () => {
-  try {
-    const res = await fetch(_HARDCODED_SUPA_URL + '/rest/v1/', {
-      method: 'GET',
-      headers: {
-        'apikey': _HARDCODED_SUPA_KEY,
-        'Authorization': 'Bearer ' + _HARDCODED_SUPA_KEY,
-        'Content-Type': 'application/json'
-      }
-    });
-    if(res.ok || res.status === 404 || res.status === 200) {
-      SUPA.connected = true;
-      settingSet('supa_connected', true);
-      supaUpdateHeaderPill();
-      console.log('[Supabase] Auto-connected ✓ status:', res.status);
-      if(settingGet('supa_autosync')) supaLoadAll().catch(()=>{});
-    } else {
-      console.warn('[Supabase] Auto-connect failed, status:', res.status);
-      SUPA.connected = false;
-      settingSet('supa_connected', false);
-      supaUpdateHeaderPill();
-    }
-  } catch(e) {
-    console.warn('[Supabase] Auto-connect error:', e.message);
-    SUPA.connected = false;
-    settingSet('supa_connected', false);
+  const supaUrlBoot    = (settingGet('supa_url')||'').trim().replace(/\/+$/, '') || _HARDCODED_SUPA_URL;
+  const serviceKeyBoot = (settingGet('supa_service_key')||'').trim();
+  const anonKeyBoot    = (settingGet('supa_anon_key')||'').trim() || _HARDCODED_SUPA_KEY;
+  const bootKeys = [];
+  if (serviceKeyBoot) bootKeys.push(serviceKeyBoot);
+  if (anonKeyBoot && anonKeyBoot !== serviceKeyBoot) bootKeys.push(anonKeyBoot);
+
+  let bootOk = false, workingKey = null;
+  for (const k of bootKeys) {
+    try {
+      const res = await fetch(supaUrlBoot + '/rest/v1/', {
+        method: 'GET',
+        headers: { 'apikey': k, 'Authorization': 'Bearer ' + k, 'Content-Type': 'application/json' }
+      });
+      if (res.ok || res.status === 404 || res.status === 200) { bootOk = true; workingKey = k; break; }
+    } catch(e) { /* try next */ }
+  }
+
+  if (bootOk && workingKey) {
+    SUPA.connected = true;
+    SETTINGS['supa_connected'] = true;
+    SETTINGS['supa_url'] = supaUrlBoot;
+    if (workingKey === serviceKeyBoot) SETTINGS['supa_service_key'] = workingKey;
+    else SETTINGS['supa_anon_key'] = workingKey;
+    saveSETTINGS();
     supaUpdateHeaderPill();
+    console.log('[Supabase] Auto-connected ✓');
+    if (settingGet('supa_autosync')) {
+      // Load settings from cloud (merge into local, cloud wins for non-sensitive keys)
+      try {
+        const prefix = settingGet('supa_prefix') || 'seo_';
+        const settRes = await fetch(supaUrlBoot + '/rest/v1/' + prefix + 'app_settings?id=eq.global&limit=1', {
+          headers: { 'apikey': workingKey, 'Authorization': 'Bearer ' + workingKey, 'Content-Type': 'application/json' }
+        });
+        if (settRes.ok) {
+          const rows = await settRes.json();
+          if (rows && rows[0] && rows[0].data) {
+            const cloud = JSON.parse(rows[0].data);
+            const skipKeys = new Set(['supa_service_key','supa_anon_key','cap_2captchaKey','cap_antiCaptchaKey','cap_capSolverKey','groq_api_key','vercel_secret']);
+            Object.entries(cloud).forEach(([k,v]) => { if (!skipKeys.has(k) || !SETTINGS[k]) SETTINGS[k] = v; });
+            saveSETTINGS();
+            console.log('[Supabase] Settings loaded from cloud ✓');
+          }
+        }
+      } catch(e) { /* keep local */ }
+      supaLoadAll().catch(()=>{});
+    }
+  } else {
+    SUPA.connected = false;
+    SETTINGS['supa_connected'] = false;
+    saveSETTINGS();
+    supaUpdateHeaderPill();
+    console.warn('[Supabase] Auto-connect failed — localStorage only');
   }
 })();
 // Re-call updateHeader/PlatformBar now that DOM + all vars are ready, then render dashboard

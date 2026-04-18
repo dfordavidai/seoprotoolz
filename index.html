@@ -1,5 +1,3 @@
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1806,10 +1804,18 @@ class VercelAPI {
       if(!proxyResp.ok) throw new Error('Vercel backend proxy failed: HTTP '+proxyResp.status);
       const proxyData = await proxyResp.json();
       if(!proxyData.ok) {
-        let errMsg = 'HTTP '+proxyData.status;
-        try { const d=JSON.parse(proxyData.text||'{}'); errMsg=(d.error&&d.error.message)||d.message||errMsg; } catch(e){}
+        let errMsg = 'HTTP '+proxyData.status_code;
+        // proxyData.body is pre-parsed JSON when response was JSON, otherwise text
+        const errBody = typeof proxyData.body === 'object' ? proxyData.body : {};
+        try {
+          const errText = proxyData.text || '';
+          const parsed = typeof proxyData.body === 'object' ? proxyData.body : JSON.parse(errText||'{}');
+          errMsg = (parsed.error && parsed.error.message) || parsed.message || parsed.error || errMsg;
+        } catch(e){}
         throw new Error(errMsg);
       }
+      // proxyData.body is already parsed JSON if upstream returned JSON
+      if(typeof proxyData.body === 'object' && proxyData.body !== null) return proxyData.body;
       try { return JSON.parse(proxyData.text||'{}'); } catch(e) { return {}; }
     }
     // Fallback: try direct (works in some environments, fails in browser due to CORS)
@@ -5561,50 +5567,76 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
 
   if(pid==='bitbin'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','bitbin.it').body;
+    // Bitbin API: POST form data, returns JSON {data:{hash:"..."}}
     const r=await pasteProxyFetch('https://bitbin.it/api/',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       body:new URLSearchParams({content,language:'text',expire:'never'}).toString()});
-    if(!r.ok&&!r.text) throw new Error('Bitbin: '+r.error);
+    if(!r.ok&&!r.text) throw new Error('Bitbin: '+(r.error||'request failed'));
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    const path=d.data&&(d.data.hash||d.data.id||d.data.slug);
-    if(!path) throw new Error('Bitbin: no path returned — '+r.text.slice(0,100));
-    return 'https://bitbin.it/'+path+'/';
+    // Response: {data:{hash}} or {hash} or {id} or {slug}
+    const path=(d.data&&(d.data.hash||d.data.id||d.data.slug))||d.hash||d.id||d.slug;
+    if(path) return 'https://bitbin.it/'+path+'/';
+    // Fallback: check if finalUrl is the paste URL (redirect after submit)
+    if(r.finalUrl && r.finalUrl.includes('bitbin.it/') && !r.finalUrl.endsWith('/api/')) return r.finalUrl;
+    throw new Error('Bitbin: no paste ID in response — '+r.text.slice(0,120));
   }
 
   if(pid==='pastelink'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastelink.net').body;
-    const r=await pasteProxyFetch('https://pastelink.net/api/paste',{method:'POST',
-      contentType:'application/json',asJson:true,
-      body:JSON.stringify({content,title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title})});
-    if(!r.ok&&!r.text) throw new Error('Pastelink: '+r.error);
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
+    // Pastelink.net — POST form to root, redirects to /SLUG page
+    const r=await pasteProxyFetch('https://pastelink.net/',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      body:new URLSearchParams({paste_title:title,paste_data:content,paste_expire:'0'}).toString()});
+    // After redirect, finalUrl should be the paste URL
+    if(r.finalUrl && r.finalUrl.match(/pastelink\.net\/[a-zA-Z0-9_-]+$/)){
+      return r.finalUrl;
+    }
+    // Try JSON API as fallback
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    const pasteId=d.paste_key||d.id||d.link||d.slug;
-    if(!pasteId) throw new Error('Pastelink: '+r.text.slice(0,100));
-    return 'https://pastelink.net/'+pasteId;
+    const pasteId=d.paste_key||d.id||d.link||d.slug||d.handle;
+    if(pasteId) return 'https://pastelink.net/'+pasteId;
+    // Extract from HTML
+    const m=(r.text||'').match(/pastelink\.net\/([a-zA-Z0-9_-]{3,})/);
+    if(m && !m[1].startsWith('api')) return 'https://pastelink.net/'+m[1];
+    if(r.finalUrl && r.finalUrl.includes('pastelink.net/')) return r.finalUrl;
+    throw new Error('Pastelink: '+(r.error||r.text.slice(0,100)));
   }
 
   if(pid==='ideone'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','ideone.com').body;
+    const apiUser=account.token||account.extra||'';
+    const apiPass=account.extra2||account.extra||'';
+    // Ideone SOAP/REST API — requires registered account credentials
+    // Use the JSON API endpoint with credentials
     const r=await pasteProxyFetch('https://ideone.com/api/1/service/ideone/createSubmission',{method:'POST',
       contentType:'application/json',asJson:true,
-      body:JSON.stringify({user:'guest',pass:'guest',sourceCode:content,language:43,input:'',run:false,private:false,stdRecv:false}, term)});
-    if(!r.ok&&!r.text) throw new Error('Ideone: '+r.error);
+      body:JSON.stringify({user:apiUser||'guest',pass:apiPass||'guest',sourceCode:content,language:43,input:'',run:false,private:false,stdRecv:false})});
+    if(!r.ok&&!r.text) throw new Error('Ideone: '+(r.error||'request failed'));
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    const link=d.result&&d.result.link;
-    if(!link) throw new Error('Ideone: '+r.text.slice(0,100));
-    return 'https://ideone.com/'+link;
+    const link=(d.result&&d.result.link)||d.link||d.id;
+    if(link) return 'https://ideone.com/'+link;
+    // Fallback: onlinegdb as alternative code paste
+    throw new Error('Ideone: '+(d.error||r.text.slice(0,100)));
   }
 
   if(pid==='controlc'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','controlc.com').body;
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const r=await pasteProxyFetch('https://controlc.com/index.php',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
-      body:new URLSearchParams({paste_data:content,paste_title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,expire:'0',submit:'Submit'}).toString()});
-    if(r.redirected && r.text && r.text.includes('controlc.com/')){
-      const mu=r.text.match(/controlc\.com\/([a-f0-9]+)/i); if(mu) return 'https://controlc.com/'+mu[1];
+      body:new URLSearchParams({paste_data:content,paste_title:title,expire:'0',submit:'Submit'}).toString()});
+    // Check finalUrl first (redirect followed by proxy gives the paste URL directly)
+    if(r.finalUrl && r.finalUrl.match(/controlc\.com\/[a-f0-9]+/i)){
+      return r.finalUrl.replace(/\/+$/,'')+'/';
     }
-    const m=r.text&&r.text.match(/controlc\.com\/([a-f0-9]+)/i);
+    // Check body/text for paste URL pattern
+    const urlText = (r.text||'')+(r.finalUrl||'');
+    const m=urlText.match(/controlc\.com\/([a-f0-9]{4,})/i);
     if(m) return 'https://controlc.com/'+m[1];
+    // Check if we got html of the paste page (redirect followed)
+    const m2=(r.text||'').match(/href=["']https?:\/\/controlc\.com\/([a-f0-9]{4,})/i);
+    if(m2) return 'https://controlc.com/'+m2[1];
     throw new Error('ControlC: could not extract paste URL — '+(r.error||r.text.slice(0,80)));
   }
 
@@ -5612,13 +5644,17 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.co').body;
     const editCode=extraVal||Math.random().toString(36).slice(2,10);
     term.add('  Fetching CSRF from rentry.co...','info');
-    const csrf_r=await pasteProxyFetch('https://rentry.co/', {}, term);
+    bcClearLastCookies();
+    const csrf_r=await pasteProxyFetch('https://rentry.co/', {extraCookies:''}, term);
     const csrf_text=csrf_r.text||'';
-    const csrf_m=csrf_text.match(/csrfmiddlewaretoken.*?value="([^"]+)"/);
+    const csrf_m=csrf_text.match(/csrfmiddlewaretoken[^>]*value="([^"]+)"/)||csrf_text.match(/name="csrfmiddlewaretoken"[^>]*value="([^"]+)"/)||csrf_text.match(/value="([^"]{20,})"/);
     const csrf=csrf_m&&csrf_m[1]||'';
+    // Thread the session cookie from the GET response into the POST
+    const sessionCookie=_bcLastCookies||(csrf?'csrftoken='+csrf:'');
     const r=await pasteProxyFetch('https://rentry.co/api/new',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       extraHeaders:{'Referer':'https://rentry.co/','X-CSRFToken':csrf},
+      extraCookies: sessionCookie,
       body:new URLSearchParams({csrfmiddlewaretoken:csrf,text:content,edit_code:editCode}).toString()});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
     if(d.status!=='200'&&d.status!==200) throw new Error('Rentry: '+r.text.slice(0,120));
@@ -5631,13 +5667,16 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.org').body;
     const editCode=extraVal||Math.random().toString(36).slice(2,10);
     term.add('  Fetching CSRF from rentry.org...','info');
-    const csrf_r2=await pasteProxyFetch('https://rentry.org/', {}, term);
+    bcClearLastCookies();
+    const csrf_r2=await pasteProxyFetch('https://rentry.org/', {extraCookies:''}, term);
     const csrf_text2=csrf_r2.text||'';
-    const csrf_m2=csrf_text2.match(/csrfmiddlewaretoken.*?value="([^"]+)"/);
+    const csrf_m2=csrf_text2.match(/csrfmiddlewaretoken[^>]*value="([^"]+)"/)||csrf_text2.match(/name="csrfmiddlewaretoken"[^>]*value="([^"]+)"/)||csrf_text2.match(/value="([^"]{20,})"/);
     const csrf2=csrf_m2&&csrf_m2[1]||'';
+    const sessionCookie2=_bcLastCookies||(csrf2?'csrftoken='+csrf2:'');
     const r=await pasteProxyFetch('https://rentry.org/api/new',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       extraHeaders:{'Referer':'https://rentry.org/','X-CSRFToken':csrf2},
+      extraCookies: sessionCookie2,
       body:new URLSearchParams({csrfmiddlewaretoken:csrf2,text:content,edit_code:editCode}).toString()});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
     if(d.status!=='200'&&d.status!==200) throw new Error('Rentry.org: '+r.text.slice(0,120));
@@ -5648,90 +5687,143 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const apiKey=extraVal||account.extra||account.token||'';
     if(!apiKey) throw new Error('Pastebin: API key required — get it free at pastebin.com/doc_api');
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastebin.com').body;
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     term.add('  Submitting paste to Pastebin...','info');
+    // Pastebin API returns a raw URL string (not JSON) on success, or "Bad API request, ..." on error
     const r=await pasteProxyFetch('https://pastebin.com/api/api_post.php',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       body:new URLSearchParams({
         api_dev_key:apiKey,
         api_paste_code:content,
-        api_paste_name:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
+        api_paste_name:title,
         api_paste_expire_date:'N',
-        api_paste_format:'markdown',
+        api_paste_format:'text',
         api_paste_private:'0',
         api_option:'paste'
       }).toString()});
     const text=(r.text||'').trim();
-    if(!text.startsWith('https://')) throw new Error('Pastebin: '+(text||r.error||'unknown error — check API key'));
-    return text;
+    if(text.startsWith('https://pastebin.com/')) return text;
+    // Handle common errors with clear messages
+    if(text.includes('IP blocked')) throw new Error('Pastebin: IP blocked — try again later or use a different API key');
+    if(text.includes('Invalid API')) throw new Error('Pastebin: invalid API key — check your key at pastebin.com');
+    if(text.startsWith('http')) return text;
+    throw new Error('Pastebin: '+(text||r.error||'unknown error — verify API key at pastebin.com/doc_api'));
   }
 
   if(pid==='dpaste'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','dpaste.org').body;
     term.add('  Submitting paste to dpaste.org...','info');
+    // dpaste.org API returns the paste URL as a plain string (quoted JSON string)
     const r=await pasteProxyFetch('https://dpaste.org/api/',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       body:new URLSearchParams({content,syntax:'text',expiry_days:'365',title:kw}).toString()});
-    const url=(r.text||'').trim().replace(/"/g,'');
-    if(!url.startsWith('http')) throw new Error('dpaste.org: '+(r.error||r.text.slice(0,80)));
-    return url;
+    const url=(r.text||'').trim().replace(/^"|"$/g,'').replace(/\/+$/,'');
+    if(url.startsWith('http')) return url;
+    // Fallback: check finalUrl
+    if(r.finalUrl && r.finalUrl.includes('dpaste.org/')) return r.finalUrl;
+    // Fallback: dpaste.com
+    const r2=await pasteProxyFetch('https://dpaste.com/api/v2/',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      body:new URLSearchParams({content,syntax:'text',expiry_days:'365',title:kw}).toString()});
+    const url2=(r2.text||'').trim().replace(/^"|"$/g,'').replace(/\/+$/,'');
+    if(url2.startsWith('http')) return url2;
+    throw new Error('dpaste: '+(r.error||r.text.slice(0,80)));
   }
 
   if(pid==='hastebin'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','hastebin.com').body;
     term.add('  Submitting paste to Hastebin...','info');
+    // Primary: hastebin.com (Toptal-hosted)
     const r=await pasteProxyFetch('https://hastebin.com/documents',{method:'POST',
-      contentType:'text/plain',body:content}, term);
+      contentType:'text/plain',body:content});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(!d.key) throw new Error('Hastebin: '+(r.error||r.text.slice(0,80)));
-    return 'https://hastebin.com/'+d.key;
+    if(d.key) return 'https://hastebin.com/'+d.key;
+    // Fallback: toptal hosted endpoint
+    const r2=await pasteProxyFetch('https://www.toptal.com/developers/hastebin/documents',{method:'POST',
+      contentType:'text/plain',body:content});
+    let d2={}; try{d2=JSON.parse(r2.text);}catch(e){}
+    if(d2.key) return 'https://www.toptal.com/developers/hastebin/'+d2.key;
+    throw new Error('Hastebin: '+(r.error||r.text.slice(0,80)));
   }
 
   if(pid==='writeas'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','write.as').body;
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     term.add('  Publishing post to Write.as...','info');
     const r=await pasteProxyFetch('https://write.as/api/posts',{method:'POST',
       contentType:'application/json',asJson:true,
-      body:JSON.stringify({body:content,title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,font:'serif',lang:'en'})});
+      body:JSON.stringify({body:content,title,font:'serif',lang:'en'})});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(!d.data||!d.data.slug) throw new Error('Write.as: '+(r.error||r.text.slice(0,100)));
-    return 'https://write.as/'+d.data.slug;
+    // Response: {code:201, data:{id, slug, ...}}
+    const postData = d.data || d;
+    const id = postData.id || postData.slug;
+    if(id) return 'https://write.as/'+id;
+    if(r.finalUrl && r.finalUrl.includes('write.as/')) return r.finalUrl;
+    throw new Error('Write.as: '+(r.error||r.text.slice(0,100)));
   }
 
   if(pid==='pastee'){
     const apiKey=extraVal||account.extra||account.token||'';
     if(!apiKey) throw new Error('Paste.ee: API key required — free at paste.ee/account/api');
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','paste.ee').body;
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     term.add('  Submitting paste to Paste.ee...','info');
-    const r=await pasteProxyFetch('https://paste.ee/api',{method:'POST',
+    // Paste.ee v1 API: POST /api/v1/pastes
+    const r=await pasteProxyFetch('https://api.paste.ee/v1/pastes',{method:'POST',
       contentType:'application/json',asJson:true,
       extraHeaders:{'X-Auth-Token':apiKey},
       body:JSON.stringify({
-        key:'public',
-        description:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
+        description:title,
         sections:[{name:kw,syntax:'text',contents:content}]
       })});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(!d.id&&!d.link) throw new Error('Paste.ee: '+(r.error||r.text.slice(0,100)));
-    return d.link||'https://paste.ee/p/'+d.id;
+    // v1 response: {id, link} or {pastes:[...]}
+    if(d.link) return d.link;
+    if(d.id) return 'https://paste.ee/p/'+d.id;
+    // Legacy endpoint fallback
+    const r2=await pasteProxyFetch('https://paste.ee/api',{method:'POST',
+      contentType:'application/json',asJson:true,
+      extraHeaders:{'X-Auth-Token':apiKey},
+      body:JSON.stringify({key:'public',description:title,sections:[{name:kw,syntax:'text',contents:content}]})});
+    let d2={}; try{d2=JSON.parse(r2.text);}catch(e){}
+    if(d2.id||d2.link) return d2.link||'https://paste.ee/p/'+d2.id;
+    throw new Error('Paste.ee: '+(r.error||r.text.slice(0,100)));
   }
 
   if(pid==='justpaste'){
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','justpaste.it').body;
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     term.add('  Fetching CSRF from JustPaste.it...','info');
-    const homeR=await pasteProxyFetch('https://justpaste.it/', {}, term);
+    bcClearLastCookies();
+    const homeR=await pasteProxyFetch('https://justpaste.it/', {extraCookies:''});
     const homeText=homeR.text||'';
-    const metaM=homeText.match(/<meta[^>]+name=["']?csrf-token["']?[^>]+content=["']([^"']+)["']/i);
-    const inputM=homeText.match(/name=["']?_?csrf[_-]?token["']?[^>]+value=["']([^"']+)["']/i);
+    const sessionCookieJP=_bcLastCookies||'';
+    // Multiple CSRF extraction patterns
+    const metaM=homeText.match(/<meta[^>]+name=["']?csrf-token["']?[^>]+content=["']([^"']+)["']/i)
+               ||homeText.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']?csrf-token["']?/i);
+    const inputM=homeText.match(/name=["']?_?csrf[_-]?token["']?[^>]+value=["']([^"']+)["']/i)
+                ||homeText.match(/value=["']([^"']+)["'][^>]+name=["']?_?csrf[_-]?token["']?/i);
     const csrf2=(metaM&&metaM[1])||(inputM&&inputM[1])||'';
     term.add('  Posting to JustPaste.it...','info');
+    // JustPaste.it main API endpoint
     const postR=await pasteProxyFetch('https://justpaste.it/api/v1/articles',{method:'POST',
       contentType:'application/json',asJson:true,
-      extraHeaders:{'X-CSRF-Token':csrf2},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,visibility:'public'})});
+      extraHeaders:{'X-CSRF-Token':csrf2,'Referer':'https://justpaste.it/'},
+      extraCookies: sessionCookieJP,
+      body:JSON.stringify({title,body:content,visibility:'public'})});
     let postD={}; try{postD=JSON.parse(postR.text);}catch(e){}
-    const alias=postD.alias||postD.id||postD.articleId;
-    if(!alias) throw new Error('JustPaste.it: '+(postR.error||postR.text.slice(0,120)));
-    return 'https://justpaste.it/'+alias;
+    const alias=postD.alias||postD.id||postD.articleId||postD.slug;
+    if(alias) return 'https://justpaste.it/'+alias;
+    // Fallback: form-based submit
+    const formR=await pasteProxyFetch('https://justpaste.it/',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://justpaste.it/'},
+      extraCookies: sessionCookieJP,
+      body:new URLSearchParams({justpaste_token:csrf2,title,content,visibility:'1'}).toString()});
+    if(formR.finalUrl && formR.finalUrl.match(/justpaste\.it\/[a-zA-Z0-9]+/)) return formR.finalUrl;
+    const mJP=(formR.text||'').match(/justpaste\.it\/([a-zA-Z0-9]{3,})/);
+    if(mJP) return 'https://justpaste.it/'+mJP[1];
+    throw new Error('JustPaste.it: '+(postR.error||postR.text.slice(0,120)));
   }
 
   if(pid==='zerobin'){
@@ -5740,48 +5832,60 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     const r=await pasteProxyFetch('https://0bin.net/paste',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       body:new URLSearchParams({content,expire_after:'never'}).toString()});
+    // Check finalUrl first (redirect after submit)
+    if(r.finalUrl && r.finalUrl.includes('0bin.net/paste/')) return r.finalUrl;
     const m=r.text&&r.text.match(/href=["'](\/paste\/[^"']+)["']/i);
     if(m) return 'https://0bin.net'+m[1];
+    // Try JSON response format
+    let d={}; try{d=JSON.parse(r.text);}catch(e){}
+    if(d.paste_id||d.id) return 'https://0bin.net/paste/'+(d.paste_id||d.id);
     throw new Error('0bin.net: '+(r.error||r.text.slice(0,80)));
   }
 
   if(pid==='ghgist'){
     // GitHub Gist — reuse existing GitHub account token
-    const ghAccount=S.accounts.find(a=>a.platform==='github');
-    if(!ghAccount) throw new Error('GitHub Gist: Connect a GitHub account first in Setup → GitHub Pages');
+    const ghAccount=S.accounts.find(a=>a.platform==='github')||account;
+    if(!ghAccount||!ghAccount.token) throw new Error('GitHub Gist: Connect a GitHub account first in Setup → GitHub Pages');
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,ghAccount.login,'gist.github.com').body;
     const desc=(extraVal||'SEO guide')+' — '+kw;
-    term.add('  Creating public Gist as '+ghAccount.login+'...','info');
+    const filename=slug(kw).slice(0,100)+'.md';
+    term.add('  Creating public Gist as '+(ghAccount.login||'user')+'...','info');
+    // GitHub API supports CORS — use smartFetch directly
     const r=await smartFetch('https://api.github.com/gists',{method:'POST',
-      headers:{'Authorization':'token '+ghAccount.token,'Content-Type':'application/json','Accept':'application/vnd.github+json'},
+      headers:{'Authorization':'token '+ghAccount.token,'Content-Type':'application/json','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'},
       body:JSON.stringify({
         description:desc,
         public:true,
-        files:{[slug(kw)+'.md']:{content}}
+        files:{[filename]:{content}}
       })});
     const d=await r.json();
-    if(!d.html_url) throw new Error('GitHub Gist: '+(d.message||JSON.stringify(d).slice(0,80)));
-    return d.html_url;
+    if(d.html_url) return d.html_url;
+    if(d.url) return d.url;
+    throw new Error('GitHub Gist: '+(d.message||JSON.stringify(d).slice(0,80)));
   }
 
   if(pid==='hackmd'){
     const apiToken=extraVal||account.extra||account.token||'';
     if(!apiToken) throw new Error('HackMD: API token required — create one in HackMD Settings → API');
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','hackmd.io').body;
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     term.add('  Creating HackMD note...','info');
     const r=await pasteProxyFetch('https://api.hackmd.io/v1/notes',{method:'POST',
       contentType:'application/json',asJson:true,
       extraHeaders:{'Authorization':'Bearer '+apiToken},
       body:JSON.stringify({
-        title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
-        content:content,
+        title,
+        content,
         readPermission:'guest',
         writePermission:'owner',
         commentPermission:'everyone'
       })});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(!d.publishLink&&!d.id) throw new Error('HackMD: '+(r.error||r.text.slice(0,100)));
-    return d.publishLink||'https://hackmd.io/'+d.id;
+    // HackMD API v1 returns: {id, publishLink, shortId, ...}
+    if(d.publishLink) return d.publishLink;
+    if(d.id) return 'https://hackmd.io/'+d.id;
+    if(d.shortId) return 'https://hackmd.io/'+d.shortId;
+    throw new Error('HackMD: '+(r.error||r.text.slice(0,100)));
   }
 
   // ── FORM-LOGIN PLATFORMS ───────────────────────────────────────
@@ -7852,25 +7956,31 @@ function bcTermSeparator(label){
 // Custom proxy endpoint can be set by user (Cloudflare Worker, etc.)
 let _bcCustomProxy = localStorage.getItem('bc_custom_proxy')||'';
 
-function bcGetVercelProxyUrl(targetUrl, isPost) {
+// Cookie jar for threading CSRF tokens between stateful requests
+let _bcLastCookies = '';
+function bcGetLastCookies(){ return _bcLastCookies; }
+function bcClearLastCookies(){ _bcLastCookies = ''; }
+
+function bcGetVercelProxyUrl(targetUrl, isPost, extraCookies) {
   // Use YOUR Vercel backend as proxy — avoids public proxy IP bans
-  const apiBase = (vercelUrl() || 'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const apiBase = (vercelUrl() || 'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   const secret  = vercelSecret(); // X-API-Key from Settings → Vercel Secret Key
+  const ck = extraCookies||'';
   if(isPost) {
-    return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy', secret };
+    return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy', secret, extraCookies: ck };
   } else {
-    // GET: pass target as query param; mark vercel:true so bcProxyFetch unwraps the JSON envelope {status_code, body}
-    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}`, vercel: true, passBody: false, label: 'vercel-proxy', secret };
+    const cookieParam = ck ? '&cookies='+encodeURIComponent(ck) : '';
+    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}${cookieParam}`, vercel: true, passBody: false, label: 'vercel-proxy', secret, extraCookies: ck };
   }
 }
 
-function bcGetProxyList(targetUrl, isPost){
+function bcGetProxyList(targetUrl, isPost, opts){
   const enc = encodeURIComponent(targetUrl);
   const custom = _bcCustomProxy.trim();
   const list = [];
 
   // 1. YOUR Vercel proxy FIRST — real server IP, not a known proxy, bypasses Cloudflare
-  const vercelProxy = bcGetVercelProxyUrl(targetUrl, isPost);
+  const vercelProxy = bcGetVercelProxyUrl(targetUrl, isPost, opts && opts.extraCookies);
   list.push(vercelProxy);
 
   // 2. Custom proxy second (user-provided Cloudflare Worker or similar)
@@ -7908,7 +8018,7 @@ function bcGetProxyList(targetUrl, isPost){
 
 async function bcProxyFetch(targetUrl, opts={}){
   const isPost = opts.method && opts.method.toUpperCase()==='POST';
-  const proxies = bcGetProxyList(targetUrl, isPost);
+  const proxies = bcGetProxyList(targetUrl, isPost, opts);
   const timeout = opts.timeout || 16000;
 
   for(const proxy of proxies){
@@ -7943,7 +8053,9 @@ async function bcProxyFetch(targetUrl, opts={}){
           url: targetUrl,
           method: opts.method || 'POST',
           body: opts.body,
-          headers: upstreamHdrs
+          headers: upstreamHdrs,
+          cookies: proxy.extraCookies || opts.extraCookies || '',
+          returnCookies: true
         });
       } else if(proxy.vercel && proxy.secret){
         // GET via Vercel proxy — still needs auth header if secret is set
@@ -7963,15 +8075,20 @@ async function bcProxyFetch(targetUrl, opts={}){
 
       if(proxy.vercel){
         // Our Vercel proxy always returns 200 with a JSON envelope.
-        // Unwrap to get the real upstream status_code, body, and redirect flag.
+        // Unwrap to get the real upstream status_code, body, redirect flag, and cookies.
         try{
           const envelope = await resp.json();
           realStatus    = envelope.status_code || resp.status;
           realRedirected= envelope.redirected  || false;
           text          = envelope.body || envelope.text || '';
+          // Thread cookies back so callers can use them in subsequent requests
+          if(envelope.cookies) _bcLastCookies = envelope.cookies;
         }catch(e){
           text = await resp.text().catch(()=>'');
         }
+        // If the upstream site returned an error (4xx/5xx), continue to next proxy
+        // rather than returning immediately — another proxy might succeed
+        if(realStatus >= 400){ continue; }
       } else if(proxy.json && resp.ok){
         try{ const d=await resp.json(); text=d.contents||''; }catch(e){ text=await resp.text().catch(()=>''); }
       } else {
@@ -7981,12 +8098,12 @@ async function bcProxyFetch(targetUrl, opts={}){
       // Skip 5xx from public proxies (try next)
       if(!proxy.vercel && !isPost && realStatus >= 500){ continue; }
 
-      return { ok: realStatus >= 200 && realStatus < 400, status: realStatus, text, redirected: realRedirected, proxy: proxy.label||proxy.url };
+      return { ok: realStatus >= 200 && realStatus < 400, status: realStatus, text, redirected: realRedirected, finalUrl: (proxy.vercel ? undefined : undefined), cookies: _bcLastCookies, proxy: proxy.label||proxy.url };
     } catch(e){
       continue;
     }
   }
-  return { ok: false, status: 0, text: '', error: 'All proxies exhausted' };
+  return { ok: false, status: 0, text: '', error: 'All proxies exhausted', cookies: '' };
 }
 
 // ── WORDPRESS POST ID DETECTOR ───────────────────────────────────
@@ -8031,7 +8148,7 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
   const body = JSON.stringify(payload);
 
   // Try multiple proxies for JSON POST
-  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
     // Vercel proxy FIRST — real IP, bypasses Cloudflare/spam filters
     { url: `${_vBase}/api/proxy`, vercel: true, direct: false },
@@ -8193,7 +8310,7 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
   }
 
   // Referrer header mimics a real browser navigating from the post page
-  const _vBase2 = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase2 = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   const proxyTargets = [
     // Vercel proxy FIRST — real server IP bypasses most blocks
     { vercel: true, url: `${_vBase2}/api/proxy` },
@@ -8434,7 +8551,7 @@ async function bcGenericComment(pageUrl, html, name, email, website, comment, lo
 
   logFn(`   → Generic form POST to: ${postUrl.slice(0,80)}...`,'info');
 
-  const _vBaseG = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBaseG = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   const genericProxyTargets = [
     // Vercel proxy FIRST — real server IP, bypasses Cloudflare WAF
     { vercel: true, url: `${_vBaseG}/api/proxy` },
@@ -8608,7 +8725,7 @@ async function bcBloggerComment(url, html, name, email, comment, logFn){
       commentAuthorUrl: '',
     });
 
-    const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+    const _vBase = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
     try {
       const res = await fetch(`${_vBase}/api/proxy`, {
         method:'POST',
@@ -8659,7 +8776,7 @@ async function bcDisqusComment(url, html, name, email, comment, logFn){
   const apiKey = apiKeyM ? apiKeyM[1] : 'E8Uh5l5fHZ6gD8U3KycjAIAk46f68Zw7C6eW8WSjZvCLXebZ7p0r1yrYDpLPaS'; // Fallback public demo key
 
   // First look up thread ID from identifier
-  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   try {
     const threadLookup = `https://disqus.com/api/3.0/threads/list.json?api_key=${apiKey}&forum=${shortname}&thread=link:${encodeURIComponent(url)}&limit=1`;
     const threadRes = await bcProxyFetch(threadLookup, {timeout:10000});
@@ -8726,7 +8843,7 @@ async function bcSquarespaceComment(url, html, name, email, comment, logFn){
     authorUrl: '',
   });
 
-  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   try {
     const res = await fetch(`${_vBase}/api/proxy`, {
       method:'POST',
@@ -8796,7 +8913,7 @@ async function bcDrupalComment(url, html, name, email, comment, logFn){
     ...(formBuildId ? {form_build_id: formBuildId} : {}),
   });
 
-  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   try {
     const res = await fetch(`${_vBase}/api/proxy`, {
       method:'POST',
@@ -8848,7 +8965,7 @@ async function bcJoomlaComment(url, html, name, email, comment, logFn){
       ...(token ? {[tokenM[1]]:'1'} : {}),
     });
 
-    const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+    const _vBase = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
     try {
       const res = await fetch(`${_vBase}/api/proxy`, {
         method:'POST',
@@ -8912,7 +9029,7 @@ async function bcForumComment(url, html, name, email, comment, logFn){
   if(subBtn&&subBtn.name) params.set(subBtn.name, subBtn.value||'Post');
 
   logFn(`   → Forum POST to: ${postUrl.replace(origin,'')}...`,'info');
-  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  const _vBase = (vercelUrl()||'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   try {
     const res = await fetch(`${_vBase}/api/proxy`, {
       method:'POST',
@@ -13922,7 +14039,7 @@ function acGetVercelBase(){
 // ── Call /api/register on the Vercel backend ──────────────────────────────────
 async function acServerRegister(pid, username, password, captchaKey, useMailTm, autoVerify){
   const base = acGetVercelBase();
-  if(!base) throw new Error('Vercel Backend URL not set — go to Settings and enter your deployed URL (e.g. https://seoparapro.vercel.app)');
+  if(!base) throw new Error('Vercel Backend URL not set — go to Settings and enter your deployed URL (e.g. https://seoprotoolz.vercel.app)');
 
   const secret = settingGet('vercel_secret')||'';
 
@@ -13989,7 +14106,7 @@ async function acRunCreation(){
   if(!vercelBase){
     acLog('❌ Vercel Backend URL is not set!', 't-err');
     acLog('  → Go to ⚙ Settings → Vercel Backend URL', 't-warn');
-    acLog('  → Enter your deployed URL, e.g. https://seoparapro.vercel.app', 'tm');
+    acLog('  → Enter your deployed URL, e.g. https://seoprotoolz.vercel.app', 'tm');
     toast('Set your Vercel Backend URL in Settings first','e');
     return;
   }

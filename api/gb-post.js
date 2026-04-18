@@ -12,9 +12,12 @@
  * }
  */
 
-'use strict';
+import { requireAuth, cors, jsonErr } from '../lib/auth.js';
+import { getProfile, formatContent } from '../lib/site-profiles.js';
+import { chromium } from 'playwright-core';
+import chromiumPkg from '@sparticuz/chromium';
 
-const { requireAuth, cors, jsonErr } = require('../lib/auth');
+export const config = { maxDuration: 300, memory: 1024 };
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
@@ -23,7 +26,7 @@ const DEFAULT_TIMEOUT     = 45_000;
 
 // ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 
-module.exports = async (req, res) => {
+export default async (req, res) => {
   cors(res);
   if (req.method === 'OPTIONS') return res.end();
 
@@ -138,12 +141,6 @@ async function restApiPost(url, credentials, content, options, timeout) {
 async function playwrightPost(url, credentials, content, options, timeout, fallbackReason) {
   try {
     // Forward to blp-post module (internal call)
-    const blpPost = require('../lib/blp-post');
-
-    // We call the core function directly to avoid HTTP overhead
-    const { chromium } = require('playwright-core');
-    const chromiumPkg  = require('@sparticuz/chromium');
-    const { getProfile, formatContent } = require('../lib/site-profiles');
 
     let browser;
     try {
@@ -345,7 +342,6 @@ const REST_HANDLERS = {
   },
 
   'telegra.ph': async (url, creds, content) => {
-    const { default: fetch2 } = await import('node-fetch').catch(() => ({ default: fetch }));
     const nodes = (content.body || '').split('\n\n').filter(Boolean).map(p => ({ tag: 'p', children: [p] }));
     const accessToken = creds.token || '';
     const params = new URLSearchParams({
@@ -405,14 +401,28 @@ const REST_HANDLERS = {
   },
 
   'hastebin.com': async (url, creds, content) => {
-    const r = await fetch('https://hastebin.com/documents', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: content.body,
-    });
-    const data = await r.json();
-    if (!data.key) throw new Error('hastebin error');
-    return { resultUrl: `https://hastebin.com/${data.key}` };
+    // Try toptal/hastebin primary endpoint
+    const endpoints = [
+      'https://www.toptal.com/developers/hastebin/documents',
+      'https://hastebin.com/documents',
+    ];
+    for (const ep of endpoints) {
+      try {
+        const r = await fetch(ep, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: content.body,
+        });
+        if (!r.ok) continue;
+        const data = await r.json();
+        const key = data.key || data.Key;
+        if (key) {
+          const base = ep.includes('toptal') ? 'https://www.toptal.com/developers/hastebin/' : 'https://hastebin.com/';
+          return { resultUrl: base + key };
+        }
+      } catch (_) {}
+    }
+    throw new Error('hastebin: all endpoints failed');
   },
 
   'paste.ee': async (url, creds, content) => {

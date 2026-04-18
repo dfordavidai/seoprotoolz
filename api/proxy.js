@@ -1,50 +1,73 @@
-// api/proxy.js — Universal CORS-safe HTTP proxy
+// api/proxy.js — Universal CORS-safe HTTP proxy v3.0
 //
-// Frontend (smartFetch) sends:
-//   POST { url, method, headers, body, timeout }
-//   GET  ?url=<encoded>
+// Frontend (bcProxyFetch / smartFetch) sends:
+//   POST { url, method, headers, body, timeout, cookies, returnCookies }
+//   GET  ?url=<encoded>&cookies=<cookie-string>
 //
-// Returns: { ok, status, status_code, text, body, redirected, finalUrl, proxy }
-// Note: "status_code" alias included so both old and new frontend code works.
+// Returns: { ok, status, status_code, text, body, redirected, finalUrl, proxy, cookies }
+//   cookies — flattened Set-Cookie values for threading between stateful requests
+//
+// Cookie threading pattern (Django CSRF — rentry, dpaste, etc):
+//   Step 1: POST { url:"https://rentry.co/", returnCookies:true }
+//            → { cookies:"csrftoken=abc123", text:"<html>...csrfmiddlewaretoken...value=\"abc123\"..." }
+//   Step 2: POST { url:"https://rentry.co/api/new", cookies:"csrftoken=abc123",
+//                  headers:{"X-CSRFToken":"abc123","Referer":"https://rentry.co/"},
+//                  body:"csrfmiddlewaretoken=abc123&text=..." }
 
 import { handleCors, checkAuth } from '../lib/auth.js';
 
 export const config = { maxDuration: 60 };
 
-// Private/loopback IP guard
 function isBlockedHost(hostname) {
   return /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|localhost|::1$)/i.test(hostname);
+}
+
+// Extract all Set-Cookie values from a Response into a flat "name=value; name=value" string
+function extractCookies(response) {
+  try {
+    const setCookieHeaders = typeof response.headers.getSetCookie === 'function'
+      ? response.headers.getSetCookie()
+      : [response.headers.get('set-cookie') || ''].filter(Boolean);
+
+    if (!setCookieHeaders || setCookieHeaders.length === 0) return '';
+
+    return setCookieHeaders
+      .map(h => h.split(';')[0].trim())   // name=value only, strip path/domain/expires
+      .filter(Boolean)
+      .join('; ');
+  } catch (_) {
+    return '';
+  }
 }
 
 export default async function handler(req, res) {
   if (handleCors(req, res)) return;
   if (!checkAuth(req, res))  return;
 
-  let targetUrl, method, reqHeaders, reqBody, timeoutSec;
+  let targetUrl, method, reqHeaders, reqBody, timeoutSec, incomingCookies, returnCookies;
 
   if (req.method === 'POST') {
-    const b        = req.body || {};
-    targetUrl      = b.url;
-    method         = (b.method  || 'GET').toUpperCase();
-    reqHeaders     = b.headers  || {};
-    timeoutSec     = Number(b.timeout || b.sfTimeout) || 55;
+    const b         = req.body || {};
+    targetUrl       = b.url;
+    method          = (b.method || 'GET').toUpperCase();
+    reqHeaders      = b.headers || {};
+    timeoutSec      = Number(b.timeout || b.sfTimeout) || 55;
+    incomingCookies = b.cookies || '';
+    returnCookies   = b.returnCookies !== false; // default true
 
-    // Accept body as: string, object, or null
     if (b.body !== undefined && b.body !== null) {
-      if (typeof b.body === 'string') {
-        try { reqBody = b.body; } catch (_) { reqBody = b.body; }
-      } else {
-        reqBody = b.body;
-      }
+      reqBody = typeof b.body === 'string' ? b.body : b.body;
     } else {
       reqBody = null;
     }
   } else if (req.method === 'GET') {
-    targetUrl  = req.query?.url;
-    method     = 'GET';
-    reqHeaders = {};
-    reqBody    = null;
-    timeoutSec = 55;
+    targetUrl       = req.query?.url;
+    method          = 'GET';
+    reqHeaders      = {};
+    reqBody         = null;
+    timeoutSec      = 55;
+    incomingCookies = req.query?.cookies || '';
+    returnCookies   = true;
   } else {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
@@ -53,7 +76,6 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, error: 'Missing required field: url' });
   }
 
-  // Validate URL
   let parsed;
   try { parsed = new URL(targetUrl); } catch (e) {
     return res.status(400).json({ ok: false, error: 'Invalid URL: ' + targetUrl });
@@ -65,45 +87,56 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, error: 'Requests to private/loopback addresses are blocked' });
   }
 
-  // Build fetch options
+  // Build merged headers — thread cookies from request body into Cookie header
+  const mergedHeaders = {
+    'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    ...reqHeaders,
+  };
+
+  // Merge incoming cookie string with any Cookie header from reqHeaders
+  const existingCookieHeader = mergedHeaders['Cookie'] || mergedHeaders['cookie'] || '';
+  const allCookies = [existingCookieHeader, incomingCookies].filter(Boolean).join('; ').trim();
+  if (allCookies) {
+    mergedHeaders['Cookie'] = allCookies;
+    delete mergedHeaders['cookie'];
+  }
+
   const fetchOpts = {
     method,
-    headers: {
-      'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-      ...reqHeaders,
-    },
+    headers: mergedHeaders,
     redirect: 'follow',
     signal:   AbortSignal.timeout(timeoutSec * 1000),
   };
 
   if (reqBody !== null && !['GET', 'HEAD'].includes(method)) {
     fetchOpts.body = typeof reqBody === 'string' ? reqBody : JSON.stringify(reqBody);
-    // If content-type not set and body is object, default to JSON
     if (!fetchOpts.headers['Content-Type'] && !fetchOpts.headers['content-type'] && typeof reqBody === 'object') {
       fetchOpts.headers['Content-Type'] = 'application/json';
     }
   }
 
   try {
-    const upstream  = await fetch(targetUrl, fetchOpts);
-    const text      = await upstream.text();
-    const status    = upstream.status;
+    const upstream = await fetch(targetUrl, fetchOpts);
+    const text     = await upstream.text();
+    const status   = upstream.status;
 
-    // Try to parse JSON so callers can do d.json directly
+    const responseCookies = returnCookies ? extractCookies(upstream) : '';
+
     let json = null;
     try { json = JSON.parse(text); } catch (_) {}
 
     return res.status(200).json({
       ok:          upstream.ok,
       status,
-      status_code: status,      // alias for legacy frontend code
+      status_code: status,
       text,
-      body:        json || text, // parsed JSON when available
+      body:        json || text,
       redirected:  upstream.redirected,
       finalUrl:    upstream.url,
       proxy:       'vercel',
+      cookies:     responseCookies,
     });
   } catch (err) {
     const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError';
@@ -113,6 +146,7 @@ export default async function handler(req, res) {
       status_code: isTimeout ? 504 : 502,
       text:        '',
       body:        null,
+      cookies:     '',
       error:       isTimeout ? `Request timed out after ${timeoutSec}s` : err.message,
       proxy:       'vercel',
     });

@@ -704,6 +704,1094 @@ const REST_HANDLERS = {
     if (!r.ok) throw new Error(data.message || 'HackMD error');
     return { resultUrl: `https://hackmd.io/${data.id}` };
   },
+
+  // ── GHOST.IO ── Admin Content API
+  'ghost.io': async (url, creds, content) => {
+    // Ghost Admin API: POST /ghost/api/admin/posts/
+    // creds: { subdomain, token } — token is Admin API key (id:secret format)
+    const subdomain = creds.subdomain || new URL(url.startsWith('http') ? url : 'https://' + url).hostname.split('.')[0];
+    const base = `https://${subdomain}.ghost.io`;
+    const adminKey = creds.token || creds.api_key || '';
+    if (!adminKey) throw new Error('ghost.io: Admin API key required (id:secret format)');
+
+    // Split key into id + secret, create JWT
+    const [keyId, keySecret] = adminKey.split(':');
+    if (!keyId || !keySecret) throw new Error('ghost.io: token must be "id:secret" format from Admin API settings');
+
+    // Ghost uses HS256 JWT — build manually without jwt lib
+    const now = Math.floor(Date.now() / 1000);
+    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT', kid: keyId })).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+    const payload = btoa(JSON.stringify({ iat: now, exp: now + 300, aud: '/admin/' })).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+    const sigInput = `${header}.${payload}`;
+
+    // Use Web Crypto to sign
+    const secretBytes = new Uint8Array(keySecret.match(/.{2}/g).map(b => parseInt(b, 16)));
+    const cryptoKey = await crypto.subtle.importKey('raw', secretBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const sigBuf = await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(sigInput));
+    const sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf))).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+    const jwt = `${sigInput}.${sig}`;
+
+    const r = await fetch(`${base}/ghost/api/admin/posts/`, {
+      method: 'POST',
+      headers: { Authorization: `Ghost ${jwt}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ posts: [{ title: content.title || 'Post', lexical: JSON.stringify({ root: { children: [{ children: [{ detail: 0, format: 0, mode: 'normal', style: '', text: content.body || '', type: 'text', version: 1 }], direction: 'ltr', format: '', indent: 0, type: 'paragraph', version: 1 }], direction: 'ltr', format: '', indent: 0, type: 'root', version: 1 } }), status: 'published' }] }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.errors?.[0]?.message || 'ghost.io API error');
+    return { resultUrl: data.posts?.[0]?.url || base };
+  },
+
+  // ── WORDPRESS.COM ── REST API v1.1
+  'wordpress.com': async (url, creds, content) => {
+    // Requires OAuth token from WordPress.com developer app
+    // creds: { token, siteId } — siteId = site domain or numeric ID
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('wordpress.com: OAuth token required');
+    const siteId = creds.siteId || creds.site_id || 'me';
+    const r = await fetch(`https://public-api.wordpress.com/rest/v1.1/sites/${siteId}/posts/new`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Post', content: content.body || '', status: 'publish', format: 'standard', tags: content.tags || '' }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || 'wordpress.com API error');
+    return { resultUrl: data.URL || data.url || 'https://wordpress.com' };
+  },
+
+  // ── BLOGGER.COM ── Blogger API v3
+  'blogger.com': async (url, creds, content) => {
+    // creds: { token, blogId } — token = Google OAuth2 access token
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('blogger.com: Google OAuth2 token required');
+    const blogId = creds.blogId || creds.blog_id;
+    if (!blogId) throw new Error('blogger.com: blogId required');
+    const r = await fetch(`https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts/`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'blogger#post', title: content.title || 'Post', content: content.body || '' }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || 'blogger.com API error');
+    return { resultUrl: data.url || 'https://blogger.com' };
+  },
+
+  // ── TUMBLR.COM ── Tumblr API v2
+  'tumblr.com': async (url, creds, content) => {
+    // creds: { token, blogName } — token = OAuth2 Bearer token from Tumblr app
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('tumblr.com: OAuth token required');
+    const blogName = creds.blogName || creds.blog_name || creds.username;
+    if (!blogName) throw new Error('tumblr.com: blogName required');
+    const r = await fetch(`https://api.tumblr.com/v2/blog/${blogName}.tumblr.com/posts`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: [{ type: 'text', text: `# ${content.title || ''}\n\n${content.body || ''}` }], state: 'published', tags: (content.tags || '').split(',').map(t => t.trim()).filter(Boolean) }),
+    });
+    const data = await r.json();
+    if (data.meta?.status !== 201 && !data.response?.id_string) throw new Error(data.meta?.msg || 'tumblr.com API error');
+    const postId = data.response?.id_string || data.response?.id;
+    return { resultUrl: `https://${blogName}.tumblr.com/post/${postId}` };
+  },
+
+  // ── SUBSTACK.COM ── Substack API (private but stable)
+  'substack.com': async (url, creds, content) => {
+    // creds: { subdomain, token } — token = substack-sid cookie value
+    const subdomain = creds.subdomain || 'open';
+    const cookieVal = creds.token || creds.cookie;
+    if (!cookieVal) throw new Error('substack.com: substack-sid cookie token required');
+    const base = `https://${subdomain}.substack.com`;
+
+    // Create draft
+    const draftRes = await fetch(`${base}/api/v1/drafts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `substack-sid=${cookieVal}` },
+      body: JSON.stringify({ draft_title: content.title || 'Post', draft_body: JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: content.body || '' }] }] }), type: 'newsletter', audience: 'everyone' }),
+    });
+    const draft = await draftRes.json();
+    if (!draft.id) throw new Error(`substack.com: draft creation failed — ${JSON.stringify(draft)}`);
+
+    // Publish
+    const pubRes = await fetch(`${base}/api/v1/drafts/${draft.id}/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `substack-sid=${cookieVal}` },
+      body: JSON.stringify({ send: false, share_automatically: true }),
+    });
+    const pub = await pubRes.json();
+    return { resultUrl: pub.canonical_url || `${base}/p/${draft.slug || draft.id}` };
+  },
+
+  // ── LIVEJOURNAL.COM ── XML-RPC API
+  'livejournal.com': async (url, creds, content) => {
+    const xmlBody = `<?xml version="1.0"?>
+<methodCall>
+  <methodName>LJ.XMLRPC.postevent</methodName>
+  <params><param><value><struct>
+    <member><name>username</name><value><string>${creds.username || ''}</string></value></member>
+    <member><name>password</name><value><string>${creds.password || ''}</string></value></member>
+    <member><name>ver</name><value><int>1</int></value></member>
+    <member><name>subject</name><value><string>${(content.title || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</string></value></member>
+    <member><name>event</name><value><string>${(content.body || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</string></value></member>
+    <member><name>security</name><value><string>public</string></value></member>
+    <member><name>lineendings</name><value><string>unix</string></value></member>
+    <member><name>year</name><value><int>${new Date().getFullYear()}</int></value></member>
+    <member><name>mon</name><value><int>${new Date().getMonth() + 1}</int></value></member>
+    <member><name>day</name><value><int>${new Date().getDate()}</int></value></member>
+    <member><name>hour</name><value><int>${new Date().getHours()}</int></value></member>
+    <member><name>min</name><value><int>${new Date().getMinutes()}</int></value></member>
+  </struct></value></param></params>
+</methodCall>`;
+    const r = await fetch('https://www.livejournal.com/interface/xmlrpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/xml', 'User-Agent': 'Mozilla/5.0' },
+      body: xmlBody,
+    });
+    const text = await r.text();
+    const itemIdMatch = text.match(/<name>itemid<\/name>\s*<value><int>(\d+)<\/int>/);
+    if (!itemIdMatch) throw new Error(`livejournal.com: ${text.includes('fault') ? text.match(/<string>([^<]+)<\/string>/)?.[1] || 'post failed' : 'no itemid in response'}`);
+    return { resultUrl: `https://${creds.username}.livejournal.com/${itemIdMatch[1]}.html` };
+  },
+
+  // ── VOCAL.MEDIA ── GraphQL API
+  'vocal.media': async (url, creds, content) => {
+    // creds: { token } — Bearer token from Vocal account
+    const token = creds.token;
+    if (!token) throw new Error('vocal.media: Bearer token required');
+    const r = await fetch('https://vocal.media/api/stories', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Post', body: content.body || '', genre: creds.genre || 'education', status: 'published' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.story?.url || 'https://vocal.media' };
+    }
+    throw new Error(`vocal.media: API error ${r.status}`);
+  },
+
+  // ── WATTPAD.COM ── Wattpad API
+  'wattpad.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('wattpad.com: OAuth token required');
+    // Create story first
+    const storyRes = await fetch('https://www.wattpad.com/api/v3/stories', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Post', language: { id: 1 }, categories: [9], isPublished: true }),
+    });
+    const story = await storyRes.json();
+    if (!story.id) throw new Error(`wattpad.com: story creation failed — ${JSON.stringify(story)}`);
+
+    // Add chapter
+    const partRes = await fetch(`https://www.wattpad.com/api/v3/stories/${story.id}/parts`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Chapter 1', text: content.body || '', draft: false }),
+    });
+    const part = await partRes.json();
+    return { resultUrl: `https://www.wattpad.com/story/${story.id}` };
+  },
+
+  // ── HUBPAGES.COM ── form-based (no public API; cookie auth)
+  'hubpages.com': async (url, creds, content) => {
+    const token = creds.token; // session cookie value
+    if (!token) throw new Error('hubpages.com: session token/cookie required');
+    const r = await fetch('https://hubpages.com/api/hub', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `sess=${token}` },
+      body: JSON.stringify({ title: content.title || 'Post', summary: (content.body || '').substring(0, 200), capsules: [{ type: 'text', body: content.body || '' }], published: true }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || 'https://hubpages.com' };
+    }
+    throw new Error(`hubpages.com: API error ${r.status}`);
+  },
+
+  // ── CLICK4R.COM ── session-cookie based API
+  'click4r.com': async (url, creds, content) => {
+    // Login to get session cookie
+    const loginRes = await fetch('https://www.click4r.com/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://www.click4r.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ email: creds.username || creds.email || '', password: creds.password || '', remember: '1' }).toString(),
+      redirect: 'manual',
+    });
+    const cookies = loginRes.headers.get('set-cookie') || '';
+    if (!cookies) throw new Error('click4r.com: login failed — no session cookie');
+
+    // Post content
+    const postRes = await fetch('https://www.click4r.com/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookies, 'Referer': 'https://www.click4r.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ title: content.title || 'Post', body: content.body || '', status: 'published', tags: content.tags || '' }),
+    });
+    if (postRes.ok) {
+      const data = await postRes.json().catch(() => ({}));
+      return { resultUrl: data.url || data.permalink || 'https://www.click4r.com' };
+    }
+    // Try form-based fallback
+    const formRes = await fetch('https://www.click4r.com/posts/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://www.click4r.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ title: content.title || 'Post', body: content.body || '', status: 'published' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = formRes.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : 'https://www.click4r.com' + loc) : 'https://www.click4r.com' };
+  },
+
+  // ── DIIGO.COM ── Diigo API v3
+  'diigo.com': async (url, creds, content) => {
+    // creds: { username, token } — token = API key from diigo.com/api_keys
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('diigo.com: API key required from diigo.com/api_keys');
+    // Diigo bookmarks API — save a link with annotation
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://www.google.com';
+    const r = await fetch(`https://secure.diigo.com/api/v2/bookmarks`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${btoa(`${creds.username}:${token}`)}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ url: targetUrl, title: content.title || 'Post', desc: (content.body || '').substring(0, 1000), tags: (content.tags || 'seo').replace(/,\s*/g, ','), shared: 'yes' }).toString(),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) return { resultUrl: `https://www.diigo.com/user/${creds.username}` };
+    throw new Error(data.message || `diigo.com: error ${r.status}`);
+  },
+
+  // ── MIX.COM ── Mix bookmarking API
+  'mix.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('mix.com: API token required');
+    const targetUrl = (content.links && content.links[0]?.url) || url;
+    const r = await fetch('https://mix.com/api/v2/saves', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl, title: content.title || '', description: (content.body || '').substring(0, 500) }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.permalink || 'https://mix.com' };
+    }
+    throw new Error(`mix.com: API error ${r.status}`);
+  },
+
+  // ── PINTEREST.COM ── Pinterest API v5
+  'pinterest.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('pinterest.com: OAuth token required');
+    const boardId = creds.boardId || creds.board_id;
+    if (!boardId) throw new Error('pinterest.com: boardId required');
+    const r = await fetch('https://api.pinterest.com/v5/pins', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ board_id: boardId, title: content.title || 'Pin', description: (content.body || '').substring(0, 500), link: (content.links && content.links[0]?.url) || 'https://example.com', media_source: { source_type: 'image_url', url: creds.imageUrl || 'https://via.placeholder.com/600x400.png?text=Pin' } }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || 'pinterest.com API error');
+    return { resultUrl: `https://www.pinterest.com/pin/${data.id}` };
+  },
+
+  // ── PRLOG.ORG ── Press release (form-based, no public API)
+  'prlog.org': async (url, creds, content) => {
+    // Login
+    const loginRes = await fetch('https://www.prlog.org/login.html', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://www.prlog.org/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ email: creds.username || creds.email || '', password: creds.password || '', action: 'login' }).toString(),
+      redirect: 'manual',
+    });
+    const cookies = loginRes.headers.get('set-cookie') || '';
+
+    // Submit press release
+    const submitRes = await fetch('https://www.prlog.org/submit/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://www.prlog.org/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ headline: content.title || 'Press Release', summary: (content.body || '').substring(0, 300), body: content.body || '', action: 'submit', agree: '1' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = submitRes.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : 'https://www.prlog.org' + loc) : 'https://www.prlog.org' };
+  },
+
+  // ── OPENPR.COM ── Press release (form-based)
+  'openpr.com': async (url, creds, content) => {
+    const loginRes = await fetch('https://www.openpr.com/account/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://www.openpr.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ email: creds.username || creds.email || '', password: creds.password || '' }).toString(),
+      redirect: 'manual',
+    });
+    const cookies = loginRes.headers.get('set-cookie') || '';
+
+    // Submit
+    const r = await fetch('https://www.openpr.com/news/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://www.openpr.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ headline: content.title || 'Press Release', abstract: (content.body || '').substring(0, 500), body: content.body || '', category: '14', submit: 'Submit Press Release' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : 'https://www.openpr.com' + loc) : 'https://www.openpr.com' };
+  },
+
+  // ── EINPRESSWIRE.COM ── (EIN Presswire REST API)
+  'einpresswire.com': async (url, creds, content) => {
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('einpresswire.com: API key required');
+    const r = await fetch('https://www.einpresswire.com/api/1/news_releases', {
+      method: 'POST',
+      headers: { 'x-apikey': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ headline: content.title || 'Press Release', body: content.body || '', keywords: content.tags || '' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.link || 'https://www.einpresswire.com' };
+    }
+    throw new Error(`einpresswire.com: ${r.status}`);
+  },
+
+  // ── EZINEARTICLES.COM ── (form-based, no public API)
+  'ezinearticles.com': async (url, creds, content) => {
+    const loginRes = await fetch('https://ezinearticles.com/?Member-Login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://ezinearticles.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ Email: creds.username || creds.email || '', Password: creds.password || '', action: 'login', submit: 'Login' }).toString(),
+      redirect: 'manual',
+    });
+    const cookies = loginRes.headers.get('set-cookie') || '';
+    const r = await fetch('https://ezinearticles.com/?Submit-Articles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://ezinearticles.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ Title: content.title || 'Article', Body: content.body || '', action: 'submit', submit: 'Submit+Article' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : 'https://ezinearticles.com' + loc) : 'https://ezinearticles.com' };
+  },
+
+  // ── ARTICLEBASE.COM ── (form-based)
+  'articlebase.com': async (url, creds, content) => {
+    const loginRes = await fetch('https://www.articlebase.com/login.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://www.articlebase.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ login: creds.username || '', password: creds.password || '', submit: 'Login' }).toString(),
+      redirect: 'manual',
+    });
+    const cookies = loginRes.headers.get('set-cookie') || '';
+    const r = await fetch('https://www.articlebase.com/submit.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://www.articlebase.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ title: content.title || '', body: content.body || '', submit: 'Submit' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : 'https://www.articlebase.com' + loc) : 'https://www.articlebase.com' };
+  },
+
+  // ── SCRIBD.COM ── upload via REST (requires upload flow)
+  'scribd.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('scribd.com: session token required (cookie value)');
+    // Scribd uses a multipart upload; create a minimal text file and upload
+    const textBlob = content.body || '';
+    const formData = new FormData();
+    formData.append('session_key', token);
+    formData.append('title', content.title || 'Document');
+    formData.append('description', (content.body || '').substring(0, 500));
+    formData.append('file', new Blob([textBlob], { type: 'text/plain' }), 'document.txt');
+    const r = await fetch('https://api.scribd.com/api?method=docs.upload&api_key=' + (creds.api_key || ''), {
+      method: 'POST',
+      headers: { Authorization: `Basic ${btoa(token + ':')}` },
+      body: formData,
+    });
+    const text = await r.text();
+    const idMatch = text.match(/<doc_id>(\d+)<\/doc_id>/);
+    if (idMatch) return { resultUrl: `https://www.scribd.com/document/${idMatch[1]}` };
+    throw new Error(`scribd.com: upload failed`);
+  },
+
+  // ── ISSUU.COM ── Issuu API v2
+  'issuu.com': async (url, creds, content) => {
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('issuu.com: API token required');
+    // Issuu requires document upload; create a minimal PDF-like content
+    // Use their drafts API
+    const r = await fetch('https://api.issuu.com/v2/drafts', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Document', description: (content.body || '').substring(0, 500), access: 'PUBLIC' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.shareUrl || data.url || 'https://issuu.com' };
+    }
+    throw new Error(`issuu.com: API error ${r.status}`);
+  },
+
+  // ── SLIDESHARE.NET ── SlideShare upload API
+  'slideshare.net': async (url, creds, content) => {
+    // SlideShare requires actual file upload; use their legacy API
+    const apiKey = creds.api_key || creds.token;
+    const secret = creds.secret;
+    if (!apiKey) throw new Error('slideshare.net: API key required');
+    const ts = Math.floor(Date.now() / 1000).toString();
+    const hashInput = secret + ts;
+    // SHA1 hash using SubtleCrypto
+    const msgBuf = new TextEncoder().encode(hashInput);
+    const hashBuf = await crypto.subtle.digest('SHA-1', msgBuf);
+    const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    const params = new URLSearchParams({
+      api_key: apiKey,
+      ts,
+      hash: hashHex,
+      username: creds.username || '',
+      password: creds.password || '',
+      slideshow_title: content.title || 'Presentation',
+      slideshow_description: (content.body || '').substring(0, 3000),
+      slideshow_srcfile: 'https://via.placeholder.com/1280x960.png', // placeholder
+      make_src_public: 'Y',
+    });
+    const r = await fetch('https://www.slideshare.net/api/2/upload_slideshow', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    const text = await r.text();
+    const idMatch = text.match(/<SlideShowID>(\d+)<\/SlideShowID>/);
+    if (idMatch) return { resultUrl: `https://www.slideshare.net/slideshow/${idMatch[1]}` };
+    throw new Error(`slideshare.net: upload failed`);
+  },
+
+  // ── NOTION.SO ── Notion API
+  'notion.so': async (url, creds, content) => {
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('notion.so: Integration token required (secret_...)');
+    const pageId = creds.pageId || creds.page_id;
+    if (!pageId) throw new Error('notion.so: parent pageId required');
+    const r = await fetch('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Notion-Version': '2022-06-28' },
+      body: JSON.stringify({
+        parent: { page_id: pageId },
+        properties: { title: { title: [{ text: { content: content.title || 'Post' } }] } },
+        children: (content.body || '').split('\n\n').filter(Boolean).map(p => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: p } }] } })),
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || 'notion.so API error');
+    return { resultUrl: data.url || `https://notion.so/${data.id?.replace(/-/g, '')}` };
+  },
+
+  // ── WEEBLY.COM ── Weebly/Square API
+  'weebly.com': async (url, creds, content) => {
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('weebly.com: API token required');
+    const siteId = creds.siteId || creds.site_id;
+    if (!siteId) throw new Error('weebly.com: siteId required');
+    const r = await fetch(`https://api.weebly.com/v1/user/sites/${siteId}/blogs/${creds.blogId || '1'}/posts`, {
+      method: 'POST',
+      headers: { 'X-Weebly-Access-Token': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ post_title: content.title || 'Post', post_body: content.body || '', published: true }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || 'weebly.com API error');
+    return { resultUrl: data.post_url || `https://${creds.subdomain || 'mysite'}.weebly.com/blog` };
+  },
+
+  // ── STRIKINGLY.COM ── no public API; form-based via cookie
+  'strikingly.com': async (url, creds, content) => {
+    const token = creds.token; // _strikingly_session cookie
+    if (!token) throw new Error('strikingly.com: session token required');
+    const siteId = creds.siteId || creds.site_id;
+    const r = await fetch(`https://www.strikingly.com/api/sites/${siteId}/blog_posts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `_strikingly_session=${token}`, 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify({ blog_post: { title: content.title || 'Post', content: content.body || '', published: true } }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.permalink || 'https://www.strikingly.com' };
+    }
+    throw new Error(`strikingly.com: API error ${r.status}`);
+  },
+
+  // ── WIX.COM ── Wix Headless / Blog API
+  'wix.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('wix.com: API token required');
+    const r = await fetch('https://www.wixapis.com/blog/v3/posts', {
+      method: 'POST',
+      headers: { Authorization: token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ post: { title: content.title || 'Post', richContent: { nodes: [{ type: 'PARAGRAPH', nodes: [{ type: 'TEXT', textData: { text: content.body || '', decorations: [] } }] }] }, status: 'PUBLISHED' } }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || 'wix.com API error');
+    return { resultUrl: data.post?.url || 'https://www.wix.com' };
+  },
+
+  // ── JIMDO.COM ── no public REST API; use form submission with cookie
+  'jimdo.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('jimdo.com: session cookie required');
+    const siteDomain = creds.siteDomain || `${creds.subdomain || 'mysite'}.jimdofree.com`;
+    const r = await fetch(`https://${siteDomain}/blog/new-entry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: `JSESSIONID=${token}`, 'User-Agent': 'Mozilla/5.0', 'Referer': `https://${siteDomain}` },
+      body: new URLSearchParams({ title: content.title || 'Post', text: content.body || '', action: 'save', published: 'true' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : `https://${siteDomain}` + loc) : `https://${siteDomain}/blog` };
+  },
+
+  // ── WEBNODE.COM ── no public API; form-based
+  'webnode.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('webnode.com: session token required');
+    const siteId = creds.siteId || creds.site_id;
+    const r = await fetch(`https://www.webnode.com/manager/article/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `webnode_session=${token}`, 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ siteId, title: content.title || 'Post', text: content.body || '', status: 'published' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || 'https://www.webnode.com' };
+    }
+    throw new Error(`webnode.com: API error ${r.status}`);
+  },
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // ── NEW BATCH: 25 ADDITIONAL HIGH-DA SITES ──────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── TELEGRA.PH (Telegraph) ── simple anonymous rich-text publishing (DA 74)
+  'telegra.ph': async (url, creds, content) => {
+    // Can use an existing access_token or create a new account on the fly
+    let accessToken = creds.token || '';
+    if (!accessToken) {
+      const accRes = await fetch('https://api.telegra.ph/createAccount?short_name=SEOBot&author_name=SEOBot');
+      const acc = await accRes.json();
+      if (acc.ok) accessToken = acc.result.access_token;
+    }
+    const nodes = (content.body || '').split('\n\n').filter(Boolean).map(p => ({ tag: 'p', children: [p] }));
+    const params = new URLSearchParams({ access_token: accessToken, title: content.title || 'Post', content: JSON.stringify(nodes), author_name: creds.username || 'Author' });
+    const r = await fetch(`https://api.telegra.ph/createPage?${params}`);
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || 'telegra.ph error');
+    return { resultUrl: data.result.url };
+  },
+
+  // ── PASTE.FO ── anonymous paste (DA 50+)
+  'paste.fo': async (url, creds, content) => {
+    const r = await fetch('https://paste.fo/api/paste', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ content: content.body || ' ', title: content.title || '', syntax: 'text', visibility: 'public' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      if (data.url || data.id) return { resultUrl: data.url || `https://paste.fo/${data.id}` };
+    }
+    // form fallback
+    const r2 = await fetch('https://paste.fo/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://paste.fo/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ content: content.body || ' ', title: content.title || '', syntax: 'text' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r2.headers.get('location') || '';
+    if (loc) return { resultUrl: loc.startsWith('http') ? loc : 'https://paste.fo' + loc };
+    throw new Error('paste.fo: paste failed');
+  },
+
+  // ── PASTE.RS ── Rust-based anonymous paste (DA 45+)
+  'paste.rs': async (url, creds, content) => {
+    const r = await fetch('https://paste.rs/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain', 'User-Agent': 'Mozilla/5.0' },
+      body: content.body || ' ',
+    });
+    if (r.ok) {
+      const pasteUrl = r.url || r.headers.get('location') || '';
+      // paste.rs returns the paste URL in the body
+      const text = await r.text();
+      return { resultUrl: text.trim().startsWith('http') ? text.trim() : pasteUrl || 'https://paste.rs' };
+    }
+    throw new Error(`paste.rs: ${r.status}`);
+  },
+
+  // ── PASTECODE.IO ── anonymous paste site (DA 48+)
+  'pastecode.io': async (url, creds, content) => {
+    const r = await fetch('https://pastecode.io/api/paste', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ text: content.body || ' ', title: content.title || '', language: 'text', expiry: 'never', private: false }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.link || 'https://pastecode.io' };
+    }
+    throw new Error(`pastecode.io: ${r.status}`);
+  },
+
+  // ── GHOSTBIN.COM / GHB alternative ── (DA 45+)
+  'ghostbin.co': async (url, creds, content) => {
+    const r = await fetch('https://ghostbin.co/paste/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://ghostbin.co/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ text: content.body || ' ', lang: 'text', expire: 'never', password: '', title: content.title || '' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || r.url;
+    if (loc && !loc.includes('new')) return { resultUrl: loc.startsWith('http') ? loc : 'https://ghostbin.co' + loc };
+    throw new Error('ghostbin.co: paste failed');
+  },
+
+  // ── BITBUCKET.ORG ── Snippets API (DA 92)
+  'bitbucket.org': async (url, creds, content) => {
+    const token = creds.token || creds.api_key;
+    const username = creds.username;
+    if (!token || !username) throw new Error('bitbucket.org: username + token (app password) required');
+    const r = await fetch(`https://api.bitbucket.org/2.0/snippets/${username}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Snippet', is_private: false, files: { 'snippet.md': { content: content.body || ' ' } } }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message || `bitbucket.org: ${r.status}`);
+    return { resultUrl: data.links?.html?.href || `https://bitbucket.org/snippets/${username}/${data.id}` };
+  },
+
+  // ── GITLAB.COM ── Snippets API (DA 93)
+  'gitlab.com': async (url, creds, content) => {
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('gitlab.com: Personal Access Token required');
+    const r = await fetch('https://gitlab.com/api/v4/snippets', {
+      method: 'POST',
+      headers: { 'PRIVATE-TOKEN': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Snippet', visibility: 'public', files: [{ file_path: 'snippet.md', content: content.body || ' ' }] }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || `gitlab.com: ${r.status}`);
+    return { resultUrl: data.web_url || `https://gitlab.com/-/snippets/${data.id}` };
+  },
+
+  // ── GIST.GITHUB.COM ── GitHub Gists API (DA 97)
+  'gist.github.com': async (url, creds, content) => {
+    const token = creds.token || creds.api_key;
+    if (!token) throw new Error('gist.github.com: GitHub Personal Access Token required');
+    const r = await fetch('https://api.github.com/gists', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'SEOBot/1.0' },
+      body: JSON.stringify({ description: content.title || 'Post', public: true, files: { 'post.md': { content: content.body || ' ' } } }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || `gist.github.com: ${r.status}`);
+    return { resultUrl: data.html_url || `https://gist.github.com/${data.id}` };
+  },
+
+  // ── CODEPEN.IO ── Pen API (DA 90)
+  'codepen.io': async (url, creds, content) => {
+    // CodePen has no public REST API; use their form-based prefill URL as a deep link
+    // For actual posting, use session cookie approach
+    const token = creds.token; // codepen session cookie
+    if (!token) throw new Error('codepen.io: session cookie required (_session)');
+    const r = await fetch('https://codepen.io/pens/public', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Cookie': `_session=${token}`, 'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://codepen.io', 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ title: content.title || 'Post', html: content.body || ' ', css: '', js: '', is_public: true }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.permalink || 'https://codepen.io' };
+    }
+    throw new Error(`codepen.io: ${r.status}`);
+  },
+
+  // ── JSFIDDLE.NET ── JSFiddle API (DA 89)
+  'jsfiddle.net': async (url, creds, content) => {
+    // jsFiddle has a limited form-post API
+    const r = await fetch('https://jsfiddle.net/api/post/library/pure/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://jsfiddle.net/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ title: content.title || 'Post', description: content.body || ' ', html: `<pre>${(content.body || '').replace(/</g, '&lt;')}</pre>`, css: '', js: '', resources: '' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || r.url;
+    if (loc && loc !== 'https://jsfiddle.net/') return { resultUrl: loc.startsWith('http') ? loc : 'https://jsfiddle.net' + loc };
+    throw new Error('jsfiddle.net: fiddle creation failed');
+  },
+
+  // ── MEDIUM.COM (via API) ── already exists but adding alias for app.medium.com
+  'app.medium.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('medium.com: Integration token required');
+    const me = await fetch('https://api.medium.com/v1/me', { headers: { Authorization: `Bearer ${token}` } });
+    const meData = await me.json();
+    const userId = meData.data?.id;
+    if (!userId) throw new Error('medium.com: could not get user ID — check token');
+    const r = await fetch(`https://api.medium.com/v1/users/${userId}/posts`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Post', contentFormat: 'markdown', content: content.body || '', publishStatus: 'public', tags: (content.tags || '').split(',').map(t => t.trim()).slice(0, 5) }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.data) throw new Error(data.errors?.[0]?.message || 'medium.com API error');
+    return { resultUrl: data.data.url };
+  },
+
+  // ── REDDIT.COM ── Reddit OAuth API (DA 96)
+  'reddit.com': async (url, creds, content) => {
+    const token = creds.token; // OAuth2 Bearer token — get from https://www.reddit.com/prefs/apps
+    if (!token) throw new Error('reddit.com: OAuth2 Bearer token required');
+    const subreddit = creds.subreddit || 'test';
+    const r = await fetch('https://oauth.reddit.com/api/submit', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'SEOBot/1.0' },
+      body: new URLSearchParams({ sr: subreddit, kind: 'self', title: content.title || 'Post', text: content.body || '', resubmit: 'true', sendreplies: 'false' }).toString(),
+    });
+    const data = await r.json();
+    if (data.json?.errors?.length) throw new Error(data.json.errors[0][1]);
+    const postId = data.json?.data?.id;
+    return { resultUrl: `https://www.reddit.com/r/${subreddit}/comments/${postId}` };
+  },
+
+  // ── QUORA.COM ── Quora Space post (session cookie auth) (DA 92)
+  'quora.com': async (url, creds, content) => {
+    const token = creds.token; // m-b cookie value from browser
+    if (!token) throw new Error('quora.com: session cookie (m-b) required');
+    const spaceId = creds.spaceId; // numeric Quora Space ID
+    if (!spaceId) throw new Error('quora.com: spaceId required');
+    // Quora uses GraphQL internally
+    const r = await fetch('https://www.quora.com/graphql/gql_para_public?q=CreateSpacePost', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `m-b=${token}`, 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.quora.com' },
+      body: JSON.stringify({ queryName: 'CreateSpacePost', variables: { spaceId, title: content.title || '', content: { ops: [{ insert: content.body || '' }] } } }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data?.data?.createSpacePost?.post?.url || 'https://www.quora.com' };
+    }
+    throw new Error(`quora.com: ${r.status}`);
+  },
+
+  // ── PEARLTREES.COM ── content aggregator (DA 72)
+  'pearltrees.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('pearltrees.com: Bearer token required');
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch('https://www.pearltrees.com/api/v2/pearls', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl, title: content.title || '', description: (content.body || '').substring(0, 500) }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.permalink || 'https://www.pearltrees.com' };
+    }
+    throw new Error(`pearltrees.com: ${r.status}`);
+  },
+
+  // ── FOLKD.COM ── social bookmarking (DA 65)
+  'folkd.com': async (url, creds, content) => {
+    const loginRes = await fetch('https://www.folkd.com/user/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://www.folkd.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ 'User[login]': creds.username || '', 'User[password]': creds.password || '', 'User[rememberMe]': '1' }).toString(),
+      redirect: 'manual',
+    });
+    const cookies = loginRes.headers.get('set-cookie') || '';
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch('https://www.folkd.com/submit/go', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://www.folkd.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ url: targetUrl, title: content.title || '', description: (content.body || '').substring(0, 400), tags: content.tags || 'seo' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : 'https://www.folkd.com' + loc) : 'https://www.folkd.com' };
+  },
+
+  // ── SLASHDOT.ORG ── journal entry (DA 90)
+  'slashdot.org': async (url, creds, content) => {
+    const token = creds.token; // session cookie (user_cookie)
+    if (!token || !creds.uid) throw new Error('slashdot.org: uid + token (session cookie) required');
+    const r = await fetch('https://slashdot.org/journal.pl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: `user_cookie=${token}`, 'Referer': 'https://slashdot.org/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ op: 'edit', uid: creds.uid, id: '0', description: content.title || 'Journal Entry', article: content.body || '', submit: 'Save' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || '';
+    return { resultUrl: loc ? (loc.startsWith('http') ? loc : 'https://slashdot.org' + loc) : 'https://slashdot.org' };
+  },
+
+  // ── KINJA.COM ── community blog (DA 85)
+  'kinja.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('kinja.com: session token required');
+    const r = await fetch('https://kinja.com/api/core/post', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ headline: content.title || 'Post', body: { blocks: [{ type: 'BasicText', value: content.body || '' }] }, status: 'published' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.canonicalUrl || data.url || 'https://kinja.com' };
+    }
+    throw new Error(`kinja.com: ${r.status}`);
+  },
+
+  // ── STORIFY.COM alternative: WAKELET.COM ── (DA 65)
+  'wakelet.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('wakelet.com: Bearer token required');
+    const r = await fetch('https://api.wakelet.com/bomb', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Collection', description: content.body || '', visibility: 'public', items: content.links?.map(l => ({ url: l.url, title: l.label || l.url })) || [] }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.shareUrl || 'https://wakelet.com' };
+    }
+    throw new Error(`wakelet.com: ${r.status}`);
+  },
+
+  // ── INSTAPAPER.COM ── bookmarking (DA 79)
+  'instapaper.com': async (url, creds, content) => {
+    // Instapaper Simple API
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch('https://www.instapaper.com/api/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ username: creds.username || '', password: creds.password || '', url: targetUrl, title: content.title || '', selection: (content.body || '').substring(0, 500) }).toString(),
+    });
+    // Simple API returns 201 on success
+    if (r.status === 201 || r.ok) return { resultUrl: `https://www.instapaper.com/u/${targetUrl}` };
+    if (r.status === 403) throw new Error('instapaper.com: invalid credentials');
+    throw new Error(`instapaper.com: ${r.status}`);
+  },
+
+  // ── POCKET.COM (GetPocket) ── bookmarking (DA 90)
+  'getpocket.com': async (url, creds, content) => {
+    const token = creds.token; // access_token from Pocket OAuth
+    const consumerKey = creds.consumerKey || creds.api_key;
+    if (!token || !consumerKey) throw new Error('getpocket.com: consumerKey + OAuth access_token required');
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch('https://getpocket.com/v3/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=UTF-8', 'X-Accept': 'application/json' },
+      body: JSON.stringify({ url: targetUrl, title: content.title || '', consumer_key: consumerKey, access_token: token }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) return { resultUrl: `https://getpocket.com/read/${data.item?.item_id || ''}` };
+    throw new Error(data.error || `getpocket.com: ${r.status}`);
+  },
+
+  // ── REBELMOUSE.COM ── media blog (DA 75)
+  'rebelmouse.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('rebelmouse.com: API token required');
+    const r = await fetch('https://www.rebelmouse.com/api/1/post', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Token ${token}` },
+      body: JSON.stringify({ headline: content.title || 'Post', text: content.body || '', site_id: creds.siteId || '', published: true }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.permalink || 'https://www.rebelmouse.com' };
+    }
+    throw new Error(`rebelmouse.com: ${r.status}`);
+  },
+
+  // ── SKYROCK.COM ── French blog network (DA 80)
+  'skyrock.com': async (url, creds, content) => {
+    const loginRes = await fetch('https://login.skyrock.com/api/login_check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ username: creds.username || '', password: creds.password || '', format: 'json' }).toString(),
+    });
+    const loginData = await loginRes.json().catch(() => ({}));
+    const token = loginData.auth_token || loginData.token || '';
+    if (!token) throw new Error('skyrock.com: login failed');
+    const r = await fetch('https://api.skyrock.com/v2/blog/post.json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: `Bearer ${token}` },
+      body: new URLSearchParams({ title: content.title || 'Post', message: content.body || '', category: 'general' }).toString(),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.post_url || 'https://skyrock.com' };
+    }
+    throw new Error(`skyrock.com: ${r.status}`);
+  },
+
+  // ── BLOGLOVIN.COM ── blog aggregator (DA 77)
+  'bloglovin.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('bloglovin.com: OAuth token required');
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch('https://api.bloglovin.com/v5/posts', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl, title: content.title || '', description: (content.body || '').substring(0, 500) }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.post?.link || 'https://www.bloglovin.com' };
+    }
+    throw new Error(`bloglovin.com: ${r.status}`);
+  },
+
+  // ── EVERNOTE.COM ── note creation (DA 92)
+  'evernote.com': async (url, creds, content) => {
+    // Evernote uses the Thrift API; simplified form via their note-link endpoint
+    const token = creds.token; // developer token from dev.evernote.com
+    if (!token) throw new Error('evernote.com: Developer token required');
+    // Use Evernote API (production)
+    const noteXml = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd"><en-note><p>${(content.body || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p></en-note>`;
+    const r = await fetch('https://www.evernote.com/shard/s1/notestore/note', {
+      method: 'POST',
+      headers: { Authorization: `Evernote singleuserversion=2, auth=${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Note', content: noteXml, tagNames: (content.tags || '').split(',').map(t => t.trim()).filter(Boolean) }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.noteUrl || `https://www.evernote.com/l/` };
+    }
+    throw new Error(`evernote.com: ${r.status}`);
+  },
+
+  // ── ZOHO.COM (Writer) ── document creation (DA 90)
+  'zoho.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('zoho.com: OAuth token required (Zoho Writer API)');
+    const r = await fetch('https://writer.zoho.com/api/v1/document', {
+      method: 'POST',
+      headers: { Authorization: `Zoho-oauthtoken ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ document_name: content.title || 'Document', content: content.body || '' }).toString(),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.document?.permalink || data.url || 'https://writer.zoho.com' };
+    }
+    throw new Error(`zoho.com: ${r.status}`);
+  },
+
+  // ── DZONE.COM ── developer community (DA 85)
+  'dzone.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('dzone.com: OAuth token required');
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch('https://dzone.com/api/v2/article', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Article', url: targetUrl, description: (content.body || '').substring(0, 500), tags: content.tags || 'programming' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || data.permalink || 'https://dzone.com' };
+    }
+    throw new Error(`dzone.com: ${r.status}`);
+  },
+
+  // ── SCOOP.IT ── content curation (DA 83)
+  'scoop.it': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('scoop.it: OAuth token required');
+    const topicId = creds.topicId;
+    if (!topicId) throw new Error('scoop.it: topicId required');
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch('https://www.scoop.it/api/1/post', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ access_token: token, topicId, url: targetUrl, title: content.title || '', content: content.body || '', rescoop: 'false', publish: 'true' }).toString(),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) return { resultUrl: data.post?.url || `https://www.scoop.it/topic/${topicId}` };
+    throw new Error(data.error || `scoop.it: ${r.status}`);
+  },
+
+  // ── FLIPBOARD.COM ── content curation (DA 91)
+  'flipboard.com': async (url, creds, content) => {
+    const token = creds.token;
+    if (!token) throw new Error('flipboard.com: OAuth token required');
+    const magazineId = creds.magazineId;
+    if (!magazineId) throw new Error('flipboard.com: magazineId required');
+    const targetUrl = (content.links && content.links[0]?.url) || 'https://example.com';
+    const r = await fetch(`https://flipboard.com/api/v1/magazines/${magazineId}/items`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl, title: content.title || '', comment: (content.body || '').substring(0, 300) }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      return { resultUrl: data.url || `https://flipboard.com/@${creds.username}/${magazineId}` };
+    }
+    throw new Error(`flipboard.com: ${r.status}`);
+  },
+
+  // ── JUSTPASTE.IT ── session-cookie based API
+  'justpaste.it': async (url, creds, content) => {
+    // Login to get session cookies
+    const loginPage = await fetch('https://justpaste.it/login', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const loginHtml = await loginPage.text();
+    const tokenMatch = loginHtml.match(/name="_token"\s+value="([^"]+)"/);
+    const csrfToken = tokenMatch ? tokenMatch[1] : '';
+    const loginCookies = loginPage.headers.get('set-cookie') || '';
+
+    const loginRes = await fetch('https://justpaste.it/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': 'https://justpaste.it/login',
+        'Cookie': loginCookies,
+        'User-Agent': 'Mozilla/5.0',
+      },
+      body: new URLSearchParams({ _token: csrfToken, email: creds.username || creds.email || '', password: creds.password || '', remember: '1' }).toString(),
+      redirect: 'manual',
+    });
+    const sessionCookies = [loginCookies, loginRes.headers.get('set-cookie') || ''].join('; ');
+
+    // Get create page for CSRF token
+    const createPage = await fetch('https://justpaste.it/create', {
+      headers: { Cookie: sessionCookies, 'User-Agent': 'Mozilla/5.0' },
+    });
+    const createHtml = await createPage.text();
+    const createToken = (createHtml.match(/name="_token"\s+value="([^"]+)"/) || [])[1] || csrfToken;
+
+    // Submit article
+    const r = await fetch('https://justpaste.it/create', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Cookie': sessionCookies,
+        'Referer': 'https://justpaste.it/create',
+        'User-Agent': 'Mozilla/5.0',
+      },
+      body: new URLSearchParams({
+        _token: createToken,
+        title: content.title || '',
+        content: content.body || '',
+        descriptionEnabled: '0',
+        requirePassword: '0',
+        hide: '0',
+        matureContent: '0',
+        action: 'save',
+      }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || r.url;
+    if (loc && loc !== 'https://justpaste.it/create') {
+      return { resultUrl: loc.startsWith('http') ? loc : 'https://justpaste.it' + loc };
+    }
+    throw new Error('justpaste.it: post failed — check credentials');
+  },
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────

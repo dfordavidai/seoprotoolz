@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6346,7 +6347,29 @@ async function runGlobalBlast(){
       try{
         // For global blast, use account.extra as the per-platform extra value
         const blastExtra=account.extra||prefix;
-        const url=await runSingleCampaign(pid,kw,account,blastExtra,ki,{add:(m,t)=>term.add('    '+m,t)});
+        // Platforms with REST handlers in /api/gb-post — route server-side when Vercel is configured
+        const GB_REST_DOMAINS={medium:'medium.com',devto:'dev.to',hashnode:'hashnode.com',writeas:'write.as',telegraph:'telegra.ph',pastebin:'pastebin.com',hackmd:'hackmd.io'};
+        let url;
+        if(vercelEnabled() && GB_REST_DOMAINS[pid]){
+          term.add('    ↳ routing via Vercel backend...','info');
+          const ec=getEffectiveContent(kw,getActiveBacklinks(),ki,S.keywords,account.login,p.domain);
+          const gbResp=await fetch(vercelUrl()+'/api/gb-post',{
+            method:'POST',
+            headers:vercelHeaders(),
+            body:JSON.stringify({
+              sites:[{url:'https://'+GB_REST_DOMAINS[pid],credentials:{token:account.token||account.password,username:account.login,password:account.password,api_key:account.token,publicationId:account.extra},method:'rest_api'}],
+              content:{title:ec.title,body:ec.body,tags:ec.tags||''},
+              options:{concurrency:1,timeout:30000}
+            })
+          });
+          if(!gbResp.ok) throw new Error('Vercel gb-post error: '+gbResp.status);
+          const gbData=await gbResp.json();
+          const r0=gbData.results&&gbData.results[0];
+          if(r0&&!r0.ok) throw new Error(r0.error||'gb-post returned failure');
+          url=(r0&&r0.resultUrl)||'';
+        } else {
+          url=await runSingleCampaign(pid,kw,account,blastExtra,ki,{add:(m,t)=>term.add('    '+m,t)});
+        }
         term.add('  ✓ '+p.name+': '+url,'info');
         const displayedUrl = url || '#content-generated';
         liveUrls.push({url:displayedUrl,keyword:kw,platform:pid});
@@ -6387,27 +6410,56 @@ async function runGlobalBlast(){
     const moneyUrl=(S.backlinkVault.length?S.backlinkVault[0].url:(S.links.length?S.links[0].url:''));
     if(!moneyUrl){ blpTerm.add('⚠ No money URL set — add one in Links Manager for BLP content injection','warn'); }
     let blpOk=0,blpFail=0;
-    for(const domain of _blastSelectedBLPSites){
-      const site=BLP_SITES.find(s=>s.u===domain);
-      if(!site){ continue; }
+    // REST-capable BLP domains that /api/gb-post handles — batch these server-side when Vercel available
+    const BLP_REST_CAPABLE=['pastebin.com','dev.to','medium.com','hashnode.com','write.as','telegra.ph','hackmd.io','dpaste.com','controlc.com','rentry.co','hastebin.com','paste.ee'];
+    if(vercelEnabled()){
       for(const kw of blpKws){
-        try{
-          blpTerm.add('  → '+domain+' ['+kw+']...','info');
-          const result=await blpSubmitSite(site,kw,moneyUrl||kw);
-          BLP.addLog({domain,status:'success',url:result.url,keyword:kw,manual:result.manual});
-          if(result.url){
-            const displayUrl = result.url || 'content generated (paste manually)';
-            blpTerm.add('  ✓ '+domain+': '+displayUrl+(result.fallback?' [via fallback]':''),'info');
-            blpOk++;
-          } else {
-            blpTerm.add('  📝 '+domain+': content generated (manual paste needed)','warn');
-            blpOk++;
-          }
-          await sleep(1200);
-        }catch(e){
-          BLP.addLog({domain,status:'error',error:e.message,keyword:kw});
-          blpTerm.add('  ✗ '+domain+': '+e.message,'error');
-          blpFail++;
+        const effectiveMoneyUrl=moneyUrl||kw;
+        const restSites=_blastSelectedBLPSites.filter(d=>BLP_REST_CAPABLE.includes(d));
+        const localSites=_blastSelectedBLPSites.filter(d=>!BLP_REST_CAPABLE.includes(d));
+        if(restSites.length){
+          blpTerm.add('  ↳ Batching '+restSites.length+' REST sites via Vercel ['+kw+']...','info');
+          try{
+            const gbContent={title:kw+' Guide',body:blpGenerateLocalContent({t:'paste',u:''},kw,effectiveMoneyUrl),tags:kw};
+            const gbResp=await fetch(vercelUrl()+'/api/gb-post',{method:'POST',headers:vercelHeaders(),body:JSON.stringify({sites:restSites.map(d=>({url:'https://'+d,credentials:{},method:'auto'})),content:gbContent,options:{concurrency:5,timeout:30000}})});
+            if(gbResp.ok){
+              const gbData=await gbResp.json();
+              for(const r of (gbData.results||[])){
+                let rDomain=r.url;try{rDomain=new URL(r.url).hostname.replace(/^www\./,'');}catch(e){}
+                if(r.ok){BLP.addLog({domain:rDomain,status:'success',url:r.resultUrl||r.url,keyword:kw});blpTerm.add('  ✓ '+rDomain+': '+(r.resultUrl||'submitted')+' [Vercel]','info');blpOk++;}
+                else{BLP.addLog({domain:rDomain,status:'error',error:r.error,keyword:kw});blpTerm.add('  ✗ '+rDomain+': '+(r.error||'failed'),'error');blpFail++;}
+              }
+            } else {
+              blpTerm.add('  ⚠ Vercel batch failed ('+gbResp.status+') — falling back locally','warn');
+              localSites.push(...restSites);
+            }
+          }catch(e){blpTerm.add('  ⚠ Vercel batch error: '+e.message+' — falling back locally','warn');localSites.push(...restSites);}
+        }
+        for(const domain of localSites){
+          const site=BLP_SITES.find(s=>s.u===domain);if(!site){continue;}
+          try{
+            blpTerm.add('  → '+domain+' ['+kw+']...','info');
+            const result=await blpSubmitSite(site,kw,effectiveMoneyUrl);
+            BLP.addLog({domain,status:'success',url:result.url,keyword:kw,manual:result.manual});
+            if(result.url){blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [via fallback]':''),'info');blpOk++;}
+            else{blpTerm.add('  📝 '+domain+': content generated (manual paste needed)','warn');blpOk++;}
+            await sleep(800);
+          }catch(e){BLP.addLog({domain,status:'error',error:e.message,keyword:kw});blpTerm.add('  ✗ '+domain+': '+e.message,'error');blpFail++;}
+        }
+      }
+    } else {
+      // No Vercel — run everything locally via blpSubmitSite (works without Groq key now)
+      for(const domain of _blastSelectedBLPSites){
+        const site=BLP_SITES.find(s=>s.u===domain);if(!site){continue;}
+        for(const kw of blpKws){
+          try{
+            blpTerm.add('  → '+domain+' ['+kw+']...','info');
+            const result=await blpSubmitSite(site,kw,moneyUrl||kw);
+            BLP.addLog({domain,status:'success',url:result.url,keyword:kw,manual:result.manual});
+            if(result.url){blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [via fallback]':''),'info');blpOk++;}
+            else{blpTerm.add('  📝 '+domain+': content generated (manual paste needed)','warn');blpOk++;}
+            await sleep(1200);
+          }catch(e){BLP.addLog({domain,status:'error',error:e.message,keyword:kw});blpTerm.add('  ✗ '+domain+': '+e.message,'error');blpFail++;}
         }
       }
     }
@@ -22597,19 +22649,60 @@ const BLP_SUBMITTERS = {
 
 };
 
+// ── LOCAL CONTENT FALLBACK (no AI key needed) ─────────────────────────────
+function blpGenerateLocalContent(site, keyword, moneyUrl) {
+  const fmt = blpSiteContentFormat(site);
+  const kw = keyword;
+  const url = moneyUrl;
+  const year = new Date().getFullYear();
+  const sentences = [
+    `${kw} is an important topic that many people search for online.`,
+    `Understanding ${kw} can help you make better decisions and achieve your goals.`,
+    `Experts in ${kw} recommend doing thorough research before getting started.`,
+    `There are many resources available for those interested in learning more about ${kw}.`,
+    `The field of ${kw} has evolved significantly in recent years.`,
+    `Whether you are a beginner or experienced, ${kw} offers valuable insights.`,
+  ];
+  const body = sentences.join(' ') + ` For more information, visit ${url}.`;
+
+  if(fmt === 'html') {
+    return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${kw} Guide ${year}</title><style>body{font-family:system-ui,sans-serif;max-width:800px;margin:40px auto;padding:0 20px;line-height:1.7;color:#333}h1{color:#1a1a2e}h2{color:#16213e;margin-top:2em}a{color:#0070f3}p{margin:1em 0}</style></head><body><h1>${kw} — Complete Guide ${year}</h1><p>${sentences[0]} ${sentences[1]}</p><h2>Getting Started with ${kw}</h2><p>${sentences[2]} ${sentences[3]}</p><h2>Why ${kw} Matters</h2><p>${sentences[4]} ${sentences[5]}</p><p>For in-depth resources, see the <a href="${url}" rel="dofollow">${kw} guide</a> — a comprehensive reference covering everything you need to know.</p></body></html>`;
+  }
+  if(fmt === 'markdown') {
+    return `# ${kw} Guide\n\n${sentences[0]} ${sentences[1]}\n\nFor an excellent overview, see the [${kw} guide](${url}).\n\n## Getting Started\n\n${sentences[2]}\n\n- Research the fundamentals of ${kw}\n- Apply best practices consistently\n- Track your results and iterate\n\n## Why It Matters\n\n${sentences[4]} ${sentences[5]}\n\n## Further Reading\n\nLearn more at [${kw} resource](${url}).`;
+  }
+  if(fmt === 'profile') {
+    return `${kw} specialist with years of hands-on experience helping clients achieve results. Focused on delivering practical, actionable strategies in the ${kw} space. Committed to staying current with the latest developments and best practices. Visit my website: ${url}`;
+  }
+  if(fmt === 'forum' || fmt === 'comment') {
+    return `Great discussion! I've been studying ${kw} for a while now and found that consistent effort really pays off. If you're looking for solid resources, ${url} has some excellent material worth checking out. Hope this helps!`;
+  }
+  if(fmt === 'social') {
+    return `Looking to master ${kw}? Check out this great resource: ${url} #${kw.replace(/\s+/g,'').slice(0,20)}`;
+  }
+  // paste / text / web20 / default
+  return body;
+}
+
 // ── MAIN SUBMISSION FUNCTION ──────────────────────────────────────────────
 async function blpSubmitSite(site, keyword, moneyUrl){
   const groqKey = settingGet('groq_api_key');
-  if(!groqKey) throw new Error('Groq API key required \u2014 add it in Settings \u2192 AI (Groq)');
 
   // 1. Smart content generation based on site type
   const {prompt: userPrompt, format: contentFmt} = blpGetPrompt(site, keyword, moneyUrl);
   const sysPrompt = 'You are an expert SEO content writer. Write exactly what is requested. Be natural, add real value. Never use placeholder text. For HTML format: output valid complete HTML. For markdown: output clean markdown. For plain text: output plain text. Output ONLY the content, no preamble or explanation.';
   let generatedContent;
-  try {
-    generatedContent = await groqComplete(sysPrompt, userPrompt, {max_tokens:1000, temperature:0.8});
-  } catch(e) {
-    throw new Error('Groq generation failed: ' + e.message);
+  if(groqKey) {
+    try {
+      generatedContent = await groqComplete(sysPrompt, userPrompt, {max_tokens:1000, temperature:0.8});
+    } catch(e) {
+      // Groq failed — fall through to local template
+      generatedContent = null;
+    }
+  }
+  // Local fallback if no Groq key or Groq failed
+  if(!generatedContent) {
+    generatedContent = blpGenerateLocalContent(site, keyword, moneyUrl);
   }
 
   // 2. Post-process content based on format

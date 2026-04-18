@@ -147,7 +147,7 @@ async function playwrightPost(url, credentials, content, options, timeout, fallb
       browser = await chromium.launch({
         args: [...chromiumPkg.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage', '--single-process'],
         executablePath: await chromiumPkg.executablePath(),
-        headless: chromiumPkg.headless,
+        headless: chromiumPkg.headless === 'new' ? true : chromiumPkg.headless,
       });
 
       const profile = getProfile(url);
@@ -308,6 +308,19 @@ const REST_HANDLERS = {
   },
 
   'hashnode.com': async (url, creds, content) => {
+    // Auto-fetch publicationId if not provided
+    let publicationId = creds.publicationId || '';
+    if (!publicationId) {
+      const meRes = await fetch('https://gql.hashnode.com', {
+        method: 'POST',
+        headers: { Authorization: creds.token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: `{ me { publications(first: 1) { edges { node { id } } } } }` }),
+      });
+      const meData = await meRes.json().catch(() => ({}));
+      publicationId = meData.data?.me?.publications?.edges?.[0]?.node?.id || '';
+    }
+    if (!publicationId) throw new Error('hashnode.com: publicationId required — add it to your credentials or the auto-fetch failed');
+
     const r = await fetch('https://gql.hashnode.com', {
       method: 'POST',
       headers: { Authorization: creds.token, 'Content-Type': 'application/json' },
@@ -315,9 +328,9 @@ const REST_HANDLERS = {
         query: `mutation PublishPost($input: PublishPostInput!) { publishPost(input: $input) { post { url } } }`,
         variables: {
           input: {
-            title: content.title,
-            contentMarkdown: content.body,
-            publicationId: creds.publicationId || '',
+            title: content.title || 'Post',
+            contentMarkdown: content.body || '',
+            publicationId,
             tags: [],
           },
         },
@@ -378,51 +391,296 @@ const REST_HANDLERS = {
   },
 
   'rentry.co': async (url, creds, content) => {
-    // rentry needs CSRF token
-    const page1 = await fetch('https://rentry.co', { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const html  = await page1.text();
-    const csrfMatch = html.match(/csrfmiddlewaretoken.*?value="([^"]+)"/);
-    const csrf = csrfMatch ? csrfMatch[1] : '';
-    const cookies = page1.headers.get('set-cookie') || '';
-    const sessionCookie = (cookies.match(/csrftoken=([^;]+)/) || [])[1] || '';
+    // Fetch homepage to get CSRF token + session cookie
+    const homeRes = await fetch('https://rentry.co', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const html = await homeRes.text();
+    // Try multiple CSRF extraction patterns (rentry has changed their HTML before)
+    const csrf =
+      (html.match(/name="csrfmiddlewaretoken"\s+value="([^"]+)"/) ||
+       html.match(/csrfmiddlewaretoken['":\s]+['"]([a-zA-Z0-9]{20,})/))?.[1] || '';
+    const rawCookies = homeRes.headers.get('set-cookie') || '';
+    const sessionCookie = rawCookies.match(/csrftoken=([^;]+)/)?.[1] || '';
 
     const r = await fetch('https://rentry.co/api/new', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Referer': 'https://rentry.co',
+        'X-CSRFToken': csrf,
         'Cookie': `csrftoken=${sessionCookie}`,
       },
-      body: new URLSearchParams({ csrfmiddlewaretoken: csrf, text: content.body, edit_code: '' }).toString(),
+      body: new URLSearchParams({ csrfmiddlewaretoken: csrf, text: content.body || ' ', edit_code: '' }).toString(),
     });
-    const data = await r.json().catch(() => ({}));
-    if (!data.url && !r.ok) throw new Error('rentry.co error');
-    return { resultUrl: data.url || 'https://rentry.co' };
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); } catch (_) { data = {}; }
+    if (data.url) return { resultUrl: data.url };
+    // Try extracting from redirect or HTML
+    const locHeader = r.headers.get('location');
+    if (locHeader) return { resultUrl: locHeader.startsWith('http') ? locHeader : 'https://rentry.co' + locHeader };
+    throw new Error(`rentry.co: ${data.content || text || 'unknown error'}`);
   },
 
   'hastebin.com': async (url, creds, content) => {
-    // Try toptal/hastebin primary endpoint
+    // hastebin.com changed to toptal-hosted; try both with correct URL format
     const endpoints = [
-      'https://www.toptal.com/developers/hastebin/documents',
-      'https://hastebin.com/documents',
+      { api: 'https://hastebin.com/documents', base: 'https://hastebin.com/' },
+      { api: 'https://www.toptal.com/developers/hastebin/documents', base: 'https://www.toptal.com/developers/hastebin/' },
     ];
     for (const ep of endpoints) {
       try {
-        const r = await fetch(ep, {
+        const r = await fetch(ep.api, {
           method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: content.body,
+          headers: { 'Content-Type': 'text/plain', 'User-Agent': 'Mozilla/5.0' },
+          body: content.body || ' ',
         });
         if (!r.ok) continue;
         const data = await r.json();
         const key = data.key || data.Key;
-        if (key) {
-          const base = ep.includes('toptal') ? 'https://www.toptal.com/developers/hastebin/' : 'https://hastebin.com/';
-          return { resultUrl: base + key };
-        }
+        if (key) return { resultUrl: ep.base + key };
       } catch (_) {}
     }
+    // Last resort: controlc as paste fallback
     throw new Error('hastebin: all endpoints failed');
+  },
+
+  // ── NOTES.IO ── anonymous paste
+  'notes.io': async (url, creds, content) => {
+    const r = await fetch('https://notes.io/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://notes.io/' },
+      body: new URLSearchParams({ text: content.body || '', password: '' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || r.url;
+    if (!loc || loc === 'https://notes.io/') throw new Error('notes.io: no redirect URL');
+    return { resultUrl: loc };
+  },
+
+  // ── PASTELINK.NET ── anonymous paste
+  'pastelink.net': async (url, creds, content) => {
+    // pastelink uses a simple POST form
+    const r = await fetch('https://pastelink.net/api/paste', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: content.body || '', unique_key: '', password: '' }),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => ({}));
+      if (data.unique_key) return { resultUrl: `https://pastelink.net/${data.unique_key}` };
+    }
+    // Fallback: form submission
+    const r2 = await fetch('https://pastelink.net/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://pastelink.net/' },
+      body: new URLSearchParams({ paste_data: content.body || '', paste_title: content.title || '', paste_expire: '1m', paste_type: 'text' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r2.headers.get('location') || '';
+    if (!loc) throw new Error('pastelink.net: no redirect URL');
+    return { resultUrl: loc.startsWith('http') ? loc : 'https://pastelink.net' + loc };
+  },
+
+  // ── 0BIN.NET ── anonymous paste (PrivateBin protocol)
+  '0bin.net': async (url, creds, content) => {
+    // 0bin.net uses PrivateBin/ZeroBin encryption; direct REST is complex.
+    // Use the simple form endpoint instead.
+    const r = await fetch('https://0bin.net/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://0bin.net/' },
+      body: new URLSearchParams({ content: content.body || ' ', expiration: 'burn_after_reading' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || r.url;
+    if (loc && loc !== 'https://0bin.net/') return { resultUrl: loc.startsWith('http') ? loc : 'https://0bin.net' + loc };
+    throw new Error('0bin.net: paste failed');
+  },
+
+  // ── IDEONE.COM ── code paste (anonymous API)
+  'ideone.com': async (url, creds, content) => {
+    // ideone has a SOAP-like API; use the form submission path
+    const homePage = await fetch('https://ideone.com/', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const html = await homePage.text();
+    const csrfMatch = html.match(/name="csrfmiddlewaretoken"\s+value="([^"]+)"/);
+    const csrf = csrfMatch ? csrfMatch[1] : '';
+    const cookie = homePage.headers.get('set-cookie')?.match(/csrftoken=([^;]+)/)?.[1] || '';
+
+    const r = await fetch('https://ideone.com/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': 'https://ideone.com/',
+        'Cookie': `csrftoken=${cookie}`,
+      },
+      body: new URLSearchParams({
+        csrfmiddlewaretoken: csrf,
+        source: content.body || ' ',
+        lang: '116',  // Plain Text
+        input: '',
+        private: 'on',
+        'save-code': 'Save',
+      }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r.headers.get('location') || '';
+    if (loc && loc !== '/') return { resultUrl: loc.startsWith('http') ? loc : 'https://ideone.com' + loc };
+    throw new Error('ideone.com: paste failed');
+  },
+
+  // ── PASTE.MOZILLA.ORG ── anonymous paste (dpaste variant)
+  'paste.mozilla.org': async (url, creds, content) => {
+    const r = await fetch('https://paste.mozilla.org/api/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        content: content.body || ' ',
+        syntax: 'text',
+        expiry_days: '30',
+        title: content.title || '',
+      }).toString(),
+    });
+    if (r.ok) {
+      // API returns plain URL or JSON
+      const text = await r.text();
+      try { const d = JSON.parse(text); if (d.url || d.link) return { resultUrl: d.url || d.link }; } catch (_) {}
+      if (text.startsWith('http')) return { resultUrl: text.trim() };
+    }
+    // Form fallback
+    const r2 = await fetch('https://paste.mozilla.org/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://paste.mozilla.org/' },
+      body: new URLSearchParams({ content: content.body || ' ', syntax: 'text', title: content.title || '' }).toString(),
+      redirect: 'manual',
+    });
+    const loc = r2.headers.get('location') || '';
+    if (loc) return { resultUrl: loc.startsWith('http') ? loc : 'https://paste.mozilla.org' + loc };
+    throw new Error('paste.mozilla.org: paste failed');
+  },
+
+  // ── WIKI.GG ── requires wiki subdomain + login; use API
+  'wiki.gg': async (url, creds, content) => {
+    // wiki.gg is MediaWiki-based; POST to their action API
+    const wikiBase = creds.wikiBase || 'https://wiki.gg';
+    const api = `${wikiBase}/api.php`;
+
+    // Step 1: Get login token
+    const tokenRes = await fetch(`${api}?action=query&meta=tokens&type=login&format=json`, {
+      headers: { 'User-Agent': 'SEOBot/1.0' },
+    });
+    const tokenData = await tokenRes.json();
+    const loginToken = tokenData?.query?.tokens?.logintoken;
+
+    // Step 2: Login
+    const loginRes = await fetch(api, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'SEOBot/1.0' },
+      body: new URLSearchParams({ action: 'login', lgname: creds.username || '', lgpassword: creds.password || '', lgtoken: loginToken || '', format: 'json' }).toString(),
+    });
+    const loginCookies = loginRes.headers.get('set-cookie') || '';
+
+    // Step 3: Get CSRF token
+    const csrfRes = await fetch(`${api}?action=query&meta=tokens&format=json`, {
+      headers: { 'Cookie': loginCookies, 'User-Agent': 'SEOBot/1.0' },
+    });
+    const csrfData = await csrfRes.json();
+    const csrf = csrfData?.query?.tokens?.csrftoken;
+
+    // Step 4: Edit/create page
+    const title = (content.title || 'SEO_Post').replace(/ /g, '_');
+    const editRes = await fetch(api, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': loginCookies, 'User-Agent': 'SEOBot/1.0' },
+      body: new URLSearchParams({ action: 'edit', title, text: content.body || '', token: csrf || '', format: 'json', summary: 'SEO post', createonly: 'true' }).toString(),
+    });
+    const editData = await editRes.json();
+    if (editData.edit?.result === 'Success') return { resultUrl: `${wikiBase}/wiki/${title}` };
+    throw new Error(`wiki.gg edit failed: ${JSON.stringify(editData.error || editData.edit)}`);
+  },
+
+  // ── FANDOM.COM ── MediaWiki API (same as wiki.gg)
+  'fandom.com': async (url, creds, content) => {
+    const wikiBase = creds.wikiBase || 'https://www.fandom.com';
+    const api = `${wikiBase}/api.php`;
+
+    const tokenRes = await fetch(`${api}?action=query&meta=tokens&type=login&format=json`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    const loginToken = tokenData?.query?.tokens?.logintoken || '';
+    const cookies1 = tokenRes.headers.get('set-cookie') || '';
+
+    const loginRes = await fetch(api, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookies1, 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ action: 'login', lgname: creds.username || '', lgpassword: creds.password || '', lgtoken: loginToken, format: 'json' }).toString(),
+    });
+    const cookies2 = [cookies1, loginRes.headers.get('set-cookie') || ''].join('; ');
+
+    const csrfRes = await fetch(`${api}?action=query&meta=tokens&format=json`, { headers: { 'Cookie': cookies2, 'User-Agent': 'Mozilla/5.0' } });
+    const csrfData = await csrfRes.json().catch(() => ({}));
+    const csrf = csrfData?.query?.tokens?.csrftoken || '+\\';
+
+    const title = (content.title || 'SEO_Post').replace(/ /g, '_');
+    const editRes = await fetch(api, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookies2, 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ action: 'edit', title, text: content.body || '', token: csrf, format: 'json', summary: 'New post', createonly: 'true' }).toString(),
+    });
+    const editData = await editRes.json().catch(() => ({}));
+    if (editData.edit?.result === 'Success') return { resultUrl: `${wikiBase}/wiki/${title}` };
+    throw new Error(`fandom.com edit failed: ${JSON.stringify(editData.error || {})}`);
+  },
+
+  // ── WIKIDOT.COM ── AJAX API
+  'wikidot.com': async (url, creds, content) => {
+    // wikidot uses a custom AJAX API at /ajax-module-connector.php
+    const siteDomain = creds.siteDomain || url; // e.g. https://mysite.wikidot.com
+    const apiUrl = siteDomain.replace(/\/?$/, '/ajax-module-connector.php');
+
+    // Login to get session cookies
+    const loginRes = await fetch('https://www.wikidot.com/default--flow/login__LoginPopupScreen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ login: creds.username || '', password: creds.password || '', action: 'Login2Action', event: 'login' }).toString(),
+    });
+    const cookieHeader = loginRes.headers.get('set-cookie') || '';
+
+    const pageTitle = (content.title || 'seo-post').toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const createRes = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookieHeader, 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ action: 'WikiPageAction', event: 'savePage', wiki_page: pageTitle, source: content.body || '', comments: '', title: content.title || pageTitle }).toString(),
+    });
+    const data = await createRes.json().catch(() => ({}));
+    if (data.status === 'ok') return { resultUrl: `${siteDomain}/${pageTitle}` };
+    throw new Error(`wikidot.com: ${data.message || 'page save failed'}`);
+  },
+
+  // ── PBWORKS.COM ── PBwiki API / form post
+  'pbworks.com': async (url, creds, content) => {
+    // pbworks doesn't have a public API; use their form submission
+    const wikiBase = creds.wikiBase || url; // e.g. https://mysite.pbworks.com
+    const pageTitle = (content.title || 'SEOPost').replace(/ /g, '+');
+
+    // Login
+    const loginRes = await fetch('https://my.pbworks.com/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://my.pbworks.com/', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ login: creds.username || '', password: creds.password || '' }).toString(),
+      redirect: 'manual',
+    });
+    const cookies = loginRes.headers.get('set-cookie') || '';
+
+    // Create page via their API endpoint
+    const createUrl = `${wikiBase}/api/page`;
+    const r = await fetch(createUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Cookie': cookies, 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ name: content.title || 'SEOPost', body: content.body || '' }),
+    });
+    if (r.ok) {
+      const d = await r.json().catch(() => ({}));
+      return { resultUrl: d.url || `${wikiBase}/${pageTitle}` };
+    }
+    throw new Error(`pbworks.com: page creation failed (${r.status})`);
   },
 
   'paste.ee': async (url, creds, content) => {

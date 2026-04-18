@@ -1,5 +1,3 @@
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -22220,10 +22218,92 @@ function blpGetPrompt(site, kw, url){
 }
 
 // ── ZERO-AUTH REST SUBMITTERS ─────────────────────────────────────────────
+// ── BLP PROXY FETCH — routes through user's Vercel backend to avoid CORS ──
+// Falls back to smartFetch (free CORS proxies) if no Vercel URL is configured.
+async function _blpFetch(targetUrl, opts = {}) {
+  const vBase = (typeof vercelUrl === 'function' ? vercelUrl() : (typeof settingGet === 'function' ? settingGet('vercel_url') : '')||'').replace(/\/+$/,'');
+  const secret = typeof settingGet === 'function' ? (settingGet('vercel_secret')||'') : '';
+
+  if (vBase) {
+    // Route through /api/proxy on the user's deployed Vercel backend
+    const proxyUrl = vBase + '/api/proxy';
+    const headers = { 'Content-Type': 'application/json' };
+    if (secret) headers['X-API-Key'] = secret;
+    try {
+      const resp = await fetch(proxyUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          url: targetUrl,
+          method: opts.method || 'GET',
+          headers: opts.headers || {},
+          body: opts.body || null,
+          timeout: 30,
+          returnCookies: true,
+        }),
+        signal: AbortSignal.timeout ? AbortSignal.timeout(35000) : undefined,
+      });
+      if (!resp.ok && resp.status >= 500) throw new Error('Proxy returned ' + resp.status);
+      // The proxy returns { ok, status, text, body, cookies }
+      // We wrap it in a Response-like object callers can use
+      const pd = await resp.json();
+      const responseText = typeof pd.text === 'string' ? pd.text : JSON.stringify(pd.body || pd);
+      return {
+        ok: pd.ok,
+        status: pd.status || (pd.ok ? 200 : 502),
+        url: pd.finalUrl || targetUrl,
+        headers: { get: (h) => null }, // minimal shim
+        text: async () => responseText,
+        json: async () => { try { return JSON.parse(responseText); } catch(e) { return pd.body || {}; } },
+        _cookies: pd.cookies || '',
+        _raw: pd,
+      };
+    } catch(e) {
+      console.warn('[BLP] Vercel proxy error, falling back to smartFetch:', e.message);
+    }
+  }
+  // Fallback: use smartFetch (public CORS proxies) if no Vercel URL or proxy failed
+  return smartFetch(targetUrl, opts);
+}
+
+// Helper: fetch with cookie threading (for CSRF-protected sites like rentry.co)
+async function _blpFetchWithCookies(targetUrl, opts = {}, existingCookies = '') {
+  const vBase = (typeof vercelUrl === 'function' ? vercelUrl() : (typeof settingGet === 'function' ? settingGet('vercel_url') : '')||'').replace(/\/+$/,'');
+  const secret = typeof settingGet === 'function' ? (settingGet('vercel_secret')||'') : '';
+  if (vBase) {
+    const proxyUrl = vBase + '/api/proxy';
+    const headers = { 'Content-Type': 'application/json' };
+    if (secret) headers['X-API-Key'] = secret;
+    const resp = await fetch(proxyUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        url: targetUrl,
+        method: opts.method || 'GET',
+        headers: opts.headers || {},
+        body: opts.body || null,
+        cookies: existingCookies,
+        timeout: 30,
+        returnCookies: true,
+      }),
+    });
+    const pd = await resp.json();
+    const responseText = typeof pd.text === 'string' ? pd.text : JSON.stringify(pd.body || pd);
+    return {
+      ok: pd.ok, status: pd.status, url: pd.finalUrl || targetUrl,
+      text: async () => responseText,
+      json: async () => { try { return JSON.parse(responseText); } catch(e) { return pd.body || {}; } },
+      _cookies: pd.cookies || '',
+      headers: { get: (h) => h === 'set-cookie' ? pd.cookies : null },
+    };
+  }
+  return smartFetch(targetUrl, opts);
+}
+
 const BLP_SUBMITTERS = {
 
   async 'dpaste.org'(content, site){
-    const r = await fetch('https://dpaste.org/api/',{
+    const r = await _blpFetch('https://dpaste.org/api/',{
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({content,syntax:'text',expiry_days:365})
@@ -22233,7 +22313,7 @@ const BLP_SUBMITTERS = {
   },
 
   async 'hastebin.com'(content, site){
-    const r = await fetch('https://hastebin.com/documents',{method:'POST',body:content});
+    const r = await _blpFetch('https://hastebin.com/documents',{method:'POST',body:content});
     const d = await r.json();
     return {url:'https://hastebin.com/'+d.key};
   },
@@ -22241,7 +22321,7 @@ const BLP_SUBMITTERS = {
   async 'write.as'(content, site, cred){
     const headers = {'Content-Type':'application/json'};
     if(cred && cred.key) headers['Authorization'] = 'Token '+cred.key;
-    const r = await fetch('https://write.as/api/posts',{
+    const r = await _blpFetch('https://write.as/api/posts',{
       method:'POST', headers,
       body:JSON.stringify({body:content, font:'serif'})
     });
@@ -22250,27 +22330,24 @@ const BLP_SUBMITTERS = {
   },
 
   async 'rentry.co'(content, site){
-    // Get CSRF first
-    const page = await fetch('https://rentry.co');
+    // Step 1: get CSRF token + cookie via proxy (cookie threading built into _blpFetchWithCookies)
+    const page = await _blpFetchWithCookies('https://rentry.co', {method:'GET'});
     const text = await page.text();
     const csrf = (text.match(/csrfmiddlewaretoken.*?value=["']([^"']+)["']/) || [])[1] || '';
-    const cookies = page.headers.get('set-cookie')||'';
-    const csrfCookie = (cookies.match(/csrftoken=([^;]+)/) || [])[1] || '';
-    const r = await fetch('https://rentry.co/api/new',{
+    const csrfCookie = page._cookies || '';
+    const cookieVal = (csrfCookie.match(/csrftoken=([^;]+)/) || [])[1] || csrfCookie;
+    // Step 2: POST with cookies threaded back through proxy
+    const r = await _blpFetchWithCookies('https://rentry.co/api/new', {
       method:'POST',
-      headers:{
-        'Content-Type':'application/x-www-form-urlencoded',
-        'Referer':'https://rentry.co',
-        'Cookie':'csrftoken='+csrfCookie
-      },
-      body:new URLSearchParams({csrfmiddlewaretoken:csrf||csrfCookie, text:content})
-    });
+      headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':'https://rentry.co'},
+      body:new URLSearchParams({csrfmiddlewaretoken:csrf||cookieVal, text:content}).toString()
+    }, csrfCookie);
     const d = await r.json();
     return {url:'https://rentry.co/'+(d.url||'')};
   },
 
   async '0bin.net'(content, site){
-    const r = await fetch('https://0bin.net/paste',{
+    const r = await _blpFetch('https://0bin.net/paste',{
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({content, expiration:'never'})
@@ -22280,7 +22357,7 @@ const BLP_SUBMITTERS = {
 
   async 'pastebin.com'(content, site, cred){
     if(!cred || !cred.key) throw new Error('Pastebin requires an API key — add it in Backlink Pro Setup');
-    const r = await fetch('https://pastebin.com/api/api_post.php',{
+    const r = await _blpFetch('https://pastebin.com/api/api_post.php',{
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({
@@ -22300,7 +22377,7 @@ const BLP_SUBMITTERS = {
     if(!cred || !cred.key) throw new Error('Telegraph requires an access token');
     const title = content.split('\n')[0].slice(0,80) || 'SEO Resource';
     const nodes = content.split('\n').filter(Boolean).map(p=>({tag:'p',children:[p]}));
-    const r = await fetch('https://api.telegra.ph/createPage',{
+    const r = await _blpFetch('https://api.telegra.ph/createPage',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({access_token:cred.key, title, content:nodes, return_content:false})
@@ -22310,7 +22387,7 @@ const BLP_SUBMITTERS = {
   },
 
   async 'paste.mozilla.org'(content, site){
-    const r = await fetch('https://paste.mozilla.org/api/',{
+    const r = await _blpFetch('https://paste.mozilla.org/api/',{
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({content, lexer:'text', expires:'never'})
@@ -22320,7 +22397,7 @@ const BLP_SUBMITTERS = {
   },
 
   async 'controlc.com'(content, site){
-    const r = await fetch('https://controlc.com/index.php?act=submit',{
+    const r = await _blpFetch('https://controlc.com/index.php?act=submit',{
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':'https://controlc.com'},
       body:new URLSearchParams({text:content, subdomain:'', 'anticaptcha-linker':'','private':'0'})
@@ -22340,7 +22417,7 @@ const BLP_SUBMITTERS = {
     const uid = user.data && user.data.id;
     if(!uid) throw new Error('Could not get Medium user ID');
     const title = content.split('\n')[0].replace(/^#+\s*/,'').slice(0,80) || 'SEO Guide';
-    const r = await fetch('https://api.medium.com/v1/users/'+uid+'/posts',{
+    const r = await _blpFetch('https://api.medium.com/v1/users/'+uid+'/posts',{
       method:'POST',
       headers:{'Authorization':'Bearer '+cred.key,'Content-Type':'application/json','Accept':'application/json'},
       body:JSON.stringify({title, contentFormat:'markdown', content, publishStatus:'public', tags:[]})
@@ -22372,7 +22449,7 @@ const BLP_SUBMITTERS = {
 
   async 'paste.ee'(content, site, cred){
     if(!cred||!cred.key) throw new Error('Paste.ee requires an API Key');
-    const r = await fetch('https://api.paste.ee/v1/pastes',{
+    const r = await _blpFetch('https://api.paste.ee/v1/pastes',{
       method:'POST',
       headers:{'X-Auth-Token':cred.key,'Content-Type':'application/json'},
       body:JSON.stringify({sections:[{name:'SEO Content',syntax:'text',contents:content}]})
@@ -22383,7 +22460,7 @@ const BLP_SUBMITTERS = {
 
   async 'hackmd.io'(content, site, cred){
     if(!cred||!cred.key) throw new Error('HackMD requires an API Token');
-    const r = await fetch('https://api.hackmd.io/v1/notes',{
+    const r = await _blpFetch('https://api.hackmd.io/v1/notes',{
       method:'POST',
       headers:{'Authorization':'Bearer '+cred.key,'Content-Type':'application/json'},
       body:JSON.stringify({content, readPermission:'guest', writePermission:'signed_in', commentPermission:'everyone'})
@@ -22394,7 +22471,7 @@ const BLP_SUBMITTERS = {
 
   // ── EXTENDED ZERO-AUTH SUBMITTERS (added for 95%+ success rate) ──
   async 'paste.mozilla.org'(content, site) {
-    const r = await fetch('https://paste.mozilla.org/api/', {
+    const r = await _blpFetch('https://paste.mozilla.org/api/', {
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({content, lexer:'text', expires:'never'})
@@ -22419,7 +22496,7 @@ const BLP_SUBMITTERS = {
 
   async 'freebase.com'(content, site) {
     // Freebase is archived - redirect to dpaste fallback
-    const r = await fetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
+    const r = await _blpFetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
     const url = await r.text();
     return {url: url.trim().replace(/[\'"]/g,''), fallback:true};
   },
@@ -22433,7 +22510,7 @@ const BLP_SUBMITTERS = {
   },
 
   async 'ideone.com'(content, site) {
-    const r = await fetch('https://ideone.com/api/1/create_submission', {
+    const r = await _blpFetch('https://ideone.com/api/1/create_submission', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({src:content,lang:12,input:'',run:false,private:false,files:[{name:'README.txt',contents:content}]})
@@ -22443,7 +22520,7 @@ const BLP_SUBMITTERS = {
       if(d.link) return {url:'https://ideone.com/'+d.link};
     }
     // fallback to dpaste
-    const r2 = await fetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
+    const r2 = await _blpFetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
     const url = await r2.text();
     return {url: url.trim().replace(/[\'"]/g,''), fallback:true};
   },
@@ -22457,7 +22534,7 @@ const BLP_SUBMITTERS = {
   },
 
   async 'liveinternet.ru'(content, site) {
-    const r = await fetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
+    const r = await _blpFetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
     const url = await r.text();
     return {url: url.trim().replace(/[\'"]/g,''), fallback:true};
   },
@@ -22512,7 +22589,7 @@ const BLP_SUBMITTERS = {
 
   async 'justpaste.it'(content, site) {
     // Route to dpaste since justpaste needs browser login  
-    const r = await fetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
+    const r = await _blpFetch('https://dpaste.org/api/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({content,syntax:'text',expiry_days:365})});
     const url = await r.text();
     return {url: url.trim().replace(/[\'"]/g,''), fallback:true, note:'Published via dpaste (justpaste requires browser login)'};
   },
@@ -22556,7 +22633,7 @@ async function blpSubmitSite(site, keyword, moneyUrl){
   // ── GUARANTEED FALLBACK SUBMITTERS (for zero-auth sites with no specific submitter) ──
   // These are real APIs that work without auth and always return a live URL.
   async function _fallbackDpaste(content) {
-    const r = await fetch('https://dpaste.org/api/', {
+    const r = await _blpFetch('https://dpaste.org/api/', {
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({content, syntax:'text', expiry_days:365})
@@ -22565,26 +22642,28 @@ async function blpSubmitSite(site, keyword, moneyUrl){
     return url.trim().replace(/['"]/g,'');
   }
   async function _fallbackHastebin(content) {
-    const r = await fetch('https://hastebin.com/documents', {method:'POST', body:content});
+    const r = await _blpFetch('https://hastebin.com/documents', {method:'POST', body:content});
     const d = await r.json();
     return 'https://hastebin.com/'+d.key;
   }
   async function _fallbackRentry(content) {
-    const page = await fetch('https://rentry.co');
+    // Step 1: get CSRF token via proxy (with cookie threading)
+    const page = await _blpFetchWithCookies('https://rentry.co', {method:'GET'});
     const text = await page.text();
-    const csrf = (text.match(/csrfmiddlewaretoken.*?value=["\']([\'\"a-zA-Z0-9]+)["\']/)||[])[1]||'';
-    const cookies = page.headers.get('set-cookie')||'';
-    const csrfCookie = (cookies.match(/csrftoken=([^;]+)/)||[])[1]||'';
-    const r = await fetch('https://rentry.co/api/new',{
+    const csrf = (text.match(/csrfmiddlewaretoken.*?value=["']([^"']+)["']/) || [])[1] || '';
+    const csrfCookie = page._cookies || '';
+    const cookieVal = (csrfCookie.match(/csrftoken=([^;]+)/) || [])[1] || csrfCookie;
+    // Step 2: POST with cookie threaded through proxy
+    const r = await _blpFetchWithCookies('https://rentry.co/api/new', {
       method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':'https://rentry.co','Cookie':'csrftoken='+csrfCookie},
-      body:new URLSearchParams({csrfmiddlewaretoken:csrf||csrfCookie,text:content})
-    });
+      headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':'https://rentry.co'},
+      body:new URLSearchParams({csrfmiddlewaretoken:csrf||cookieVal,text:content}).toString()
+    }, csrfCookie);
     const d = await r.json();
     return 'https://rentry.co/'+(d.url||'');
   }
   async function _fallbackControlC(content) {
-    const r = await fetch('https://controlc.com/index.php?act=submit',{
+    const r = await _blpFetch('https://controlc.com/index.php?act=submit',{
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':'https://controlc.com'},
       body:new URLSearchParams({text:content,subdomain:'','anticaptcha-linker':'','private':'0'})
@@ -22592,7 +22671,7 @@ async function blpSubmitSite(site, keyword, moneyUrl){
     return r.url||'https://controlc.com';
   }
   async function _fallback0bin(content) {
-    const r = await fetch('https://0bin.net/paste',{
+    const r = await _blpFetch('https://0bin.net/paste',{
       method:'POST',
       headers:{'Content-Type':'application/x-www-form-urlencoded'},
       body:new URLSearchParams({content,expiration:'never'})

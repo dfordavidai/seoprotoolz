@@ -1598,6 +1598,56 @@ ${linkSection}
 // ═══════════════════════════════════════════════════════════════
 const _SF_CORS_DOMAINS = new Set(); // domains confirmed to need proxy
 
+// ── VERCEL-FIRST SMART FETCH: patches all platform API calls to route through Vercel proxy ──
+// When Vercel is configured, ALL outbound API calls go through /api/proxy server-side,
+// eliminating CORS failures, rate-limits, and public proxy unreliability in one shot.
+const _SF_RETRY_DELAYS = [500, 1500, 4000]; // ms — exponential backoff for transient failures
+async function _vercelProxyFetch(url, opts={}) {
+  const vBase = (typeof vercelUrl === 'function' ? vercelUrl() : '');
+  if (!vBase) return null; // Vercel not configured — caller falls through to proxy chain
+  const secret = (typeof vercelSecret === 'function' ? vercelSecret() : '');
+  const headers = { 'Content-Type': 'application/json' };
+  if (secret) headers['X-API-Key'] = secret;
+  const timeout = (typeof settingGet === 'function' ? (settingGet('vercel_timeout') || 25000) : 25000);
+  // Normalise body — handle URLSearchParams, string, object
+  let bodyVal = opts.body || null;
+  if (bodyVal && typeof bodyVal !== 'string') {
+    try { bodyVal = bodyVal.toString ? bodyVal.toString() : JSON.stringify(bodyVal); } catch(e) { bodyVal = null; }
+  }
+  const payload = {
+    url,
+    method: (opts.method || 'GET').toUpperCase(),
+    headers: opts.headers || {},
+    body: bodyVal,
+    timeout: Math.floor(timeout / 1000),
+    returnCookies: true,
+  };
+  try {
+    const res = await fetch(vBase + '/api/proxy', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(timeout + 8000) : undefined,
+    });
+    if (!res.ok) return null; // proxy server error — fall through
+    const pd = await res.json();
+    const txt = typeof pd.text === 'string' ? pd.text : JSON.stringify(pd.body || pd);
+    // Return a full Response-compatible shim
+    return {
+      ok: pd.ok !== false && (pd.status || 200) < 400,
+      status: pd.status || 200,
+      statusText: pd.statusText || '',
+      url: pd.finalUrl || url,
+      redirected: !!pd.redirected,
+      _cookies: pd.cookies || '',
+      _proxy: 'vercel',
+      text: async () => txt,
+      json: async () => { try { return JSON.parse(txt); } catch(e) { throw new Error('JSON parse: ' + txt.slice(0, 120)); } },
+      headers: { get: (h) => (pd.headers && pd.headers[h.toLowerCase()]) || null },
+    };
+  } catch(e) { return null; } // network error reaching Vercel — fall through
+}
+
 async function smartFetch(url, opts = {}) {
   const timeout  = opts.sfTimeout || opts.timeout || 16000;
   const isPost   = !!(opts.method && opts.method.toUpperCase() !== 'GET');
@@ -1605,6 +1655,25 @@ async function smartFetch(url, opts = {}) {
   const mkSignal = () => (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
     ? AbortSignal.timeout(timeout)
     : (() => { const c = new AbortController(); setTimeout(() => c.abort(), timeout); return c.signal; })();
+
+  // ── 0. VERCEL PROXY FIRST — reliable, server-side, no CORS issues ──
+  // When Vercel is configured every single API call routes through it.
+  // This is the #1 reliability upgrade: eliminates public proxy failures entirely.
+  if (typeof vercelEnabled === 'function' && vercelEnabled()) {
+    const vResp = await _vercelProxyFetch(url, opts);
+    if (vResp !== null) {
+      // Vercel responded — but if it returned a 5xx from the TARGET, retry with backoff
+      if (vResp.ok || (vResp.status >= 400 && vResp.status < 500)) return vResp; // 4xx = real API error, surface it
+      // 5xx from target — retry up to 2 more times
+      for (const delay of [1200, 3000]) {
+        await new Promise(r => setTimeout(r, delay));
+        const retry = await _vercelProxyFetch(url, opts);
+        if (retry !== null && (retry.ok || retry.status < 500)) return retry;
+      }
+      return vResp; // exhausted retries — return last response anyway
+    }
+    // vResp===null means Vercel itself had an error — fall through to direct/proxy chain
+  }
 
   // Build proxy candidate list (same pool as bcProxyFetch / bcGetProxyList)
   function proxyList() {
@@ -6075,7 +6144,74 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   throw new Error('No handler for platform: '+pid);
 }
 
-// ─── AUTO-INDEXER (fires after each successful campaign URL) ──
+// ─── PER-PLATFORM URL VALIDATOR ───────────────────────────────────────────────
+// Validates that a returned URL is a real live published URL, not a fallback/placeholder.
+function _validateCampaignUrl(pid, url) {
+  if (!url || url === '#content-generated' || url.length < 8) return false;
+  try { new URL(url); } catch(e) { return false; }
+  // Platform-specific domain checks
+  const validators = {
+    github:     u => u.includes('github.io'),
+    gitlab:     u => u.includes('gitlab.io'),
+    netlify:    u => u.includes('netlify.app'),
+    vercel:     u => u.includes('vercel.app'),
+    medium:     u => u.includes('medium.com'),
+    devto:      u => u.includes('dev.to'),
+    hashnode:   u => u.includes('hashnode') || u.includes('hash.node'),
+    wordpress:  u => u.includes('wordpress.com'),
+    blogger:    u => u.includes('blogspot.com') || u.includes('blogger.com'),
+    tumblr:     u => u.includes('tumblr.com'),
+    substack:   u => u.includes('substack.com'),
+    ghost:      u => u.includes('.ghost.io') || u.includes('/ghost/'),
+    notion:     u => u.includes('notion.site') || u.includes('notion.so'),
+    telegraph:  u => u.includes('telegra.ph'),
+    reddit:     u => u.includes('reddit.com'),
+    pastebin:   u => u.includes('pastebin.com/') && u.split('/').pop().length >= 4,
+    dpaste:     u => u.includes('dpaste'),
+    hastebin:   u => u.includes('hastebin.com/'),
+    writeas:    u => u.includes('write.as/'),
+    rentry:     u => u.includes('rentry.co/') || u.includes('rentry.org/'),
+    hackmd:     u => u.includes('hackmd.io/'),
+    ghgist:     u => u.includes('gist.github.com/'),
+    codepen:    u => u.includes('codepen.io/'),
+    deviantart: u => u.includes('deviantart.com/'),
+    replit:     u => u.includes('replit.com/'),
+    cloudflare: u => u.includes('.pages.dev') || u.includes('cloudflare'),
+    wix:        u => u.includes('wix.com') || u.includes('wixsite.com'),
+  };
+  const check = validators[pid];
+  return check ? check(url) : url.startsWith('http');
+}
+
+// ─── runSingleCampaign WITH RETRY + VALIDATION ────────────────────────────────
+// Drop-in replacement that wraps runSingleCampaign with:
+//   1. Up to 3 attempts with exponential backoff
+//   2. URL validation — rejects placeholder/fallback URLs
+//   3. Per-attempt fresh content variation to avoid duplicate detection
+async function runSingleCampaignWithRetry(pid, kw, account, extraVal, idx, term, maxAttempts=3) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (attempt > 1) {
+        const backoff = (attempt - 1) * 2000;
+        term.add(`    ↻ Retry ${attempt}/${maxAttempts} after ${backoff/1000}s...`, 'warn');
+        await new Promise(r => setTimeout(r, backoff));
+      }
+      const url = await runSingleCampaign(pid, kw, account, extraVal, idx + (attempt - 1), term);
+      // Validate the returned URL is a real published page
+      if (_validateCampaignUrl(pid, url)) return url;
+      // URL is invalid/placeholder — treat as soft failure and retry
+      lastErr = new Error('URL validation failed: ' + (url || 'empty'));
+      term.add(`    ⚠ Got invalid URL "${url}" — retrying...`, 'warn');
+    } catch(e) {
+      lastErr = e;
+      // Don't retry auth/credential errors — those won't fix themselves
+      const isFatal = /token|key required|credentials|login failed|401|403|auth/i.test(e.message);
+      if (isFatal) throw e;
+    }
+  }
+  throw lastErr || new Error('All attempts failed for ' + pid);
+}
 async function autoSubmitToIndexers(url, term){
   const key=settingGet('li_indexNowKey')||settingGet('indexnow_key')||'';
   const results=[];
@@ -6307,16 +6443,45 @@ function updateBlastEstimate(){
   const mins=Math.round((total*delay+blpTotal*1.2)/60);
   el.textContent='Estimated time: ~'+mins+' min for '+_blastSelectedPlatforms.length+' platform(s)'+(blpCount?' + '+blpCount+' BLP site(s)':'')+' × '+kws+' keyword(s) at '+delay+'s delay';
 }
+// ─── CREDENTIAL PRE-FLIGHT CHECKER ───────────────────────────────────────────
+// Called before blast starts. Returns { ok: bool, warnings: string[] }
+function _blastPreFlight(platforms, accounts) {
+  const warnings = [];
+  const TOKEN_PLATFORMS = new Set(['github','gitlab','netlify','vercel','medium','devto','hashnode','wordpress','blogger','tumblr','ghost','notion','telegraph','wix','codepen','replit','cloudflare','reddit','substack','deviantart','vingle','hackmd','writeas','pastee','pastebin','ghgist']);
+  const PASS_PLATFORMS  = new Set(['techplanet','click4r','writeonwall','snaplant','theprose','onfeetnation','caribbeanfever','taylorhicks']);
+  for (const pid of platforms) {
+    const acc = accounts.find(a => a.platform === pid);
+    if (!acc) { warnings.push(pid + ': No account — will be skipped'); continue; }
+    if (TOKEN_PLATFORMS.has(pid) && !acc.token) warnings.push(pid + ': Missing API token — connect account first');
+    if (PASS_PLATFORMS.has(pid) && (!acc.login || !acc.extra)) warnings.push(pid + ': Missing username or password');
+    if (pid === 'cloudflare' && !acc.extra) warnings.push('cloudflare: Missing Account ID in account extra field');
+    if (pid === 'ghost' && !acc.extra) warnings.push('ghost: Missing Ghost blog URL in extra field');
+    if (pid === 'tumblr' && !acc.extra) warnings.push('tumblr: Missing blog name in extra field');
+    if (pid === 'taylorhicks' && !acc.token) warnings.push('taylorhicks: Ning API key required');
+  }
+  return { ok: warnings.filter(w => w.includes('Missing') || w.includes('No account')).length === 0, warnings };
+}
+
 async function runGlobalBlast(){
   if(_blastRunning) return;
   const kwEl=document.getElementById('blast-kw');
   const prefixEl=document.getElementById('blast-prefix');
   const delayEl=document.getElementById('blast-delay');
-  syncContentFields('blast'); // sync all content fields from DOM before blast
+  syncContentFields('blast');
   const singleKw=kwEl&&kwEl.value.trim();
   const effectiveKws=singleKw?[singleKw]:(S.keywords.length?S.keywords:null);
   if(!effectiveKws){ toast('Add keywords in the Keywords page first','w'); return; }
-  if(!_blastSelectedPlatforms.length){ alert('Select at least one platform.'); return; }
+  if(!_blastSelectedPlatforms.length && !_blastSelectedBLPSites.length){ alert('Select at least one platform or BLP site.'); return; }
+
+  // ── PRE-FLIGHT: warn about missing credentials before wasting time ──
+  if(_blastSelectedPlatforms.length){
+    const pf=_blastPreFlight(_blastSelectedPlatforms, S.accounts);
+    if(pf.warnings.length){
+      const proceed=confirm('⚠️ Pre-flight warnings:\n\n'+pf.warnings.join('\n')+'\n\nProceed anyway? Platforms with issues will be skipped.');
+      if(!proceed) return;
+    }
+  }
+
   _blastRunning=true;
   const prefix=(prefixEl&&prefixEl.value.trim())||'seo';
   const delay=parseInt((delayEl&&delayEl.value)||4)||4;
@@ -6329,60 +6494,98 @@ async function runGlobalBlast(){
   const urlsEl=document.getElementById('blast-urls');
   btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Blasting...';
   progWrap.style.display='block';
-  termEl.innerHTML='';
-  urlsEl.innerHTML='';
+  termEl.innerHTML=''; urlsEl.innerHTML='';
   const term=makeTerminal(termEl);
   const liveUrls=[];
+  const failedPlatforms=[];
   const total=_blastSelectedPlatforms.length*effectiveKws.length;
   let done=0;
+
+  // Show routing mode
+  if(vercelEnabled()) term.add('🟢 Vercel backend connected — all API calls routed server-side (max reliability)','info');
+  else term.add('🟡 No Vercel backend — using browser CORS proxies. Configure Vercel in Settings for best results.','warn');
+
+  // ── PLATFORMS LOOP ──────────────────────────────────────────────────────
+  // Platforms with direct REST handlers in /api/gb-post (bypass browser entirely)
+  const GB_REST_DOMAINS={medium:'medium.com',devto:'dev.to',hashnode:'hashnode.com',writeas:'write.as',telegraph:'telegra.ph',pastebin:'pastebin.com',hackmd:'hackmd.io'};
 
   for(let ki=0;ki<effectiveKws.length;ki++){
     const kw=effectiveKws[ki];
     term.add('══ Keyword ['+(ki+1)+'/'+effectiveKws.length+']: "'+kw+'" ══','info');
+
     for(const pid of _blastSelectedPlatforms){
       const p=getPlatform(pid);
       const account=S.accounts.find(a=>a.platform===pid);
-      if(!account){ term.add('  ⚠ '+p.name+': No account connected, skipping','warn'); done++; continue; }
+      if(!account){ term.add('  ⚠ '+p.name+': No account — skipping','warn'); done++; continue; }
+      // Quick credential guard — don't attempt if obviously missing
+      if(!account.token && !account.login){ term.add('  ⚠ '+p.name+': No credentials — skipping (reconnect in Setup)','warn'); done++; continue; }
+
       term.add('  → '+p.icon+' '+p.name+'...','info');
+      let url=''; let success=false;
       try{
-        // For global blast, use account.extra as the per-platform extra value
         const blastExtra=account.extra||prefix;
-        // Platforms with REST handlers in /api/gb-post — route server-side when Vercel is configured
-        const GB_REST_DOMAINS={medium:'medium.com',devto:'dev.to',hashnode:'hashnode.com',writeas:'write.as',telegraph:'telegra.ph',pastebin:'pastebin.com',hackmd:'hackmd.io'};
-        let url;
+
+        // TIER 1: Vercel gb-post direct REST — most reliable, server-side, no CORS
         if(vercelEnabled() && GB_REST_DOMAINS[pid]){
-          term.add('    ↳ routing via Vercel backend...','info');
+          term.add('    ↳ [Vercel REST]','info');
           const ec=getEffectiveContent(kw,getActiveBacklinks(),ki,S.keywords,account.login,p.domain);
-          const gbResp=await fetch(vercelUrl()+'/api/gb-post',{
-            method:'POST',
-            headers:vercelHeaders(),
-            body:JSON.stringify({
-              sites:[{url:'https://'+GB_REST_DOMAINS[pid],credentials:{token:account.token||account.password,username:account.login,password:account.password,api_key:account.token,publicationId:account.extra},method:'rest_api'}],
-              content:{title:ec.title,body:ec.body,tags:ec.tags||''},
-              options:{concurrency:1,timeout:30000}
-            })
-          });
-          if(!gbResp.ok) throw new Error('Vercel gb-post error: '+gbResp.status);
-          const gbData=await gbResp.json();
-          const r0=gbData.results&&gbData.results[0];
-          if(r0&&!r0.ok) throw new Error(r0.error||'gb-post returned failure');
-          url=(r0&&r0.resultUrl)||'';
+          let gbOk=false;
+          for(let attempt=1;attempt<=3;attempt++){
+            try{
+              if(attempt>1){ term.add('    ↻ gb-post retry '+attempt+'/3...','warn'); await sleep(attempt*1500); }
+              const gbResp=await fetch(vercelUrl()+'/api/gb-post',{
+                method:'POST', headers:vercelHeaders(),
+                body:JSON.stringify({
+                  sites:[{url:'https://'+GB_REST_DOMAINS[pid],
+                    credentials:{token:account.token,username:account.login,password:account.password||account.extra,api_key:account.token,publicationId:account.extra},
+                    method:'rest_api'}],
+                  content:{title:ec.title,body:ec.body,tags:ec.tags||''},
+                  options:{concurrency:1,timeout:35000}
+                })
+              });
+              if(!gbResp.ok) throw new Error('HTTP '+gbResp.status);
+              const gbData=await gbResp.json();
+              const r0=gbData.results&&gbData.results[0];
+              if(!r0) throw new Error('No result from gb-post');
+              if(!r0.ok) throw new Error(r0.error||'Platform rejected');
+              url=r0.resultUrl||'';
+              if(_validateCampaignUrl(pid,url)){ gbOk=true; break; }
+              throw new Error('Invalid URL returned: '+url);
+            }catch(e){
+              if(attempt===3) throw e;
+            }
+          }
         } else {
-          url=await runSingleCampaign(pid,kw,account,blastExtra,ki,{add:(m,t)=>term.add('    '+m,t)});
+          // TIER 2: runSingleCampaign with retry + validation (uses vercel proxy for all API calls via smartFetch upgrade)
+          url=await runSingleCampaignWithRetry(pid,kw,account,blastExtra,ki,{add:(m,t)=>term.add('    '+m,t)},3);
         }
-        term.add('  ✓ '+p.name+': '+url,'info');
-        const displayedUrl = url || '#content-generated';
-        liveUrls.push({url:displayedUrl,keyword:kw,platform:pid});
-        const result={id:uid(),platform:pid,keyword:kw,repo:slug(prefix+'-'+kw),url,status:'success',ts:ts()};
+
+        // Final URL validation
+        if(!_validateCampaignUrl(pid,url)){
+          // Soft: still save but mark as unverified
+          term.add('  ⚠ '+p.name+': Posted but URL unverified: '+(url||'(empty)'),'warn');
+        } else {
+          term.add('  ✓ '+p.name+': '+url,'info');
+          success=true;
+        }
+
+        liveUrls.push({url:url||'#posted',keyword:kw,platform:pid});
+        const result={id:uid(),platform:pid,keyword:kw,repo:slug(prefix+'-'+kw),url,status:success?'success':'warn',ts:ts()};
         S.campaigns=S.campaigns.filter(c=>!(c.platform===pid&&c.keyword===kw));
-        if(!result.id) result.id=uid(); S.campaigns.push(result); saveState();
-        if(settingGet('auto_index_on_publish')&&url){
-          autoSubmitToIndexers(url,{add:(m,t)=>term.add('    '+m,t)}).catch(()=>{});
+        S.campaigns.push(result); saveState();
+
+        // Auto-index every valid URL immediately
+        if(url && success && settingGet('auto_index_on_publish')){
+          autoSubmitToIndexers(url,{add:(m,t)=>term.add('    [index] '+m,t)}).catch(()=>{});
         }
+
         urlsEl.innerHTML='<div class="card slide-in"><div class="card-title">🚀 Live URLs — '+liveUrls.length+' total</div>'+liveUrls.slice(-10).map(u=>urlBannerHTML(u.url,u.keyword,u.platform)).join('')+'</div>';
+
       }catch(e){
-        term.add('  ✗ '+p.name+': '+e.message,'error');
-        S.campaigns.push({id:uid(),platform:pid,keyword:kw,repo:slug(prefix+'-'+kw),url:'',status:'error',ts:ts(),error:e.message}); saveState();
+        const errMsg=e.message||String(e);
+        term.add('  ✗ '+p.name+': '+errMsg,'error');
+        failedPlatforms.push({pid,name:p.name,kw,error:errMsg});
+        S.campaigns.push({id:uid(),platform:pid,keyword:kw,repo:slug(prefix+'-'+kw),url:'',status:'error',ts:ts(),error:errMsg}); saveState();
       }
       done++;
       const pct=Math.round(done/total*100);
@@ -6392,79 +6595,148 @@ async function runGlobalBlast(){
       if(done<total) await sleep(delay*1000);
     }
   }
+
   setProgress(progBar,100);
-  term.add('🌍 GLOBAL BLAST COMPLETE! '+liveUrls.length+'/'+total+' succeeded across '+_blastSelectedPlatforms.length+' platforms','info');
+  const successCount=liveUrls.filter(u=>u.url&&u.url!=='#posted').length;
+  term.add('','info');
+  term.add('════════════════════════════════════════════','info');
+  term.add('🌍 GLOBAL BLAST COMPLETE','info');
+  term.add('  ✅ Succeeded: '+successCount+'/'+total,'info');
+  if(failedPlatforms.length){
+    term.add('  ❌ Failed: '+failedPlatforms.length,'error');
+    // Group failures by error pattern and give actionable fix
+    const authFails=failedPlatforms.filter(f=>/token|key|auth|401|403|credentials|login/i.test(f.error));
+    const netFails=failedPlatforms.filter(f=>/proxy|CORS|timeout|fetch|network/i.test(f.error));
+    if(authFails.length) term.add('  🔑 Auth failures ('+authFails.map(f=>f.name).join(', ')+'): reconnect accounts in Setup','warn');
+    if(netFails.length) term.add('  🌐 Network failures ('+netFails.map(f=>f.name).join(', ')+'): configure Vercel backend in Settings for reliability','warn');
+  }
+  if(vercelEnabled()) term.add('  🔗 Proxy: Vercel (server-side)','info');
+  else term.add('  🔗 Proxy: browser CORS chain','warn');
+  term.add('════════════════════════════════════════════','info');
+
   btn.disabled=false; btn.innerHTML='🌍 GLOBAL BLAST — Re-run';
   _blastRunning=false;
   updateHeader(); updatePlatformBar();
 
-  // ── BLP BLAST: fire selected Backlink Pro sites ──
-  if(_blastSelectedBLPSites.length){
-    const blpTermEl=document.getElementById('blast-term');
-    const blpTerm=makeTerminal(blpTermEl);
-    blpTerm.add('','info');
-    blpTerm.add('══ 🔗 BACKLINK PRO BLAST — '+_blastSelectedBLPSites.length+' sites ══','info');
-    const kwEl2=document.getElementById('blast-kw');
-    const singleKw2=kwEl2&&kwEl2.value.trim();
-    const blpKws=singleKw2?[singleKw2]:(S.keywords.length?S.keywords:['seo']);
-    const moneyUrl=(S.backlinkVault.length?S.backlinkVault[0].url:(S.links.length?S.links[0].url:''));
-    if(!moneyUrl){ blpTerm.add('⚠ No money URL set — add one in Links Manager for BLP content injection','warn'); }
-    let blpOk=0,blpFail=0;
-    // REST-capable BLP domains that /api/gb-post handles — batch these server-side when Vercel available
-    const BLP_REST_CAPABLE=['pastebin.com','dev.to','medium.com','hashnode.com','write.as','telegra.ph','hackmd.io','dpaste.com','controlc.com','rentry.co','hastebin.com','paste.ee'];
+  // ── BLP BLAST ────────────────────────────────────────────────────────────
+  if(!_blastSelectedBLPSites.length) return;
+
+  const blpTerm=makeTerminal(termEl);
+  blpTerm.add('','info');
+  blpTerm.add('══ 🔗 BACKLINK PRO BLAST — '+_blastSelectedBLPSites.length+' sites ══','info');
+  const blpKws=(document.getElementById('blast-kw')||{}).value&&(document.getElementById('blast-kw')||{}).value.trim()
+    ?[(document.getElementById('blast-kw')||{}).value.trim()]
+    :(S.keywords.length?S.keywords:['seo']);
+  const moneyUrl=S.backlinkVault.length?S.backlinkVault[0].url:(S.links.length?S.links[0].url:'');
+  if(!moneyUrl) blpTerm.add('⚠ No money URL — add one in Links Manager for backlink injection','warn');
+
+  // Try Groq content if key set, otherwise local templates — already handled inside blpSubmitSite
+  const hasGroq=!!(settingGet('groq_api_key'));
+  if(hasGroq) blpTerm.add('  ✨ Groq AI content generation active','info');
+  else blpTerm.add('  📝 Using local content templates (add Groq key in Settings → AI for AI-generated content)','info');
+
+  let blpOk=0,blpFail=0;
+  const BLP_REST_CAPABLE=['pastebin.com','dev.to','medium.com','hashnode.com','write.as','telegra.ph','hackmd.io','dpaste.com','controlc.com','rentry.co','hastebin.com','paste.ee'];
+
+  for(const kw of blpKws){
+    const effectiveMoneyUrl=moneyUrl||kw;
+
+    // TIER 1: Batch REST-capable sites via Vercel gb-post (parallel, fast)
     if(vercelEnabled()){
-      for(const kw of blpKws){
-        const effectiveMoneyUrl=moneyUrl||kw;
-        const restSites=_blastSelectedBLPSites.filter(d=>BLP_REST_CAPABLE.includes(d));
-        const localSites=_blastSelectedBLPSites.filter(d=>!BLP_REST_CAPABLE.includes(d));
-        if(restSites.length){
-          blpTerm.add('  ↳ Batching '+restSites.length+' REST sites via Vercel ['+kw+']...','info');
-          try{
-            const gbContent={title:kw+' Guide',body:blpGenerateLocalContent({t:'paste',u:''},kw,effectiveMoneyUrl),tags:kw};
-            const gbResp=await fetch(vercelUrl()+'/api/gb-post',{method:'POST',headers:vercelHeaders(),body:JSON.stringify({sites:restSites.map(d=>({url:'https://'+d,credentials:{},method:'auto'})),content:gbContent,options:{concurrency:5,timeout:30000}})});
-            if(gbResp.ok){
-              const gbData=await gbResp.json();
-              for(const r of (gbData.results||[])){
-                let rDomain=r.url;try{rDomain=new URL(r.url).hostname.replace(/^www\./,'');}catch(e){}
-                if(r.ok){BLP.addLog({domain:rDomain,status:'success',url:r.resultUrl||r.url,keyword:kw});blpTerm.add('  ✓ '+rDomain+': '+(r.resultUrl||'submitted')+' [Vercel]','info');blpOk++;}
-                else{BLP.addLog({domain:rDomain,status:'error',error:r.error,keyword:kw});blpTerm.add('  ✗ '+rDomain+': '+(r.error||'failed'),'error');blpFail++;}
+      const restSites=_blastSelectedBLPSites.filter(d=>BLP_REST_CAPABLE.includes(d));
+      const localSites=_blastSelectedBLPSites.filter(d=>!BLP_REST_CAPABLE.includes(d));
+
+      if(restSites.length){
+        blpTerm.add('  ↳ Batching '+restSites.length+' REST sites via Vercel ['+kw+']...','info');
+        let batchFallback=[];
+        try{
+          // Use Groq for content if available, else local template
+          let batchBody;
+          if(hasGroq){
+            try{
+              const sys='You are an SEO content writer. Output ONLY the requested content, no preamble.';
+              const usr='Write a 300-word informational article about "'+kw+'". Include this link naturally: '+effectiveMoneyUrl+'. Plain markdown, no code blocks.';
+              batchBody=await groqComplete(sys,usr,{max_tokens:600,temperature:0.7});
+            }catch(e){ batchBody=null; }
+          }
+          if(!batchBody) batchBody=blpGenerateLocalContent({t:'paste',u:''},kw,effectiveMoneyUrl);
+
+          const gbContent={title:kw+' — Resource Guide',body:batchBody,tags:kw};
+          const gbResp=await fetch(vercelUrl()+'/api/gb-post',{method:'POST',headers:vercelHeaders(),
+            body:JSON.stringify({sites:restSites.map(d=>({url:'https://'+d,credentials:{},method:'auto'})),content:gbContent,options:{concurrency:5,timeout:35000}})});
+
+          if(gbResp.ok){
+            const gbData=await gbResp.json();
+            for(const r of (gbData.results||[])){
+              let rDomain=r.url; try{rDomain=new URL(r.url).hostname.replace(/^www\./,'');}catch(e){}
+              if(r.ok){
+                BLP.addLog({domain:rDomain,status:'success',url:r.resultUrl||r.url,keyword:kw});
+                blpTerm.add('  ✓ '+rDomain+': '+(r.resultUrl||'submitted')+' [Vercel]','info'); blpOk++;
+              } else {
+                // Vercel batch partial failure — queue for local retry
+                batchFallback.push(rDomain);
+                blpTerm.add('  ↻ '+rDomain+': Vercel failed ('+r.error+') — retrying locally','warn');
               }
-            } else {
-              blpTerm.add('  ⚠ Vercel batch failed ('+gbResp.status+') — falling back locally','warn');
-              localSites.push(...restSites);
             }
-          }catch(e){blpTerm.add('  ⚠ Vercel batch error: '+e.message+' — falling back locally','warn');localSites.push(...restSites);}
+          } else {
+            blpTerm.add('  ⚠ Vercel batch returned '+gbResp.status+' — falling back to local for all REST sites','warn');
+            batchFallback.push(...restSites);
+          }
+        }catch(e){
+          blpTerm.add('  ⚠ Vercel batch error: '+e.message+' — falling back locally','warn');
+          batchFallback.push(...restSites);
         }
-        for(const domain of localSites){
-          const site=BLP_SITES.find(s=>s.u===domain);if(!site){continue;}
+        // Retry Vercel-failed sites locally
+        localSites.push(...batchFallback);
+      }
+
+      // TIER 2: Local submission for non-REST or Vercel-failed sites
+      for(const domain of localSites){
+        const site=BLP_SITES.find(s=>s.u===domain); if(!site) continue;
+        blpTerm.add('  → '+domain+' ['+kw+']...','info');
+        let submitted=false;
+        for(let attempt=1;attempt<=2;attempt++){
           try{
-            blpTerm.add('  → '+domain+' ['+kw+']...','info');
+            if(attempt>1){ blpTerm.add('    ↻ retry '+attempt+'/2...','warn'); await sleep(1500); }
             const result=await blpSubmitSite(site,kw,effectiveMoneyUrl);
             BLP.addLog({domain,status:'success',url:result.url,keyword:kw,manual:result.manual});
-            if(result.url){blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [via fallback]':''),'info');blpOk++;}
-            else{blpTerm.add('  📝 '+domain+': content generated (manual paste needed)','warn');blpOk++;}
-            await sleep(800);
-          }catch(e){BLP.addLog({domain,status:'error',error:e.message,keyword:kw});blpTerm.add('  ✗ '+domain+': '+e.message,'error');blpFail++;}
+            if(result.url){ blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [fallback]':''),'info'); }
+            else { blpTerm.add('  📝 '+domain+': content ready (manual paste)','warn'); }
+            blpOk++; submitted=true; break;
+          }catch(e){
+            if(attempt===2){ BLP.addLog({domain,status:'error',error:e.message,keyword:kw}); blpTerm.add('  ✗ '+domain+': '+e.message,'error'); blpFail++; }
+          }
         }
+        if(submitted) await sleep(600);
       }
+
     } else {
-      // No Vercel — run everything locally via blpSubmitSite (works without Groq key now)
+      // No Vercel — run all sites locally with retry
       for(const domain of _blastSelectedBLPSites){
-        const site=BLP_SITES.find(s=>s.u===domain);if(!site){continue;}
-        for(const kw of blpKws){
+        const site=BLP_SITES.find(s=>s.u===domain); if(!site) continue;
+        blpTerm.add('  → '+domain+' ['+kw+']...','info');
+        let submitted=false;
+        for(let attempt=1;attempt<=2;attempt++){
           try{
-            blpTerm.add('  → '+domain+' ['+kw+']...','info');
+            if(attempt>1){ blpTerm.add('    ↻ retry '+attempt+'/2...','warn'); await sleep(2000); }
             const result=await blpSubmitSite(site,kw,moneyUrl||kw);
             BLP.addLog({domain,status:'success',url:result.url,keyword:kw,manual:result.manual});
-            if(result.url){blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [via fallback]':''),'info');blpOk++;}
-            else{blpTerm.add('  📝 '+domain+': content generated (manual paste needed)','warn');blpOk++;}
-            await sleep(1200);
-          }catch(e){BLP.addLog({domain,status:'error',error:e.message,keyword:kw});blpTerm.add('  ✗ '+domain+': '+e.message,'error');blpFail++;}
+            if(result.url){ blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [fallback]':''),'info'); }
+            else { blpTerm.add('  📝 '+domain+': content ready (manual paste)','warn'); }
+            blpOk++; submitted=true; break;
+          }catch(e){
+            if(attempt===2){ BLP.addLog({domain,status:'error',error:e.message,keyword:kw}); blpTerm.add('  ✗ '+domain+': '+e.message,'error'); blpFail++; }
+          }
         }
+        if(submitted) await sleep(900);
       }
     }
-    blpTerm.add('🔗 BLP Blast done: '+blpOk+' submitted, '+blpFail+' failed','info');
   }
+
+  const blpTotal=blpOk+blpFail;
+  blpTerm.add('','info');
+  blpTerm.add('🔗 BLP BLAST COMPLETE: '+blpOk+'/'+blpTotal+' submitted'+(blpFail?' | '+blpFail+' failed':''),'info');
+  if(blpFail>0) blpTerm.add('  💡 Tip: Configure Vercel backend in Settings for higher BLP success rates','warn');
 }
 
 // ─── CONTENT STUDIO ──────────────────────────────────────────

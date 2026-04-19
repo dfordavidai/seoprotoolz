@@ -1,5 +1,3 @@
-
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1211,6 +1209,154 @@ const acLog=(m,c='t-info')=>termLog('ac-terminal',m,c);
 const uacLog=(m,c='t-info')=>termLog('uac-terminal',m,c);
 const puAutoLog=(m,c='t-info')=>termLog('pu-auto-terminal',m,c);
 const sleep= ms => new Promise(r=>setTimeout(r,ms));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ██  CONTENT ROUTING ENGINE — correct format per platform, zero HTML to paste
+// ═══════════════════════════════════════════════════════════════════════════
+const _PLATFORM_DELIVERY = {
+  github:'html_deploy',gitlab:'html_deploy',netlify:'html_deploy',
+  vercel:'html_deploy',cloudflare:'html_deploy',replit:'html_deploy',
+  wordpress:'html_cms',substack:'html_cms',ghost:'html_cms',
+  wix:'html_cms',squarespace:'html_cms',blogger:'html_cms',tumblr:'html_cms',notion:'html_cms',
+  medium:'markdown',devto:'markdown',hashnode:'markdown',writeas:'markdown',
+  telegraph:'markdown',hackmd:'markdown',bearblog:'markdown',mataroa:'markdown',
+  pastebin:'plain',dpaste:'plain',controlc:'plain',rentry:'plain',
+  hastebin:'plain',pastelink:'plain',bitbin:'plain',ideone:'plain',
+  pastecode:'plain',justpaste:'plain',pasteio:'plain',ghostbin:'plain',
+  paste_ee:'plain',pastery:'plain',
+  archive_org:'pdf',scribd:'pdf',slideshare:'pdf',academia:'pdf',issuu:'pdf',
+};
+const _BLP_DELIVERY = {
+  'pastebin.com':'plain','dpaste.com':'plain','controlc.com':'plain',
+  'rentry.co':'plain','hastebin.com':'plain','paste.ee':'plain',
+  'pastelink.net':'plain','ghostbin.com':'plain',
+  'dev.to':'markdown','medium.com':'markdown','hashnode.com':'markdown',
+  'write.as':'markdown','telegra.ph':'markdown','hackmd.io':'markdown',
+  'issuu.com':'pdf','scribd.com':'pdf','slideshare.net':'pdf',
+  'academia.edu':'pdf','archive.org':'pdf',
+};
+const _PDF_PLATFORM_IDS = new Set(['archive_org','scribd','slideshare','academia','issuu']);
+const _PDF_BLP_DOMAINS  = new Set(['issuu.com','scribd.com','slideshare.net','academia.edu','archive.org']);
+const _HTML_DEPLOY_IDS  = new Set(['github','gitlab','netlify','vercel','cloudflare','replit']);
+
+function resolveDeliveryType(pid){
+  if(!pid) return 'markdown';
+  return _PLATFORM_DELIVERY[pid]||_BLP_DELIVERY[pid]||'markdown';
+}
+function _stripHtml(h){
+  return (h||'').replace(/<br\s*\/?>/gi,'\n').replace(/<\/p>/gi,'\n\n')
+    .replace(/<\/h[1-6]>/gi,'\n\n').replace(/<\/li>/gi,'\n').replace(/<[^>]+>/g,'')
+    .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"')
+    .replace(/\n{3,}/g,'\n\n').trim();
+}
+function _stripMarkdown(md){
+  return (md||'').replace(/^#{1,6}\s+/gm,'').replace(/\*\*(.+?)\*\*/g,'$1')
+    .replace(/\*(.+?)\*/g,'$1').replace(/`(.+?)`/g,'$1')
+    .replace(/!\[.*?\]\(.*?\)/g,'').replace(/\[(.+?)\]\(.+?\)/g,'$1')
+    .replace(/^[-*+]\s+/gm,'').replace(/^\d+\.\s+/gm,'').replace(/^>\s+/gm,'').trim();
+}
+function _mdToHtml(md){
+  return (md||'').replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>')
+    .replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>').replace(/`(.+?)`/g,'<code>$1</code>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2">$1</a>')
+    .replace(/^[-*+] (.+)$/gm,'<li>$1</li>')
+    .split('\n\n').map(p=>p.trim().startsWith('<')?p:'<p>'+p.trim()+'</p>').join('\n');
+}
+
+// Pure-JS minimal PDF generator — no external libs
+function generateTextPdf(title, body){
+  const plain=_stripMarkdown(_stripHtml(body||'')).slice(0,3500);
+  const safeT=String(title||'Document').replace(/[()\\]/g,' ').replace(/[^\x20-\x7E]/g,'');
+  const safeB=plain.replace(/[()\\]/g,' ').replace(/[^\x20-\x7E]/g,'').replace(/\r/g,'');
+  const lines=[]; const W=78;
+  safeB.split('\n').forEach(para=>{
+    const words=para.split(' '); let line='';
+    words.forEach(w=>{
+      if((line+(line?' ':'')+w).length>W){if(line)lines.push(line);line=w;}
+      else line=(line?line+' ':'')+w;
+    });
+    if(line)lines.push(line); lines.push('');
+  });
+  const pH=842,pW=595,mg=60,fs=11,ts=16,ld=14;
+  let y=pH-mg;
+  let st='BT\n/F1 '+ts+' Tf\n'+mg+' '+y+' Td\n('+safeT+') Tj\nT*\n/F1 '+fs+' Tf\n';
+  y-=ts+8;
+  lines.forEach(l=>{
+    if(y<mg+ld){st+='ET\nBT\n/F1 '+fs+' Tf\n'+mg+' '+(pH-mg)+' Td\n';y=pH-mg;}
+    st+='('+l+') Tj\nT* '; y-=ld;
+  });
+  st+='ET';
+  const obs=[
+    '<</Type /Catalog /Pages 2 0 R>>',
+    '<</Type /Pages /Kids [3 0 R] /Count 1>>',
+    '<</Type /Page /Parent 2 0 R /MediaBox [0 0 '+pW+' '+pH+'] /Contents 4 0 R /Resources <</Font <</F1 5 0 R>>>>>>',
+    '<</Length '+st.length+'>>\nstream\n'+st+'\nendstream',
+    '<</Type /Font /Subtype /Type1 /BaseFont /Helvetica>>',
+  ];
+  let pdf='%PDF-1.4\n'; const offs=[];
+  obs.forEach((o,i)=>{offs.push(pdf.length);pdf+=(i+1)+' 0 obj\n'+o+'\nendobj\n';});
+  const xp=pdf.length;
+  pdf+='xref\n0 '+(obs.length+1)+'\n0000000000 65535 f \n';
+  offs.forEach(o=>{pdf+=String(o).padStart(10,'0')+' 00000 n \n';});
+  pdf+='trailer\n<</Size '+(obs.length+1)+' /Root 1 0 R>>\nstartxref\n'+xp+'\n%%EOF';
+  const b=new Uint8Array(pdf.length);
+  for(let i=0;i<pdf.length;i++)b[i]=pdf.charCodeAt(i)&0xff;
+  return new Blob([b],{type:'application/pdf'});
+}
+
+// Returns {body, contentType, isPdf, pdfBlob, title} for the platform
+function resolveContentForPlatform(platformIdOrDomain, rawContent, kw){
+  const dtype=resolveDeliveryType(platformIdOrDomain);
+  const title=rawContent.title||(kw+' — Complete Guide '+new Date().getFullYear());
+  const md=rawContent.body||'';
+  if(dtype==='html_deploy'||dtype==='html_cms'){
+    return{body:_mdToHtml(md),contentType:'text/html',isPdf:false,title};
+  }
+  if(dtype==='plain'){
+    return{body:_stripMarkdown(_stripHtml(md)),contentType:'text/plain',isPdf:false,title};
+  }
+  if(dtype==='pdf'){
+    const pdfBlob=generateTextPdf(title,md);
+    return{body:md,contentType:'application/pdf',isPdf:true,pdfBlob,title};
+  }
+  return{body:md,contentType:'text/markdown',isPdf:false,title};
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ██  UNIQUE PERMALINK ENGINE — no more subdomain collisions on Netlify/Vercel
+// ═══════════════════════════════════════════════════════════════════════════
+function _uid6(){return Math.random().toString(36).slice(2,8);}
+function _tsShort(){return Date.now().toString(36).slice(-5);}
+function netlifyUniqueName(prefix,kw){
+  const base=((prefix||'seo')+'-'+slug(kw)).replace(/[^a-z0-9-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').slice(0,44);
+  return (base+'-'+_tsShort()+_uid6().slice(0,4)).slice(0,63).replace(/-$/,'');
+}
+function vercelUniqueName(prefix,kw){
+  const base=((prefix||'seo')+'-'+slug(kw)).slice(0,36);
+  return (base+'-'+_tsShort()).slice(0,52).replace(/-$/,'');
+}
+function githubUniqueName(prefix,kw){
+  return ((prefix||'seo')+'-'+slug(kw)+'-'+_tsShort()).slice(0,100).replace(/-$/,'');
+}
+function cfUniqueName(prefix,kw){
+  const base=((prefix||'seo')+'-'+slug(kw)).slice(0,16);
+  return (base+'-'+_uid6().slice(0,4)).slice(0,28).replace(/-$/,'');
+}
+// Trigger PDF download UI + return a pending promise for campaign use
+function _showPdfUploadPanel(title, pdfBlob, platformName, pageUrl){
+  const burl=URL.createObjectURL(pdfBlob);
+  const panel=document.createElement('div');
+  panel.style='position:fixed;bottom:24px;right:24px;z-index:9999;background:var(--bg2);border:1px solid var(--accent);border-radius:12px;padding:20px 24px;max-width:340px;box-shadow:0 8px 32px rgba(0,0,0,0.4)';
+  panel.innerHTML='<div style="font-weight:700;margin-bottom:8px">📄 PDF Ready — '+platformName+'</div>'
+    +'<div style="font-size:12px;color:var(--muted2);margin-bottom:12px">Auto-generated PDF for "'+title+'".<br>Download it, then upload to '+platformName+'.</div>'
+    +'<a href="'+burl+'" download="'+slug(title)+'.pdf" style="display:block;padding:8px 16px;background:var(--accent);color:#fff;border-radius:6px;text-align:center;font-weight:700;text-decoration:none;margin-bottom:8px">⬇ Download PDF</a>'
+    +(pageUrl?'<a href="'+pageUrl+'" target="_blank" style="display:block;padding:8px 16px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;text-align:center;font-size:12px;text-decoration:none">Open Upload Page →</a>':'')
+    +'<button onclick="this.closest(\'div\').remove()" style="position:absolute;top:10px;right:12px;background:none;border:none;color:var(--muted2);font-size:18px;cursor:pointer">✕</button>';
+  document.body.appendChild(panel);
+  setTimeout(()=>panel.remove&&panel.remove(),90000);
+}
+
 const esc  = s  => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const year = () => new Date().getFullYear();
 
@@ -5405,9 +5551,19 @@ async function pasteProxyFetch(url, opts, term){
   return r;
 }
 
-async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
+async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPrefix){
   const p=getPlatform(pid);
-  const sl=slug((extraVal||'seo')+'-'+kw);
+  const prefix=blastPrefix||extraVal||'seo';
+  const sl=slug(prefix+'-'+kw);
+  // PDF-only platforms: auto-generate PDF + show download panel
+  if(_PDF_PLATFORM_IDS.has(pid) && pid!=='issuu'){
+    const ec=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,p.domain);
+    const pdfBlob=generateTextPdf(ec.title,ec.body);
+    const uploadPage=({archive_org:'https://archive.org/upload/',scribd:'https://www.scribd.com/upload-document',slideshare:'https://www.slideshare.net/upload',academia:'https://www.academia.edu/upload'})[pid]||'https://'+p.domain+'/upload';
+    _showPdfUploadPanel(ec.title,pdfBlob,p.name,uploadPage);
+    if(term&&term.add) term.add('  📄 '+p.name+': PDF generated — download panel shown. Upload at: '+uploadPage,'warn');
+    return uploadPage;
+  }
   // Resolve all content fields once for this keyword
   const _ec=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,p.domain);
   const _tags=_ec.tags.split(',').map(t=>t.trim().toLowerCase()).filter(Boolean);
@@ -5419,7 +5575,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='github'){
     // GitHub Pages: create repo → push README.md + index.html + sitemap.xml → enable Pages
     const api=new GitHubAPI(account.token);
-    const repoName=slug((extraVal||'seo')+'-'+kw).slice(0,100)||'seo-page';
+    const repoName=githubUniqueName(prefix||extraVal||'seo',kw);
     const pageUrl='https://'+account.login+'.github.io/'+repoName+'/';
     try{ await api.createRepo(repoName,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title); await sleep(1500); }
     catch(e){
@@ -5449,7 +5605,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   if(pid==='gitlab'){
     // GitLab Pages: create project → push index.html + README + .gitlab-ci.yml → CI deploys Pages
     const api=new GitLabAPI(account.token);
-    const projSlug=slug((extraVal||'seo')+'-'+kw).slice(0,100)||'seo-page';
+    const projSlug=githubUniqueName(prefix||extraVal||'seo',kw);
     const pageUrl='https://'+account.login+'.gitlab.io/'+projSlug+'/';
     let proj;
     try{ proj=await api.createProject(projSlug,getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title); await sleep(1500); }
@@ -5476,28 +5632,44 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='netlify'){
-    // Netlify: create site → deploy with index.html file via SHA1 manifest
+    // Netlify: unique name each run → no subdomain conflicts
     const api=new NetlifyAPI(account.token);
     const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'netlify');
-    const siteName=sl.slice(0,63).replace(/[^a-z0-9-]/g,'-').replace(/^-|-$/g,'')||'seo-site';
-    term.add('  Creating Netlify site...','info');
-    const site=await api.createSite(siteName);
+    let siteName=netlifyUniqueName(prefix||extraVal||'seo',kw);
+    term.add('  Creating Netlify site: '+siteName+'...','info');
+    let site;
+    for(let attempt=1;attempt<=3;attempt++){
+      try{ site=await api.createSite(siteName); break; }
+      catch(e){
+        if((e.message||'').includes('422')||(e.message||'').toLowerCase().includes('already')){
+          siteName=netlifyUniqueName((prefix||'seo')+attempt,kw);
+          term.add('  Name taken, retrying as: '+siteName,'warn');
+        } else throw e;
+      }
+    }
+    if(!site) throw new Error('Netlify: could not create site after 3 attempts');
     await sleep(1000);
     term.add('  Uploading index.html...','info');
     await api.deploySite(site.id,html);
     const siteUrl='https://'+(site.subdomain||site.name||siteName)+'.netlify.app/';
+    term.add('  ✓ Netlify live: '+siteUrl,'info');
     return siteUrl;
   }
 
   if(pid==='vercel'){
-    // Vercel: create deployment with index.html encoded as base64
+    // Vercel: unique project name each run → alias URL used (stable), not dep.url (ephemeral)
     const api=new VercelAPI(account.token);
     const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'vercel');
-    const projName=sl.slice(0,52)||'seo-page';
-    term.add('  Deploying to Vercel...','info');
+    const projName=vercelUniqueName(prefix||extraVal||'seo',kw);
+    term.add('  Deploying to Vercel: '+projName+'...','info');
     const dep=await api.createDeployment(projName,html);
-    const depUrl=(dep.url)||sl+'.vercel.app';
-    return 'https://'+(depUrl.startsWith('https://')?depUrl.replace('https://',''):depUrl)+'/';
+    // dep.alias[] contains the stable <project>.vercel.app URL; dep.url is deployment-specific
+    let stableUrl='';
+    if(dep.alias&&dep.alias.length) stableUrl='https://'+dep.alias[0]+'/';
+    else if(dep.url) stableUrl='https://'+(dep.url.replace(/^https?:\/\//,''))+'/';
+    else stableUrl='https://'+projName+'.vercel.app/';
+    term.add('  ✓ Vercel live: '+stableUrl,'info');
+    return stableUrl;
   }
 
   if(pid==='cloudflare'){
@@ -5506,7 +5678,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
     if(!acctId) throw new Error('Cloudflare Account ID is required — enter it in the Campaign Settings above.');
     const api=new CloudflareAPI(account.token,acctId);
     const html=generateHtmlPage(kw,account.login,sl,getActiveBacklinks(),'cloudflare');
-    const projName=sl.slice(0,28).replace(/[^a-z0-9-]/g,'-').replace(/^-|-$/g,'')||'seo-page';
+    const projName=cfUniqueName(prefix||extraVal||'seo',kw);
     term.add('  Creating Cloudflare Pages project...','info');
     let proj;
     try{ proj=await api.createProject(projName); }
@@ -5689,16 +5861,21 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
 
   if(pid==='issuu'){
     const api=new IssuuAPI(account.token);
-    const desc=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'issuu.com').body.slice(0,500);
+    const ec=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'issuu.com');
+    term.add('  Generating PDF for Issuu...','info');
+    const pdfBlob=generateTextPdf(ec.title,ec.body);
+    _showPdfUploadPanel(ec.title,pdfBlob,'Issuu','https://issuu.com/home/publish');
     term.add('  Creating Issuu draft...','info');
-    const draft=await api.createDraft(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,desc);
-    return draft.publicUrl||draft.link||'https://issuu.com/'+account.login;
+    const draft=await api.createDraft(ec.title,ec.body.slice(0,500));
+    const draftUrl=draft.publicUrl||draft.link||'https://issuu.com/'+account.login;
+    term.add('  ✓ Draft created. PDF downloaded — upload it at issuu.com/home/publish','warn');
+    return draftUrl;
   }
 
   // ── PASTE / NO-LOGIN PLATFORMS ─────────────────────────────────
 
   if(pid==='bitbin'){
-    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','bitbin.it').body;
+    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','bitbin.it').body));
     // Bitbin API: POST form data, returns JSON {data:{hash:"..."}}
     const r=await pasteProxyFetch('https://bitbin.it/api/',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
@@ -5714,7 +5891,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='pastelink'){
-    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastelink.net').body;
+    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastelink.net').body));
     const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     // Pastelink.net — POST form to root, redirects to /SLUG page
     const r=await pasteProxyFetch('https://pastelink.net/',{method:'POST',
@@ -5736,7 +5913,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='ideone'){
-    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','ideone.com').body;
+    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','ideone.com').body));
     const apiUser=account.token||account.extra||'';
     const apiPass=account.extra2||account.extra||'';
     // Ideone SOAP/REST API — requires registered account credentials
@@ -5753,7 +5930,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='controlc'){
-    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','controlc.com').body;
+    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','controlc.com').body));
     const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const r=await pasteProxyFetch('https://controlc.com/index.php',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
@@ -5773,7 +5950,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term){
   }
 
   if(pid==='rentry'){
-    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.co').body;
+    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.co').body));
     const editCode=extraVal||Math.random().toString(36).slice(2,10);
     term.add('  Fetching CSRF from rentry.co...','info');
     bcClearLastCookies();
@@ -6250,7 +6427,7 @@ function _validateCampaignUrl(pid, url) {
 //   1. Up to 3 attempts with exponential backoff
 //   2. URL validation — rejects placeholder/fallback URLs
 //   3. Per-attempt fresh content variation to avoid duplicate detection
-async function runSingleCampaignWithRetry(pid, kw, account, extraVal, idx, term, maxAttempts=3) {
+async function runSingleCampaignWithRetry(pid, kw, account, extraVal, idx, term, maxAttempts=3, blastPrefix) {
   let lastErr = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -6259,7 +6436,7 @@ async function runSingleCampaignWithRetry(pid, kw, account, extraVal, idx, term,
         term.add(`    ↻ Retry ${attempt}/${maxAttempts} after ${backoff/1000}s...`, 'warn');
         await new Promise(r => setTimeout(r, backoff));
       }
-      const url = await runSingleCampaign(pid, kw, account, extraVal, idx + (attempt - 1), term);
+      const url = await runSingleCampaign(pid, kw, account, extraVal, idx + (attempt - 1), term, blastPrefix);
       // Validate the returned URL is a real published page
       if (_validateCampaignUrl(pid, url)) return url;
       // URL is invalid/placeholder — treat as soft failure and retry
@@ -6587,10 +6764,30 @@ async function runGlobalBlast(){
       try{
         const blastExtra=account.extra||prefix;
 
+        // ── PDF platforms: generate PDF + show download panel, skip API submission ──
+        if(_PDF_PLATFORM_IDS.has(pid)){
+          const ec=getEffectiveContent(kw,getActiveBacklinks(),ki,S.keywords,account.login,p.domain);
+          const pdfBlob=generateTextPdf(ec.title,ec.body);
+          const uploadPage=({archive_org:'https://archive.org/upload/',scribd:'https://www.scribd.com/upload-document',slideshare:'https://www.slideshare.net/upload',academia:'https://www.academia.edu/upload',issuu:'https://issuu.com/home/publish'})[pid]||'';
+          _showPdfUploadPanel(ec.title,pdfBlob,p.name,uploadPage);
+          term.add('  📄 '+p.name+': PDF generated — download panel shown. Upload to '+uploadPage,'warn');
+          url=uploadPage||'#pdf-upload';
+          success=true;
+          liveUrls.push({url,keyword:kw,platform:pid,note:'PDF — manual upload required'});
+          done++;
+          const pdfPct=Math.round(done/total*100);
+          setProgress(progBar,pdfPct);
+          progLabel.textContent=done+'/'+total+' posts completed';
+          progPct.textContent=pdfPct+'%';
+          continue;
+        }
+
         // TIER 1: Vercel gb-post direct REST — most reliable, server-side, no CORS
         if(vercelEnabled() && GB_REST_DOMAINS[pid]){
           term.add('    ↳ [Vercel REST]','info');
           const ec=getEffectiveContent(kw,getActiveBacklinks(),ki,S.keywords,account.login,p.domain);
+          // Route content correctly: plain text for paste, HTML for deploy, markdown for article
+          const rc=resolveContentForPlatform(pid,ec,kw);
           let gbOk=false;
           for(let attempt=1;attempt<=3;attempt++){
             try{
@@ -6601,7 +6798,7 @@ async function runGlobalBlast(){
                   sites:[{url:'https://'+GB_REST_DOMAINS[pid],
                     credentials:{token:account.token,username:account.login,password:account.password||account.extra,api_key:account.token,publicationId:account.extra},
                     method:'rest_api'}],
-                  content:{title:ec.title,body:ec.body,tags:ec.tags||''},
+                  content:{title:rc.title,body:rc.body,tags:ec.tags||''},
                   options:{concurrency:1,timeout:35000}
                 })
               });
@@ -6618,8 +6815,8 @@ async function runGlobalBlast(){
             }
           }
         } else {
-          // TIER 2: runSingleCampaign with retry + validation (uses vercel proxy for all API calls via smartFetch upgrade)
-          url=await runSingleCampaignWithRetry(pid,kw,account,blastExtra,ki,{add:(m,t)=>term.add('    '+m,t)},3);
+          // TIER 2: runSingleCampaign with retry + validation
+          url=await runSingleCampaignWithRetry(pid,kw,account,blastExtra,ki,{add:(m,t)=>term.add('    '+m,t)},3,prefix);
         }
 
         // Final URL validation
@@ -6703,16 +6900,30 @@ async function runGlobalBlast(){
   for(const kw of blpKws){
     const effectiveMoneyUrl=moneyUrl||kw;
 
+    // ── Separate PDF domains — generate PDFs, show download panels, skip API ──
+    const pdfDomains=_blastSelectedBLPSites.filter(d=>_PDF_BLP_DOMAINS.has(d));
+    const nonPdfSites=_blastSelectedBLPSites.filter(d=>!_PDF_BLP_DOMAINS.has(d));
+
+    for(const domain of pdfDomains){
+      const site=BLP_SITES.find(s=>s.u===domain)||{u:domain,t:'paste',da:90};
+      const ecRaw=blpGenerateLocalContent(site,kw,effectiveMoneyUrl);
+      const ecTitle=kw+' — Complete Guide '+new Date().getFullYear();
+      const pdfBlob=generateTextPdf(ecTitle,ecRaw);
+      const uploadPage=({'issuu.com':'https://issuu.com/home/publish','scribd.com':'https://www.scribd.com/upload-document','slideshare.net':'https://www.slideshare.net/upload','academia.edu':'https://www.academia.edu/upload','archive.org':'https://archive.org/upload/'})[domain]||'https://'+domain;
+      _showPdfUploadPanel(ecTitle,pdfBlob,domain,uploadPage);
+      BLP.addLog({domain,status:'success',url:uploadPage,keyword:kw,note:'PDF generated — manual upload'});
+      blpTerm.add('  📄 '+domain+': PDF generated — download panel shown','warn'); blpOk++;
+    }
+
     // TIER 1: Batch REST-capable sites via Vercel gb-post (parallel, fast)
     if(vercelEnabled()){
-      const restSites=_blastSelectedBLPSites.filter(d=>BLP_REST_CAPABLE.includes(d));
-      const localSites=_blastSelectedBLPSites.filter(d=>!BLP_REST_CAPABLE.includes(d));
+      const restSites=nonPdfSites.filter(d=>BLP_REST_CAPABLE.includes(d));
+      const localSites=nonPdfSites.filter(d=>!BLP_REST_CAPABLE.includes(d));
 
       if(restSites.length){
         blpTerm.add('  ↳ Batching '+restSites.length+' REST sites via Vercel ['+kw+']...','info');
         let batchFallback=[];
         try{
-          // Use Groq for content if available, else local template
           let batchBody;
           if(hasGroq){
             try{
@@ -6722,10 +6933,15 @@ async function runGlobalBlast(){
             }catch(e){ batchBody=null; }
           }
           if(!batchBody) batchBody=blpGenerateLocalContent({t:'paste',u:''},kw,effectiveMoneyUrl);
-
+          // Route each site's content correctly (plain for paste, markdown for article)
+          const sitePayloads=restSites.map(d=>{
+            const dtype=resolveDeliveryType(d);
+            const body=dtype==='plain'?_stripMarkdown(_stripHtml(batchBody)):batchBody;
+            return{url:'https://'+d,credentials:{},method:'auto',content:{title:kw+' — Resource Guide',body,tags:kw}};
+          });
           const gbContent={title:kw+' — Resource Guide',body:batchBody,tags:kw};
           const gbResp=await fetch(vercelUrl()+'/api/gb-post',{method:'POST',headers:vercelHeaders(),
-            body:JSON.stringify({sites:restSites.map(d=>({url:'https://'+d,credentials:{},method:'auto'})),content:gbContent,options:{concurrency:5,timeout:35000}})});
+            body:JSON.stringify({sites:sitePayloads,content:gbContent,options:{concurrency:5,timeout:35000}})});
 
           if(gbResp.ok){
             const gbData=await gbResp.json();
@@ -6735,7 +6951,6 @@ async function runGlobalBlast(){
                 BLP.addLog({domain:rDomain,status:'success',url:r.resultUrl||r.url,keyword:kw});
                 blpTerm.add('  ✓ '+rDomain+': '+(r.resultUrl||'submitted')+' [Vercel]','info'); blpOk++;
               } else {
-                // Vercel batch partial failure — queue for local retry
                 batchFallback.push(rDomain);
                 blpTerm.add('  ↻ '+rDomain+': Vercel failed ('+r.error+') — retrying locally','warn');
               }
@@ -6748,7 +6963,6 @@ async function runGlobalBlast(){
           blpTerm.add('  ⚠ Vercel batch error: '+e.message+' — falling back locally','warn');
           batchFallback.push(...restSites);
         }
-        // Retry Vercel-failed sites locally
         localSites.push(...batchFallback);
       }
 
@@ -6773,8 +6987,8 @@ async function runGlobalBlast(){
       }
 
     } else {
-      // No Vercel — run all sites locally with retry
-      for(const domain of _blastSelectedBLPSites){
+      // No Vercel — run all non-PDF sites locally with retry
+      for(const domain of nonPdfSites){
         const site=BLP_SITES.find(s=>s.u===domain); if(!site) continue;
         blpTerm.add('  → '+domain+' ['+kw+']...','info');
         let submitted=false;
@@ -23877,6 +24091,16 @@ function blpGenerateLocalContent(site, keyword, moneyUrl) {
 
 // ── MAIN SUBMISSION FUNCTION ──────────────────────────────────────────────
 async function blpSubmitSite(site, keyword, moneyUrl){
+  // ── PDF domains: generate PDF file + show download panel, do not submit via API ──
+  if(_PDF_BLP_DOMAINS.has(site.u)){
+    const ecTitle=keyword+' — Complete Guide '+new Date().getFullYear();
+    const ecBody=blpGenerateLocalContent(site,keyword,moneyUrl);
+    const pdfBlob=generateTextPdf(ecTitle,ecBody);
+    const uploadPage=({'issuu.com':'https://issuu.com/home/publish','scribd.com':'https://www.scribd.com/upload-document','slideshare.net':'https://www.slideshare.net/upload','academia.edu':'https://www.academia.edu/upload','archive.org':'https://archive.org/upload/'})[site.u]||'https://'+site.u+'/upload';
+    _showPdfUploadPanel(ecTitle,pdfBlob,site.u,uploadPage);
+    return{url:uploadPage,manual:true,note:'PDF generated — manual upload required'};
+  }
+
   const groqKey = settingGet('groq_api_key');
 
   // 1. Smart content generation based on site type
@@ -23909,9 +24133,10 @@ async function blpSubmitSite(site, keyword, moneyUrl){
   if(contentFmt === 'markdown' && !finalContent.includes(moneyUrl)) {
     finalContent += `\n\n## Further Reading\n\nFor more on this topic, see the [${keyword} guide](${moneyUrl}).`;
   }
-  // Ensure plain text always has money URL  
-  if(contentFmt === 'text' && !finalContent.includes(moneyUrl)) {
-    finalContent += `\n\nLearn more: ${moneyUrl}`;
+  // Ensure plain text always has money URL and NO HTML markup
+  if(contentFmt === 'text'){
+    finalContent = _stripMarkdown(_stripHtml(finalContent));
+    if(!finalContent.includes(moneyUrl)) finalContent += '\n\nLearn more: '+moneyUrl;
   }
 
   // ── GUARANTEED FALLBACK SUBMITTERS (for zero-auth sites with no specific submitter) ──

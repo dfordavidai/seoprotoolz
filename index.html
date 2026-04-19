@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1151,7 +1152,7 @@ const PLATFORMS = [
   // ── NEW PLATFORMS ──
   {id:'onfeetnation', name:'OnFeetNation',    icon:'👟', da:52,  api:'Form POST',          domain:'onfeetnation.com',  desc:'Post photo album to OnFeetNation social network'},
   {id:'caribbeanfever',name:'CaribbeanFever', icon:'🌴', da:48,  api:'Form POST',          domain:'caribbeanfever.com',desc:'Post photo album to CaribbeanFever community'},
-  {id:'bitbin',       name:'Bitbin',          icon:'📋', da:42,  api:'Paste API',          domain:'bitbin.it',         desc:'Create a paste/snippet on Bitbin.it'},
+  {id:'bitbin',       name:'Paste.fo',        icon:'📋', da:45,  api:'Paste API',          domain:'paste.fo',          desc:'Create an anonymous paste on Paste.fo — no login needed'},
   {id:'pastelink',    name:'Pastelink',       icon:'🔗', da:40,  api:'Paste API',          domain:'pastelink.net',     desc:'Create a public paste on Pastelink.net'},
   {id:'click4r',      name:'Click4R',         icon:'📝', da:38,  api:'Form POST',          domain:'click4r.com',       desc:'Create a post on Click4R blogging platform'},
   {id:'ideone',       name:'Ideone',          icon:'💡', da:72,  api:'Paste API',          domain:'ideone.com',        desc:'Create a public code/text paste on Ideone.com'},
@@ -2852,7 +2853,7 @@ async function cmRunCampaign(id){
   if(cfg.runMode === 'global_blast'){
     // Load campaign keywords and platforms into the blast engine then navigate
     _blastSelectedPlatforms = cfg.platforms || [];
-    _blastSelectedBLPSites = cfg.blpSites || [];
+    _blastSelectedBLPPlatforms = cfg.blpSites || [];
     // Temporarily override global keywords for this run
     const _prevKw = [...S.keywords];
     if(cfg.keywords && cfg.keywords.length) S.keywords = cfg.keywords;
@@ -5870,54 +5871,80 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
   // ── PASTE / NO-LOGIN PLATFORMS ─────────────────────────────────
 
   if(pid==='bitbin'){
-    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','bitbin.it').body));
-    // Bitbin API v2: POST JSON, returns {data:{hash:"..."}}
-    const r=await pasteProxyFetch('https://bitbin.it/api/v2/paste',{method:'POST',
+    // Paste.fo — anonymous paste, public REST API, returns plain URL
+    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','paste.fo').body));
+    const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
+    term.add('  Submitting paste to Paste.fo...','info');
+    const r=await pasteProxyFetch('https://paste.fo/api/paste',{method:'POST',
       contentType:'application/json',asJson:true,
-      body:JSON.stringify({content,language:'text',expiration:'-1'})});
-    if(!r.ok&&!r.text) throw new Error('Bitbin: '+(r.error||'request failed'));
+      body:JSON.stringify({content,title,syntax:'text',expiry:'never'})});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    // Response: {data:{hash}} or {hash} or {id} or {slug}
-    const path=(d.data&&(d.data.hash||d.data.id||d.data.slug))||d.hash||d.id||d.slug;
-    if(path) return 'https://bitbin.it/'+path+'/';
-    // Fallback: check if finalUrl is the paste URL (redirect after submit)
-    if(r.finalUrl && r.finalUrl.includes('bitbin.it/') && !r.finalUrl.endsWith('/api/')) return r.finalUrl;
-    throw new Error('Bitbin: no paste ID in response — '+( (r.text||'').slice(0,120) ));
+    // paste.fo returns {result:'success', id:'...'} or {key:'...'} or a redirect to the paste URL
+    const id=d.id||d.key||d.paste_id||d.slug;
+    if(id) return 'https://paste.fo/'+id;
+    if(r.finalUrl && r.finalUrl.includes('paste.fo/') && !r.finalUrl.endsWith('/api/paste')) return r.finalUrl;
+    // Fallback: try plain text body as URL
+    const txt=(r.text||'').trim();
+    if(txt.startsWith('https://paste.fo/')) return txt;
+    // Second fallback: paste.gg public API (no auth needed for anonymous pastes)
+    const r2=await pasteProxyFetch('https://api.paste.gg/v1/pastes',{method:'POST',
+      contentType:'application/json',asJson:true,
+      body:JSON.stringify({name:title,description:kw,visibility:'public',
+        files:[{name:slug(kw)+'.txt',content:{format:'text',value:content}}]})});
+    let d2={}; try{d2=JSON.parse(r2.text);}catch(e){}
+    if(d2.result==='ok'&&d2.result_type==='paste'&&d2.result&&d2.result.id)
+      return 'https://paste.gg/p/anonymous/'+d2.result.id;
+    throw new Error('Paste.fo: no paste ID in response — '+( (r.text||'').slice(0,120) ));
   }
 
   if(pid==='pastelink'){
     const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastelink.net').body));
     const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
-    // Pastelink.net — JSON API (primary, avoids Cloudflare on form endpoint)
-    const r=await pasteProxyFetch('https://pastelink.net/api/paste',{method:'POST',
-      contentType:'application/json',asJson:true,
-      body:JSON.stringify({content,unique_key:'',password:''})});
-    let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(d.unique_key) return 'https://pastelink.net/'+d.unique_key;
-    // Fallback: form POST
+    const apiKey=extraVal||account.token||account.extra||'';
+    term.add('  Submitting paste to Pastelink.net...','info');
+    // Primary: authenticated API (requires API key from pastelink.net/account/api)
+    if(apiKey){
+      const r=await pasteProxyFetch('https://pastelink.net/api/paste',{method:'POST',
+        contentType:'application/json',asJson:true,
+        extraHeaders:{'Authorization':'Bearer '+apiKey},
+        body:JSON.stringify({content,title,unique_key:'',password:''})});
+      let d={}; try{d=JSON.parse(r.text);}catch(e){}
+      if(d.unique_key) return 'https://pastelink.net/'+d.unique_key;
+      if(d.handle) return 'https://pastelink.net/'+d.handle;
+    }
+    // Fallback: anonymous form POST — extract paste URL from redirect or response
     const r2=await pasteProxyFetch('https://pastelink.net/',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://pastelink.net/'},
       body:new URLSearchParams({paste_title:title,paste_data:content,paste_expire:'0'}).toString()});
-    if(r2.finalUrl && r2.finalUrl.match(/pastelink\.net\/[a-zA-Z0-9_-]+$/)) return r2.finalUrl;
+    // Only accept URLs that look like a paste slug (alphanumeric, 4+ chars, not a path like /assets /static etc)
+    const pasteUrlM=(r2.finalUrl||'').match(/pastelink\.net\/([a-zA-Z0-9]{4,})$/)
+                 ||(r2.finalUrl||'').match(/pastelink\.net\/([a-zA-Z0-9-]{4,})$/);
+    if(pasteUrlM && !['assets','static','css','js','api','account','upload'].includes(pasteUrlM[1]))
+      return 'https://pastelink.net/'+pasteUrlM[1];
     let d2={}; try{d2=JSON.parse(r2.text);}catch(e){}
-    const pasteId=d2.paste_key||d2.id||d2.link||d2.slug||d2.handle;
+    const pasteId=d2.unique_key||d2.paste_key||d2.id||d2.link||d2.slug||d2.handle;
     if(pasteId) return 'https://pastelink.net/'+pasteId;
-    const m=(r2.text||'').match(/pastelink\.net\/([a-zA-Z0-9_-]{3,})/);
-    if(m && !m[1].startsWith('api')) return 'https://pastelink.net/'+m[1];
-    if(r2.finalUrl && r2.finalUrl.includes('pastelink.net/')) return r2.finalUrl;
-    throw new Error('Pastelink: '+(r2.error||( (r2.text||'').slice(0,100) )));
+    // Extract paste slug from HTML — must be a 4+ char alphanumeric slug, NOT a path keyword
+    const slugBlacklist=new Set(['assets','static','css','js','api','account','upload','login','register','terms','privacy','home','new','about','contact']);
+    const htmlM=(r2.text||'').match(/pastelink\.net\/([a-zA-Z0-9]{4,})[\"'<\s]/g)||[];
+    for(const hm of htmlM){
+      const slug2=(hm.match(/pastelink\.net\/([a-zA-Z0-9]{4,})/)||[])[1]||'';
+      if(slug2&&!slugBlacklist.has(slug2)) return 'https://pastelink.net/'+slug2;
+    }
+    throw new Error('Pastelink: '+(!apiKey?'Add your API key from pastelink.net/account/api for reliable posting. ':'')+( (r2.text||'').slice(0,80) ));
   }
 
   if(pid==='ideone'){
     const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','ideone.com').body));
     const apiUser=account.token||account.extra||'';
-    const apiPass=account.extra2||account.extra||'';
-    // Ideone SOAP/REST API — requires registered account credentials
-    // Use the JSON API endpoint with credentials
+    const apiPass=account.extra2||account.extra||'guest';
+    term.add('  Submitting paste to Ideone.com...','info');
+    // Ideone public API v1 (form-based, language 43 = plain text)
     const r=await pasteProxyFetch('https://ideone.com/api/1/service/ideone/createSubmission',{method:'POST',
-      contentType:'application/json',asJson:true,
-      body:JSON.stringify({user:apiUser||'guest',pass:apiPass||'guest',sourceCode:content,language:43,input:'',run:false,private:false,stdRecv:false})});
-    if(!r.ok&&!r.text) throw new Error('Ideone: '+(r.error||'request failed'));
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://ideone.com/'},
+      body:new URLSearchParams({user:apiUser||'guest',pass:apiPass,sourceCode:content,language:'43',input:'',run:'false',private:'false',stdRecv:'false'}).toString()});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
     const link=(d.result&&d.result.link)||d.link||d.id;
     if(link) return 'https://ideone.com/'+link;
@@ -5928,20 +5955,17 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
   if(pid==='controlc'){
     const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','controlc.com').body));
     const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
+    term.add('  Submitting paste to ControlC.com...','info');
     const r=await pasteProxyFetch('https://controlc.com/index.php?act=submit',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://controlc.com/','Origin':'https://controlc.com'},
       body:new URLSearchParams({'subdomain-name':'',paste_data:content,paste_title:title,expire:'0',private:'0'}).toString()});
-    // Check finalUrl first (redirect followed by proxy gives the paste URL directly)
-    if(r.finalUrl && r.finalUrl.match(/controlc\.com\/[a-f0-9]+/i)){
-      return r.finalUrl.replace(/\/+$/,'')+'/';
-    }
-    // Check body/text for paste URL pattern
-    const urlText = (r.text||'')+(r.finalUrl||'');
-    const m=urlText.match(/controlc\.com\/([a-f0-9]{4,})/i);
-    if(m) return 'https://controlc.com/'+m[1];
-    // Check if we got html of the paste page (redirect followed)
-    const m2=(r.text||'').match(/href=["']https?:\/\/controlc\.com\/([a-f0-9]{4,})/i);
-    if(m2) return 'https://controlc.com/'+m2[1];
+    // ControlC redirects to https://controlc.com/<hex_id> after success
+    const combined=(r.finalUrl||'')+(r.text||'');
+    const hexM=combined.match(/controlc\.com\/([a-f0-9]{4,})/i);
+    if(hexM) return 'https://controlc.com/'+hexM[1];
+    const hrefM=(r.text||'').match(/href=["']https?:\/\/controlc\.com\/([a-f0-9]{4,})/i);
+    if(hrefM) return 'https://controlc.com/'+hrefM[1];
     throw new Error('ControlC: could not extract paste URL — '+(r.error||( (r.text||'').slice(0,80) )));
   }
 
@@ -5969,23 +5993,35 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
   // ── NEW PASTE PLATFORMS ────────────────────────────────────────
 
   if(pid==='rentryorg'){
-    const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.org').body;
+    const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','rentry.org').body));
     const editCode=extraVal||Math.random().toString(36).slice(2,10);
     term.add('  Fetching CSRF from rentry.org...','info');
     bcClearLastCookies();
     const csrf_r2=await pasteProxyFetch('https://rentry.org/', {extraCookies:''}, term);
     const csrf_text2=csrf_r2.text||'';
-    const csrf_m2=csrf_text2.match(/csrfmiddlewaretoken[^>]*value="([^"]+)"/)||csrf_text2.match(/name="csrfmiddlewaretoken"[^>]*value="([^"]+)"/)||csrf_text2.match(/value="([^"]{20,})"/);
+    const csrf_m2=csrf_text2.match(/name="csrfmiddlewaretoken"\s+value="([^"]+)"/)
+                ||csrf_text2.match(/csrfmiddlewaretoken[^>]*value="([^"]+)"/)
+                ||csrf_text2.match(/value="([a-zA-Z0-9]{32,})"/);
     const csrf2=csrf_m2&&csrf_m2[1]||'';
-    const sessionCookie2=_bcLastCookies||(csrf2?'csrftoken='+csrf2:'');
+    if(!csrf2) throw new Error('Rentry.org: could not get CSRF token — proxy may be blocked. Try again.');
+    let sessionCookie2=_bcLastCookies||'';
+    if(!sessionCookie2){
+      const ckM2=csrf_text2.match(/csrftoken=([a-zA-Z0-9]{20,})/);
+      sessionCookie2=ckM2?'csrftoken='+ckM2[1]:'csrftoken='+csrf2;
+    }
+    term.add('  Posting to rentry.org/api/new...','info');
     const r=await pasteProxyFetch('https://rentry.org/api/new',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       extraHeaders:{'Referer':'https://rentry.org/','X-CSRFToken':csrf2},
       extraCookies: sessionCookie2,
       body:new URLSearchParams({csrfmiddlewaretoken:csrf2,text:content,edit_code:editCode}).toString()});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(d.status!=='200'&&d.status!==200) throw new Error('Rentry.org: '+( (r.text||'').slice(0,120) ));
-    return d.url||'https://rentry.org/'+(d.url_slug||'');
+    if(d.status==='200'||d.status===200){
+      const pasteUrl=d.url||d.content;
+      return pasteUrl?(pasteUrl.startsWith('http')?pasteUrl:'https://rentry.org/'+pasteUrl):'https://rentry.org/';
+    }
+    if(d.url) return d.url.startsWith('http')?d.url:'https://rentry.org/'+d.url;
+    throw new Error('Rentry.org: '+(d.content||d.errors||( (r.text||'').slice(0,120) )));
   }
 
   if(pid==='pastebin'){
@@ -6128,7 +6164,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
     if(formR.finalUrl && formR.finalUrl.match(/justpaste\.it\/[a-zA-Z0-9]+/)) return formR.finalUrl;
     const mJP=(formR.text||'').match(/justpaste\.it\/([a-zA-Z0-9]{3,})/);
     if(mJP) return 'https://justpaste.it/'+mJP[1];
-    throw new Error('JustPaste.it: '+(postR.error||postR.text.slice(0,120)));
+    throw new Error('JustPaste.it: '+(postR.error||(postR.text||'').slice(0,120)));
   }
 
   if(pid==='zerobin'){
@@ -6196,184 +6232,348 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
   // ── FORM-LOGIN PLATFORMS ───────────────────────────────────────
 
   if(pid==='techplanet'){
-    // TechPlanet.today — login then POST article via form
+    // TechPlanet.today — session login then CSRF-guarded article POST
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('TechPlanet: password required');
+    if(!password) throw new Error('TechPlanet: password required — enter your account password in the Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'techplanet.today').body;
-    // Login
-    const loginR=await smartFetch('https://techplanet.today/api/login',{method:'POST',
-      headers:{'Content-Type':'application/json','Accept':'application/json'},
-      body:JSON.stringify({email:account.login,password})});
-    const loginD=await loginR.json();
-    const token2=loginD.token||loginD.access_token||loginD.data&&loginD.data.token;
-    if(!token2) throw new Error('TechPlanet login failed: '+(loginD.message||'invalid credentials'));
-    // Post
-    const postR=await smartFetch('https://techplanet.today/api/posts',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+token2,'Accept':'application/json'},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,status:'published',type:'post'})});
-    const postD=await postR.json();
-    const postSlug=postD.slug||postD.data&&postD.data.slug;
-    return postSlug?'https://techplanet.today/post/'+postSlug:'https://techplanet.today';
+    term.add('  Logging into TechPlanet.today...','info');
+    bcClearLastCookies();
+    // Step 1: get CSRF token from login page
+    const homeR=await pasteProxyFetch('https://techplanet.today/login',{extraCookies:''});
+    const homeText=homeR.text||'';
+    const csrfM=homeText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+               ||homeText.match(/value=["']([^"']{20,})["'][^>]*name=["']_token["']/i);
+    const csrf=csrfM&&csrfM[1]||'';
+    const sessionCk=_bcLastCookies||'';
+    // Step 2: post credentials
+    const loginR=await pasteProxyFetch('https://techplanet.today/login',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://techplanet.today/login','Origin':'https://techplanet.today'},
+      extraCookies:sessionCk,
+      body:new URLSearchParams({_token:csrf,email:account.login,password}).toString()});
+    const sessionCk2=_bcLastCookies||sessionCk;
+    if((loginR.text||'').includes('credentials do not match')) throw new Error('TechPlanet: invalid credentials');
+    term.add('  Posting article to TechPlanet...','info');
+    // Step 3: get article create page for fresh CSRF
+    const createR=await pasteProxyFetch('https://techplanet.today/create-article',{extraCookies:sessionCk2});
+    const createText=createR.text||'';
+    const csrf2M=createText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+                ||createText.match(/value=["']([^"']{20,})["'][^>]*name=["']_token["']/i);
+    const csrf2=csrf2M&&csrf2M[1]||csrf;
+    // Step 4: submit article
+    const postR=await pasteProxyFetch('https://techplanet.today/articles',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://techplanet.today/create-article','Origin':'https://techplanet.today'},
+      extraCookies:sessionCk2,
+      body:new URLSearchParams({_token:csrf2,title:titleStr,body:content,category_id:'1',status:'1'}).toString()});
+    if(postR.finalUrl&&postR.finalUrl.includes('techplanet.today/')&&!postR.finalUrl.endsWith('/articles'))
+      return postR.finalUrl;
+    const slugM=(postR.text||'').match(/techplanet\.today\/([a-zA-Z0-9_-]{5,})/);
+    if(slugM) return 'https://techplanet.today/'+slugM[1];
+    throw new Error('TechPlanet: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='click4r'){
-    // Click4R — login then create post
+    // Click4R — session-based login + form POST
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('Click4R: password required');
+    if(!password) throw new Error('Click4R: password required — enter your account password in the Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'click4r.com').body;
-    const loginR=await smartFetch('https://www.click4r.com/api/auth/login',{method:'POST',
-      headers:{'Content-Type':'application/json','Accept':'application/json'},
-      body:JSON.stringify({username:account.login,password})});
-    const loginD=await loginR.json();
-    const tok=loginD.token||loginD.access_token||loginD.data&&loginD.data.token;
-    if(!tok) throw new Error('Click4R login failed: '+(loginD.message||'check credentials'));
-    const postR=await smartFetch('https://www.click4r.com/api/posts',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,content,status:'published'})});
-    const postD=await postR.json();
-    const pid2=postD.id||postD.data&&postD.data.id;
-    return pid2?'https://www.click4r.com/posts/g/'+pid2+'/':'https://www.click4r.com';
+    term.add('  Logging into Click4R.com...','info');
+    bcClearLastCookies();
+    const homeR=await pasteProxyFetch('https://www.click4r.com/login',{extraCookies:''});
+    const homeText=homeR.text||'';
+    const csrfM=homeText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+               ||homeText.match(/csrf[^>]*value=["']([^"']{20,})["']/i);
+    const csrf=csrfM&&csrfM[1]||'';
+    const sessionCk=_bcLastCookies||'';
+    const loginR=await pasteProxyFetch('https://www.click4r.com/login',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://www.click4r.com/login','Origin':'https://www.click4r.com'},
+      extraCookies:sessionCk,
+      body:new URLSearchParams({_token:csrf,login:account.login,password}).toString()});
+    const sessionCk2=_bcLastCookies||sessionCk;
+    if((loginR.text||'').toLowerCase().includes('invalid')||(loginR.text||'').toLowerCase().includes('incorrect'))
+      throw new Error('Click4R: invalid credentials');
+    term.add('  Creating Click4R post...','info');
+    const createR=await pasteProxyFetch('https://www.click4r.com/posts/create',{extraCookies:sessionCk2});
+    const createText=createR.text||'';
+    const csrf2M=createText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+                ||createText.match(/csrf[^>]*value=["']([^"']{20,})["']/i);
+    const csrf2=csrf2M&&csrf2M[1]||csrf;
+    const postR=await pasteProxyFetch('https://www.click4r.com/posts',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://www.click4r.com/posts/create','Origin':'https://www.click4r.com'},
+      extraCookies:sessionCk2,
+      body:new URLSearchParams({_token:csrf2,title:titleStr,post_text:content,post_status:'public'}).toString()});
+    if(postR.finalUrl&&postR.finalUrl.match(/click4r\.com\/posts\/[a-zA-Z0-9]/))
+      return postR.finalUrl;
+    const mC4=(postR.text||'').match(/click4r\.com\/posts\/g\/([0-9]+)/);
+    if(mC4) return 'https://www.click4r.com/posts/g/'+mC4[1]+'/';
+    throw new Error('Click4R: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='writeonwall'){
+    // WriteOnWall — session login + form POST via proxy
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('WriteOnWall: password required');
+    if(!password) throw new Error('WriteOnWall: password required — enter your password in Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'writeonwall.com').body;
-    const loginR=await smartFetch('https://writeonwall.com/api/login',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({username:account.login,password})});
-    const loginD=await loginR.json();
-    const tok=loginD.token||loginD.access_token;
-    if(!tok) throw new Error('WriteOnWall login failed');
-    const postR=await smartFetch('https://writeonwall.com/api/questions',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,type:'question'})});
-    const postD=await postR.json();
-    const qSlug=postD.slug||postD.id;
-    return qSlug?'https://writeonwall.com/question/'+qSlug+'/':'https://writeonwall.com';
+    term.add('  Logging into WriteOnWall.com...','info');
+    bcClearLastCookies();
+    const homeR=await pasteProxyFetch('https://writeonwall.com/login',{extraCookies:''});
+    const homeText=homeR.text||'';
+    const csrfM=homeText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+               ||homeText.match(/csrf[^>]*value=["']([^"']{20,})["']/i);
+    const csrf=csrfM&&csrfM[1]||'';
+    const sessionCk=_bcLastCookies||'';
+    const loginR=await pasteProxyFetch('https://writeonwall.com/login',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://writeonwall.com/login','Origin':'https://writeonwall.com'},
+      extraCookies:sessionCk,
+      body:new URLSearchParams({_token:csrf,email:account.login,password}).toString()});
+    const sessionCk2=_bcLastCookies||sessionCk;
+    if((loginR.text||'').toLowerCase().includes('invalid')||(loginR.text||'').toLowerCase().includes('incorrect'))
+      throw new Error('WriteOnWall: invalid credentials');
+    term.add('  Posting to WriteOnWall...','info');
+    const createR=await pasteProxyFetch('https://writeonwall.com/question/create',{extraCookies:sessionCk2});
+    const createText=createR.text||'';
+    const csrf2M=createText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+                ||createText.match(/csrf[^>]*value=["']([^"']{20,})["']/i);
+    const csrf2=csrf2M&&csrf2M[1]||csrf;
+    const postR=await pasteProxyFetch('https://writeonwall.com/question',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://writeonwall.com/question/create','Origin':'https://writeonwall.com'},
+      extraCookies:sessionCk2,
+      body:new URLSearchParams({_token:csrf2,title:titleStr,description:content,status:'public'}).toString()});
+    if(postR.finalUrl&&postR.finalUrl.includes('writeonwall.com/question/'))
+      return postR.finalUrl;
+    const mW=(postR.text||'').match(/writeonwall\.com\/question\/([a-zA-Z0-9_-]{3,})/);
+    if(mW) return 'https://writeonwall.com/question/'+mW[1]+'/';
+    throw new Error('WriteOnWall: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='snaplant'){
+    // Snaplant.com — session login + form POST (no public REST API)
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('Snaplant: password required');
+    if(!password) throw new Error('Snaplant: password required — enter your password in Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'snaplant.com').body;
-    const loginR=await smartFetch('http://snaplant.com/api/auth/login',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({username:account.login,password})});
-    const loginD=await loginR.json();
-    const tok=loginD.token||loginD.access_token;
-    if(!tok) throw new Error('Snaplant login failed');
-    const postR=await smartFetch('http://snaplant.com/api/questions',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content})});
-    const postD=await postR.json();
-    const qSlug=postD.slug||postD.id;
-    return qSlug?'http://snaplant.com/question/'+qSlug+'/':'http://snaplant.com';
+    term.add('  Logging into Snaplant.com...','info');
+    bcClearLastCookies();
+    // Use https for proxy compatibility
+    const homeR=await pasteProxyFetch('https://snaplant.com/login',{extraCookies:''});
+    const homeText=homeR.text||'';
+    const csrfM=homeText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+               ||homeText.match(/csrf[^>]*value=["']([^"']{20,})["']/i);
+    const csrf=csrfM&&csrfM[1]||'';
+    const sessionCk=_bcLastCookies||'';
+    const loginR=await pasteProxyFetch('https://snaplant.com/login',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://snaplant.com/login','Origin':'https://snaplant.com'},
+      extraCookies:sessionCk,
+      body:new URLSearchParams({_token:csrf,email:account.login,password}).toString()});
+    const sessionCk2=_bcLastCookies||sessionCk;
+    if((loginR.text||'').toLowerCase().includes('invalid')||(loginR.text||'').toLowerCase().includes('credentials'))
+      throw new Error('Snaplant: invalid credentials');
+    term.add('  Posting question to Snaplant...','info');
+    const createR=await pasteProxyFetch('https://snaplant.com/question/create',{extraCookies:sessionCk2});
+    const createText=createR.text||'';
+    const csrf2M=createText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+                ||createText.match(/csrf[^>]*value=["']([^"']{20,})["']/i);
+    const csrf2=csrf2M&&csrf2M[1]||csrf;
+    const postR=await pasteProxyFetch('https://snaplant.com/question',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://snaplant.com/question/create','Origin':'https://snaplant.com'},
+      extraCookies:sessionCk2,
+      body:new URLSearchParams({_token:csrf2,title:titleStr,description:content}).toString()});
+    if(postR.finalUrl&&postR.finalUrl.includes('snaplant.com/question/'))
+      return postR.finalUrl;
+    const mSn=(postR.text||'').match(/snaplant\.com\/question\/([a-zA-Z0-9_-]{3,})/);
+    if(mSn) return 'https://snaplant.com/question/'+mSn[1]+'/';
+    throw new Error('Snaplant: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='theprose'){
+    // TheProse.com — session login + form POST (no public REST API)
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('TheProse: password required');
+    if(!password) throw new Error('TheProse: password required — enter your password in Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'theprose.com').body;
-    const loginR=await smartFetch('https://www.theprose.com/api/v1/session',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({username:account.login,password})});
-    const loginD=await loginR.json();
-    const tok=loginD.token||loginD.session_token||loginD.access_token;
-    if(!tok) throw new Error('TheProse login failed');
-    const postR=await smartFetch('https://www.theprose.com/api/v1/posts',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,publish:true})});
-    const postD=await postR.json();
-    const postId=postD.id||postD.post&&postD.post.id;
-    return postId?'https://www.theprose.com/post/'+postId+'/':'https://www.theprose.com';
+    term.add('  Logging into TheProse.com...','info');
+    bcClearLastCookies();
+    const homeR=await pasteProxyFetch('https://www.theprose.com/login',{extraCookies:''});
+    const homeText=homeR.text||'';
+    const csrfM=homeText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+               ||homeText.match(/csrf[^>]*value=["']([^"']{20,})["']/i)
+               ||homeText.match(/<input[^>]+type=["']hidden["'][^>]*value=["']([^"']{20,})["']/i);
+    const csrf=csrfM&&csrfM[1]||'';
+    const sessionCk=_bcLastCookies||'';
+    const loginR=await pasteProxyFetch('https://www.theprose.com/login',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://www.theprose.com/login','Origin':'https://www.theprose.com'},
+      extraCookies:sessionCk,
+      body:new URLSearchParams({_token:csrf,username:account.login,password}).toString()});
+    const sessionCk2=_bcLastCookies||sessionCk;
+    if((loginR.text||'').toLowerCase().includes('invalid')||(loginR.text||'').toLowerCase().includes('incorrect'))
+      throw new Error('TheProse: invalid credentials');
+    term.add('  Creating writing on TheProse...','info');
+    const createR=await pasteProxyFetch('https://www.theprose.com/write',{extraCookies:sessionCk2});
+    const createText=createR.text||'';
+    const csrf2M=createText.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i)
+                ||createText.match(/csrf[^>]*value=["']([^"']{20,})["']/i);
+    const csrf2=csrf2M&&csrf2M[1]||csrf;
+    const postR=await pasteProxyFetch('https://www.theprose.com/write',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://www.theprose.com/write','Origin':'https://www.theprose.com'},
+      extraCookies:sessionCk2,
+      body:new URLSearchParams({_token:csrf2,title:titleStr,body:content,privacy:'public',submit:'publish'}).toString()});
+    if(postR.finalUrl&&postR.finalUrl.includes('theprose.com/')&&!postR.finalUrl.endsWith('/write'))
+      return postR.finalUrl;
+    const mPr=(postR.text||'').match(/theprose\.com\/([a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+)/);
+    if(mPr) return 'https://www.theprose.com/'+mPr[1];
+    throw new Error('TheProse: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='onfeetnation'){
+    // OnFeetNation — Ning network blog post via Ning external REST API
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('OnFeetNation: password required');
+    if(!password) throw new Error('OnFeetNation: password required — enter your account password in the Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'onfeetnation.com').body;
-    // Login via Ning-style form
-    const loginR=await smartFetch('https://www.onfeetnation.com/api/v1/session',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({email:account.login,password})});
-    const loginD=await loginR.json();
-    const tok=loginD.token||loginD.access_token||loginD.sessionToken;
-    if(!tok) throw new Error('OnFeetNation login failed — check username/password');
-    const postR=await smartFetch('https://www.onfeetnation.com/api/v1/albums',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,description:content.slice(0,1000),privacy:'public'})});
-    const postD=await postR.json();
-    const albumId=postD.id||postD.album&&postD.album.id;
-    return albumId?'https://www.onfeetnation.com/photo/albums/'+albumId:'https://www.onfeetnation.com';
+    term.add('  Logging into OnFeetNation (Ning)...','info');
+    // Ning external REST API token endpoint
+    const loginR=await pasteProxyFetch('https://external.ningapis.com/xn/rest/onfeetnation/1.0/Token',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://www.onfeetnation.com/'},
+      body:new URLSearchParams({email:account.login,password}).toString()});
+    let loginD={}; try{loginD=JSON.parse(loginR.text);}catch(e){}
+    const tok=loginD.token||loginD.oauthToken||loginD.access_token;
+    if(!tok) throw new Error('OnFeetNation login failed — check email/password. Got: '+((loginR.text||'').slice(0,80)));
+    term.add('  Publishing blog post to OnFeetNation...','info');
+    // Ning external API — create blog post
+    const postR=await pasteProxyFetch('https://external.ningapis.com/xn/rest/onfeetnation/1.0/BlogPost',{method:'POST',
+      contentType:'application/json',asJson:true,
+      extraHeaders:{'Authorization':'Bearer '+tok,'Referer':'https://www.onfeetnation.com/'},
+      body:JSON.stringify({title:titleStr,description:content,visibility:'public'})});
+    let postD={}; try{postD=JSON.parse(postR.text);}catch(e){}
+    const postId=postD.id||postD.blogPost&&postD.blogPost.id;
+    if(postId) return 'https://www.onfeetnation.com/profiles/blog/show?id='+postId;
+    if(postR.finalUrl&&postR.finalUrl.includes('onfeetnation.com')) return postR.finalUrl;
+    throw new Error('OnFeetNation: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='caribbeanfever'){
+    // CaribbeanFever — Ning network blog post via Ning external REST API
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('CaribbeanFever: password required');
+    if(!password) throw new Error('CaribbeanFever: password required — enter your account password in the Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'caribbeanfever.com').body;
-    const loginR=await smartFetch('https://caribbeanfever.com/api/v1/session',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({email:account.login,password})});
-    const loginD=await loginR.json();
-    const tok=loginD.token||loginD.access_token||loginD.sessionToken;
-    if(!tok) throw new Error('CaribbeanFever login failed — check username/password');
-    const postR=await smartFetch('https://caribbeanfever.com/api/v1/albums',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,description:content.slice(0,1000),privacy:'public'})});
-    const postD=await postR.json();
-    const albumId=postD.id||postD.album&&postD.album.id;
-    return albumId?'https://caribbeanfever.com/photo/albums/'+albumId:'https://caribbeanfever.com';
+    term.add('  Logging into CaribbeanFever (Ning)...','info');
+    const loginR=await pasteProxyFetch('https://external.ningapis.com/xn/rest/caribbeanfever/1.0/Token',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://caribbeanfever.com/'},
+      body:new URLSearchParams({email:account.login,password}).toString()});
+    let loginD={}; try{loginD=JSON.parse(loginR.text);}catch(e){}
+    const tok=loginD.token||loginD.oauthToken||loginD.access_token;
+    if(!tok) throw new Error('CaribbeanFever login failed — check email/password. Got: '+((loginR.text||'').slice(0,80)));
+    term.add('  Publishing blog post to CaribbeanFever...','info');
+    const postR=await pasteProxyFetch('https://external.ningapis.com/xn/rest/caribbeanfever/1.0/BlogPost',{method:'POST',
+      contentType:'application/json',asJson:true,
+      extraHeaders:{'Authorization':'Bearer '+tok,'Referer':'https://caribbeanfever.com/'},
+      body:JSON.stringify({title:titleStr,description:content,visibility:'public'})});
+    let postD={}; try{postD=JSON.parse(postR.text);}catch(e){}
+    const postId=postD.id||postD.blogPost&&postD.blogPost.id;
+    if(postId) return 'https://caribbeanfever.com/profiles/blog/show?id='+postId;
+    if(postR.finalUrl&&postR.finalUrl.includes('caribbeanfever.com')) return postR.finalUrl;
+    throw new Error('CaribbeanFever: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='taylorhicks'){
+    // TaylorHicks Ning network — Ning external REST API (consistent with onfeetnation/caribbeanfever)
     const password=extraVal||account.extra||'';
-    if(!password) throw new Error('TaylorHicks Ning: password required');
+    if(!password) throw new Error('TaylorHicks Ning: password required — enter your account password in Extra field');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'taylorhicks.ning.com').body;
-    // Ning REST API
-    const loginR=await smartFetch('https://external.ningapis.com/xn/rest/taylorhicks/1.0/Token',{method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:new URLSearchParams({email:account.login,password,apiKey:account.token}).toString()});
-    const loginD=await loginR.json();
-    const tok=loginD.token||loginD.oauthToken;
-    if(!tok) throw new Error('TaylorHicks Ning login failed');
-    const postR=await smartFetch('https://external.ningapis.com/xn/rest/taylorhicks/1.0/BlogPost',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,description:content,visibility:'public'})});
-    const postD=await postR.json();
+    term.add('  Logging into TaylorHicks Ning...','info');
+    const loginR=await pasteProxyFetch('https://external.ningapis.com/xn/rest/taylorhicks/1.0/Token',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Referer':'https://taylorhicks.ning.com/'},
+      body:new URLSearchParams({email:account.login,password}).toString()});
+    let loginD={}; try{loginD=JSON.parse(loginR.text);}catch(e){}
+    const tok=loginD.token||loginD.oauthToken||loginD.access_token;
+    if(!tok) throw new Error('TaylorHicks Ning login failed — check email/password. Got: '+((loginR.text||'').slice(0,80)));
+    term.add('  Publishing blog post to TaylorHicks...','info');
+    const postR=await pasteProxyFetch('https://external.ningapis.com/xn/rest/taylorhicks/1.0/BlogPost',{method:'POST',
+      contentType:'application/json',asJson:true,
+      extraHeaders:{'Authorization':'Bearer '+tok,'Referer':'https://taylorhicks.ning.com/'},
+      body:JSON.stringify({title:titleStr,description:content,visibility:'public'})});
+    let postD={}; try{postD=JSON.parse(postR.text);}catch(e){}
     const postId=postD.id||postD.blogPost&&postD.blogPost.id;
-    return postId?'https://taylorhicks.ning.com/forum/topics/'+postId:'https://taylorhicks.ning.com';
+    if(postId) return 'https://taylorhicks.ning.com/profiles/blog/show?id='+postId;
+    if(postR.finalUrl&&postR.finalUrl.includes('taylorhicks.ning.com')) return postR.finalUrl;
+    throw new Error('TaylorHicks: could not get post URL — '+(postR.error||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='vingle'){
+    // Vingle — private API; use session token (Bearer from browser DevTools after login)
     const interestId=extraVal||account.extra||'';
-    if(!interestId) throw new Error('Vingle: Interest ID required');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'vingle.net').body;
-    const postR=await smartFetch('https://www.vingle.net/api/cards',{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+account.token},
-      body:JSON.stringify({title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,body:content,interest_id:interestId,visibility:'public'})});
-    const postD=await postR.json();
-    const cardId=postD.id||postD.card&&postD.card.id;
-    return cardId?'https://www.vingle.net/posts/'+cardId:'https://www.vingle.net';
+    if(!account.token) throw new Error('Vingle: Access Token required — copy your Bearer token from browser DevTools → Network after logging into Vingle');
+    if(!interestId) throw new Error('Vingle: Interest ID required — enter the numeric interest/collection ID in Extra field');
+    term.add('  Publishing card to Vingle...','info');
+    // Vingle internal API v5 (use Bearer token from authenticated session)
+    const postR=await pasteProxyFetch('https://www.vingle.net/api/v5/cards',{method:'POST',
+      contentType:'application/json',asJson:true,
+      extraHeaders:{'Authorization':'Bearer '+account.token,'Referer':'https://www.vingle.net/','Origin':'https://www.vingle.net'},
+      body:JSON.stringify({title:titleStr,body:content,interest_id:parseInt(interestId)||0,published:true})});
+    let postD={}; try{postD=JSON.parse(postR.text);}catch(e){}
+    const cardId=postD.id||(postD.card&&postD.card.id)||(postD.data&&postD.data.id);
+    if(cardId) return 'https://www.vingle.net/posts/'+cardId;
+    if(postR.finalUrl&&postR.finalUrl.includes('vingle.net/posts/')) return postR.finalUrl;
+    throw new Error('Vingle: '+(postR.error||(postD.message)||((postR.text||'').slice(0,100))));
   }
 
   if(pid==='deviantart'){
-    // DeviantArt: publish journal via OAuth2 token
+    // DeviantArt: publish journal via OAuth2 token using correct journals endpoint
+    if(!account.token) throw new Error('DeviantArt: Access Token required — create OAuth2 app at deviantart.com/developers');
+    const titleStr=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
     const content=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,account.login,'deviantart.com').body;
-    const r=await smartFetch('https://www.deviantart.com/api/v1/oauth2/stash/publish',{method:'POST',
-      headers:{'Authorization':'Bearer '+account.token,'Content-Type':'application/x-www-form-urlencoded'},
+    term.add('  Publishing journal to DeviantArt...','info');
+    // Step 1: First stash the content, then publish
+    const stashR=await pasteProxyFetch('https://www.deviantart.com/api/v1/oauth2/stash/submit',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Authorization':'Bearer '+account.token},
       body:new URLSearchParams({
-        title:getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title,
+        title:titleStr,
         artist_comments:content.slice(0,10000),
         is_mature:'false',
-        agree_submission:'true',
         catpath:'journal',
+        agree_submission:'true',
         'license.creative_commons':'0'
       }).toString()});
-    const d=await r.json();
-    if(d.error) throw new Error('DeviantArt: '+d.error_description||d.error);
-    const deviationId=d.deviationid||d.url;
-    return d.url||'https://www.deviantart.com/'+account.login+'/journal/';
+    let stashD={}; try{stashD=JSON.parse(stashR.text);}catch(e){}
+    if(stashD.error) throw new Error('DeviantArt stash failed: '+(stashD.error_description||stashD.error));
+    const itemid=stashD.itemid;
+    if(!itemid) throw new Error('DeviantArt: no stash itemid returned — '+((stashR.text||'').slice(0,100)));
+    // Step 2: Publish the stashed item
+    const pubR=await pasteProxyFetch('https://www.deviantart.com/api/v1/oauth2/stash/publish',{method:'POST',
+      contentType:'application/x-www-form-urlencoded',
+      extraHeaders:{'Authorization':'Bearer '+account.token},
+      body:new URLSearchParams({
+        itemid:String(itemid),
+        agree_submission:'true',
+        agree_tos:'true',
+        catpath:'journal',
+        'license.creative_commons':'0',
+        is_mature:'false',
+        display_resolution:'0'
+      }).toString()});
+    let pubD={}; try{pubD=JSON.parse(pubR.text);}catch(e){}
+    if(pubD.error) throw new Error('DeviantArt publish failed: '+(pubD.error_description||pubD.error));
+    return pubD.url||(account.login?'https://www.deviantart.com/'+account.login+'/journal/':'https://www.deviantart.com');
   }
 
   throw new Error('No handler for platform: '+pid);
@@ -6537,7 +6737,7 @@ async function pingGoogle(){
 let _blastSelectedPlatforms=[];
 let _blastRunning=false;
 // BLP ↔ Blast/Campaign bridge
-let _blastSelectedBLPSites=[]; // domains selected for Global Blast from BLP
+let _blastSelectedBLPPlatforms=[]; // BLP section pids // domains selected for Global Blast from BLP
 // Helper: get connected BLP sites (have creds saved or auth=none)
 function blpConnectedSites(){
   return BLP_SITES.filter(s=>{
@@ -6546,19 +6746,114 @@ function blpConnectedSites(){
     return BLP.creds[key]&&Object.values(BLP.creds[key]).some(v=>v&&v.trim());
   });
 }
+
+// Curated Global Blast BLP site groups — all have working runSingleCampaign handlers
+const GB_BLP_GROUPS = [
+  {
+    label: '⚡ Instant Paste (No Login)',
+    color: 'var(--win-green)',
+    sites: [
+      {pid:'controlc',   name:'ControlC',    da:52, icon:'📋', note:'anonymous paste'},
+      {pid:'bitbin',     name:'Paste.fo',    da:45, icon:'📄', note:'anonymous paste'},
+      {pid:'dpaste',     name:'dpaste.org',  da:62, icon:'📝', note:'anonymous paste'},
+      {pid:'hastebin',   name:'Hastebin',    da:55, icon:'💻', note:'code paste'},
+      {pid:'zerobin',    name:'0bin',        da:44, icon:'🔒', note:'encrypted paste'},
+      {pid:'rentry',     name:'Rentry.co',   da:52, icon:'✏️', note:'markdown paste'},
+      {pid:'rentryorg',  name:'Rentry.org',  da:50, icon:'✏️', note:'markdown paste'},
+      {pid:'justpaste',  name:'JustPaste',   da:65, icon:'📌', note:'article paste'},
+      {pid:'pastelink',  name:'Pastelink',   da:40, icon:'🔗', note:'link paste'},
+    ]
+  },
+  {
+    label: '🔑 Paste / Doc (API Key)',
+    color: 'var(--accent)',
+    sites: [
+      {pid:'pastebin',   name:'Pastebin',    da:93, icon:'📋', note:'requires API key'},
+      {pid:'pastee',     name:'Paste.ee',    da:52, icon:'📝', note:'requires API key'},
+      {pid:'hackmd',     name:'HackMD',      da:74, icon:'📓', note:'requires token'},
+      {pid:'writeas',    name:'Write.as',    da:64, icon:'✍️', note:'anon or token'},
+      {pid:'ghgist',     name:'GitHub Gist', da:96, icon:'⚙️', note:'requires token'},
+    ]
+  },
+  {
+    label: '✍️ Web 2.0 / Blog',
+    color: 'var(--win-yellow)',
+    sites: [
+      {pid:'medium',     name:'Medium',      da:95, icon:'📰', note:'requires token'},
+      {pid:'devto',      name:'Dev.to',      da:87, icon:'💻', note:'requires API key'},
+      {pid:'hashnode',   name:'Hashnode',    da:82, icon:'🔗', note:'requires API key'},
+      {pid:'tumblr',     name:'Tumblr',      da:88, icon:'🎨', note:'requires OAuth'},
+      {pid:'substack',   name:'Substack',    da:91, icon:'📧', note:'requires cookie'},
+      {pid:'wordpress',  name:'WordPress',   da:95, icon:'🔵', note:'requires token'},
+      {pid:'ghost',      name:'Ghost',       da:84, icon:'👻', note:'requires admin key'},
+      {pid:'blogger',    name:'Blogger',     da:99, icon:'🔴', note:'requires OAuth'},
+      {pid:'wix',        name:'Wix',         da:93, icon:'🟦', note:'requires API key'},
+      {pid:'telegraph',  name:'Telegraph',   da:68, icon:'✈️', note:'requires token'},
+      {pid:'techplanet', name:'TechPlanet',  da:45, icon:'🌐', note:'requires login'},
+      {pid:'click4r',    name:'Click4R',     da:38, icon:'📢', note:'requires login'},
+      {pid:'writeonwall',name:'WriteOnWall', da:35, icon:'🖊️', note:'requires login'},
+      {pid:'theprose',   name:'TheProse',    da:42, icon:'📖', note:'requires login'},
+      {pid:'ideone',     name:'Ideone',      da:72, icon:'💡', note:'code/text paste'},
+    ]
+  },
+  {
+    label: '🔧 Dev / Hosting',
+    color: '#8888ff',
+    sites: [
+      {pid:'github',     name:'GitHub Pages', da:96, icon:'⚙️', note:'requires token'},
+      {pid:'gitlab',     name:'GitLab Pages', da:90, icon:'🦊', note:'requires token'},
+      {pid:'netlify',    name:'Netlify',      da:82, icon:'🟢', note:'requires token'},
+      {pid:'vercel',     name:'Vercel',       da:82, icon:'▲',  note:'requires token'},
+      {pid:'cloudflare', name:'Cloudflare',   da:88, icon:'🟠', note:'requires token'},
+    ]
+  },
+  {
+    label: '🌍 Social / Community',
+    color: '#ff6688',
+    sites: [
+      {pid:'reddit',         name:'Reddit',         da:98, icon:'🤖', note:'requires OAuth'},
+      {pid:'deviantart',     name:'DeviantArt',     da:92, icon:'🎨', note:'requires OAuth'},
+      {pid:'vingle',         name:'Vingle',         da:58, icon:'💎', note:'requires token'},
+      {pid:'onfeetnation',   name:'OnFeetNation',   da:52, icon:'👟', note:'Ning network'},
+      {pid:'caribbeanfever', name:'CaribbeanFever', da:48, icon:'🌴', note:'Ning network'},
+      {pid:'taylorhicks',    name:'TaylorHicks',    da:44, icon:'🎵', note:'Ning network'},
+      {pid:'snaplant',       name:'Snaplant',       da:36, icon:'🌱', note:'requires login'},
+    ]
+  },
+  {
+    label: '📄 Document / Notion',
+    color: '#cc8800',
+    sites: [
+      {pid:'notion',  name:'Notion',  da:90, icon:'📓', note:'requires token'},
+      {pid:'issuu',   name:'Issuu',   da:92, icon:'📚', note:'requires API key'},
+      {pid:'replit',  name:'Replit',  da:89, icon:'🔄', note:'requires token'},
+    ]
+  },
+];
+
 function renderGlobalBlast(el){
   const connected=PLATFORMS.filter(p=>S.accounts.some(a=>a.platform===p.id));
   if(!_blastSelectedPlatforms.length) _blastSelectedPlatforms=connected.map(p=>p.id);
-  const blpConnected=blpConnectedSites();
-  // Auto-select newly connected BLP sites if list is empty
-  if(!_blastSelectedBLPSites.length&&blpConnected.length){
-    _blastSelectedBLPSites=blpConnected.filter(s=>s.auth==='none').map(s=>s.u);
+  // Auto-select BLP platforms that have credentials or are no-auth
+  if(!_blastSelectedBLPPlatforms.length){
+    const allBlpPids=[].concat(...GB_BLP_GROUPS.map(g=>g.sites.map(s=>s.pid)));
+    _blastSelectedBLPPlatforms=allBlpPids.filter(pid=>{
+      const acc=S.accounts.find(a=>a.platform===pid);
+      if(acc) return true; // connected in Setup
+      // Check if it's a no-auth paste site
+      const noAuthPids=['controlc','bitbin','dpaste','hastebin','zerobin','rentry','rentryorg','justpaste','pastelink','writeas','ideone'];
+      return noAuthPids.includes(pid);
+    });
   }
   const successCount=S.campaigns.filter(c=>c.status==='success').length;
+  const allBlpPids=[].concat(...GB_BLP_GROUPS.map(g=>g.sites.map(s=>s.pid)));
+  const blpSelectedCount=_blastSelectedBLPPlatforms.length;
+  const totalSelected=_blastSelectedPlatforms.length+blpSelectedCount;
+
   el.innerHTML=`
   <div class="page-title" style="color:var(--accent)">🌍 Global Blast</div>
   <div class="page-sub">// post to ALL connected platforms simultaneously — one form, maximum reach</div>
-  <div class="notice notice-success">Global Blast publishes all your keywords across every connected platform in a single run. Connect accounts in Setup first.</div>
+  <div class="notice notice-success">Global Blast publishes all your keywords across every selected platform in a single run. Connect accounts in Setup first, then select platforms below.</div>
   ${S.backlinkVault.length
     ? `<div class="notice notice-info" style="border-color:var(--accent);background:rgba(0,200,100,0.07)">
         🎯 <strong>Backlink Vault active</strong> — ${S.backlinkVault.length} money-page URL${S.backlinkVault.length>1?'s':''} auto-injected into all generated content.
@@ -6570,16 +6865,19 @@ function renderGlobalBlast(el){
        </div>`
   }
   <div class="grid5" style="margin-bottom:18px">
-    ${statBox(connected.length,'Connected','g')}${statBox(_blastSelectedPlatforms.length,'Selected','b')}
+    ${statBox(connected.length,'Connected','g')}${statBox(totalSelected,'Selected','b')}
     ${statBox(S.keywords.length,'Keywords','y')}${statBox(successCount,'Succeeded','g')}
     ${statBox(S.campaigns.filter(c=>c.status==='error').length,'Failed','r')}
   </div>
-  ${!connected.length?'<div class="notice notice-warn">No platforms connected. Go to Setup / Connect in the sidebar to add accounts first.</div>':''}
+
+  <!-- ── TIER 1: MAIN PLATFORMS ── -->
   <div class="card">
-    <div class="card-title flex aic g8">Platform Selection
+    <div class="card-title flex aic g8">🔌 Connected Platforms
+      <span style="font-size:9px;color:var(--muted2);font-weight:400">${connected.length} connected · ${_blastSelectedPlatforms.length} selected</span>
       <button class="btn btn-ghost btn-xs" onclick="blastSelectAll()">All</button>
       <button class="btn btn-ghost btn-xs" onclick="blastSelectNone()">None</button>
     </div>
+    ${!connected.length?'<div class="notice notice-warn" style="margin:0">No platforms connected. Go to Setup in the sidebar to add accounts first.</div>':''}
     <div class="grid4" id="blast-plat-grid">
       ${PLATFORMS.map(p=>{
         const isConn=S.accounts.some(a=>a.platform===p.id);
@@ -6592,31 +6890,40 @@ function renderGlobalBlast(el){
       }).join('')}
     </div>
   </div>
-  ${blpConnected.length?`
-  <div class="card" style="border-color:#ff6600">
-    <div class="card-title flex aic g8" style="background:linear-gradient(to right,#cc4400,#ff6600)">🔗 Backlink Pro Sites
-      <span style="font-size:9px;opacity:0.8;font-weight:400">${blpConnected.length} connected · ${_blastSelectedBLPSites.length} selected</span>
+
+  <!-- ── TIER 2: BACKLINK PRO SITES (grouped, same runSingleCampaign engine) ── -->
+  <div class="card" style="border-color:#ff6600;margin-top:10px">
+    <div class="card-title flex aic g8" style="background:linear-gradient(to right,#cc4400,#ff6600);padding:10px 14px;margin:-10px -14px 12px;border-radius:6px 6px 0 0">
+      🔗 Backlink Pro Sites
+      <span style="font-size:9px;opacity:0.85;font-weight:400">${allBlpPids.length} sites · ${blpSelectedCount} selected · same engine as platforms above</span>
       <button class="btn btn-ghost btn-xs" style="margin-left:auto" onclick="blpBlastSelectAll()">All</button>
       <button class="btn btn-ghost btn-xs" onclick="blpBlastSelectNone()">None</button>
-      <button class="btn btn-ghost btn-xs" onclick="switchPage('backlink_pro')">Manage →</button>
     </div>
-    <div style="padding:6px 0 2px;font-family:var(--mono);font-size:9px;color:var(--muted2);margin-bottom:6px">
-      BLP sites submit via their own engine (Groq AI content + auto-submitter). Selected sites will run after regular platforms.
+    <div style="font-size:10px;color:var(--muted2);font-family:var(--mono);margin-bottom:10px;padding:0 2px">
+      ⚡ <strong>Instant</strong> sites (no login) fire immediately. 🔑 <strong>API/login</strong> sites need credentials in Setup first. All use the same reliable post engine.
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:5px">
-      ${blpConnected.map(s=>{
-        const isSel=_blastSelectedBLPSites.includes(s.u);
-        const authBadge=s.auth==='none'?'⚡ instant':`🔑 ${s.auth}`;
-        return `<div onclick="toggleBlpBlastSite('${s.u.replace(/'/g,"\\\\'")}');event.stopPropagation()" style="padding:6px 8px;border:1px solid ${isSel?'#ff6600':'var(--border)'};background:${isSel?'rgba(255,102,0,0.06)':'var(--bg)'};cursor:pointer;display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;border-radius:6px">
-          <span style="color:${isSel?'#ff6600':'var(--muted2)'};font-weight:700;font-size:10px">${isSel?'✓':'○'}</span>
-          <div style="flex:1;min-width:0">
-            <div style="font-weight:700;font-size:9px;color:${isSel?'#ff6600':'var(--text)'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.u)}">${esc(s.u.replace(/\/.*/,''))}</div>
-            <div style="color:var(--muted2);font-size:8px">DA ${s.da} · ${authBadge}</div>
-          </div>
-        </div>`;
-      }).join('')}
-    </div>
-  </div>`:'<div class="notice notice-info" style="border-color:#ff6600">🔗 <strong>Backlink Pro</strong> — No sites connected yet. <a href="#" onclick="event.preventDefault();switchPage(\'backlink_pro\')" style="color:var(--accent)">Open Backlink Pro →</a> to add credentials, then they\'ll appear here automatically.</div>'}
+    ${GB_BLP_GROUPS.map(group=>`
+      <div style="margin-bottom:14px">
+        <div style="font-size:10px;font-weight:700;font-family:var(--mono);color:${group.color};margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">${group.label}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:5px">
+          ${group.sites.map(s=>{
+            const isSel=_blastSelectedBLPPlatforms.includes(s.pid);
+            const hasAcc=S.accounts.some(a=>a.platform===s.pid);
+            const noAuthPids=['controlc','bitbin','dpaste','hastebin','zerobin','rentry','rentryorg','justpaste','pastelink','writeas','ideone'];
+            const isReady=hasAcc||noAuthPids.includes(s.pid);
+            return `<div onclick="toggleBlpBlastSite('${s.pid}')" style="padding:7px 9px;border:1px solid ${isSel&&isReady?group.color:'var(--border)'};background:${isSel&&isReady?'rgba(255,102,0,0.06)':'var(--bg)'};cursor:pointer;display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;border-radius:6px;transition:all 0.1s;opacity:${isReady?1:0.55}">
+              <span style="color:${isSel&&isReady?group.color:'var(--muted2)'};font-weight:700;font-size:11px">${isSel&&isReady?'✓':'○'}</span>
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:700;font-size:9px;color:${isSel&&isReady?'var(--text)':'var(--muted2)'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.note)}">${s.icon} ${esc(s.name)}</div>
+                <div style="color:var(--muted2);font-size:8px">DA${s.da} · ${hasAcc?'✓ connected':noAuthPids.includes(s.pid)?'⚡ instant':'needs setup'}</div>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`).join('')}
+  </div>
+
+  <!-- ── BLAST SETTINGS ── -->
   <div class="card">
     <div class="card-title">Blast Settings</div>
     <div class="grid3">
@@ -6632,8 +6939,8 @@ function renderGlobalBlast(el){
       Select platforms and set delay to see estimated time.
     </div>
     <div class="flex aic g8 mt8">
-      <button class="btn btn-primary" id="blast-run-btn" onclick="runGlobalBlast()" style="font-size:12px;padding:10px 24px" ${!connected.length&&!_blastSelectedBLPSites.length?'disabled':''}>
-        🌍 GLOBAL BLAST — ${_blastSelectedPlatforms.length} platform(s)${_blastSelectedBLPSites.length?` + ${_blastSelectedBLPSites.length} BLP`:''} × ${S.keywords.length||1} keyword(s)
+      <button class="btn btn-primary" id="blast-run-btn" onclick="runGlobalBlast()" style="font-size:12px;padding:10px 24px" ${!connected.length&&!blpSelectedCount?'disabled':''}>
+        🌍 GLOBAL BLAST — ${_blastSelectedPlatforms.length} platform(s) + ${blpSelectedCount} BLP site(s) × ${S.keywords.length||1} keyword(s)
       </button>
     </div>
     <div id="blast-prog-wrap" style="display:none;margin-top:10px">
@@ -6658,25 +6965,31 @@ function toggleBlastPlatform(id){
   else _blastSelectedPlatforms.push(id);
   renderGlobalBlast(document.getElementById('page-global_blast'));
 }
-function blastSelectAll(){ _blastSelectedPlatforms=PLATFORMS.filter(p=>S.accounts.some(a=>a.platform===p.id)).map(p=>p.id); _blastSelectedBLPSites=blpConnectedSites().map(s=>s.u); renderGlobalBlast(document.getElementById('page-global_blast')); }
-function blastSelectNone(){ _blastSelectedPlatforms=[]; _blastSelectedBLPSites=[]; renderGlobalBlast(document.getElementById('page-global_blast')); }
-
-function toggleBlpBlastSite(domain){
-  if(_blastSelectedBLPSites.includes(domain)) _blastSelectedBLPSites=_blastSelectedBLPSites.filter(x=>x!==domain);
-  else _blastSelectedBLPSites.push(domain);
+function blastSelectAll(){
+  _blastSelectedPlatforms=PLATFORMS.filter(p=>S.accounts.some(a=>a.platform===p.id)).map(p=>p.id);
+  _blastSelectedBLPPlatforms=[].concat(...GB_BLP_GROUPS.map(g=>g.sites.map(s=>s.pid)));
   renderGlobalBlast(document.getElementById('page-global_blast'));
 }
-function blpBlastSelectAll(){ _blastSelectedBLPSites=blpConnectedSites().map(s=>s.u); renderGlobalBlast(document.getElementById('page-global_blast')); }
-function blpBlastSelectNone(){ _blastSelectedBLPSites=[]; renderGlobalBlast(document.getElementById('page-global_blast')); }
+function blastSelectNone(){ _blastSelectedPlatforms=[]; _blastSelectedBLPPlatforms=[]; renderGlobalBlast(document.getElementById('page-global_blast')); }
+
+function toggleBlpBlastSite(pid){
+  if(_blastSelectedBLPPlatforms.includes(pid)) _blastSelectedBLPPlatforms=_blastSelectedBLPPlatforms.filter(x=>x!==pid);
+  else _blastSelectedBLPPlatforms.push(pid);
+  renderGlobalBlast(document.getElementById('page-global_blast'));
+}
+function blpBlastSelectAll(){
+  _blastSelectedBLPPlatforms=[].concat(...GB_BLP_GROUPS.map(g=>g.sites.map(s=>s.pid)));
+  renderGlobalBlast(document.getElementById('page-global_blast'));
+}
+function blpBlastSelectNone(){ _blastSelectedBLPPlatforms=[]; renderGlobalBlast(document.getElementById('page-global_blast')); }
 function updateBlastEstimate(){
   const el=document.getElementById('blast-estimate'); if(!el) return;
   const kws=(document.getElementById('blast-kw')||{value:''}).value.trim()?1:S.keywords.length||1;
   const delay=parseInt((document.getElementById('blast-delay')||{value:4}).value)||4;
-  const blpCount=_blastSelectedBLPSites.length;
-  const total=_blastSelectedPlatforms.length*kws;
-  const blpTotal=blpCount*kws;
-  const mins=Math.round((total*delay+blpTotal*1.2)/60);
-  el.textContent='Estimated time: ~'+mins+' min for '+_blastSelectedPlatforms.length+' platform(s)'+(blpCount?' + '+blpCount+' BLP site(s)':'')+' × '+kws+' keyword(s) at '+delay+'s delay';
+  const blpCount=_blastSelectedBLPPlatforms.length;
+  const total=(_blastSelectedPlatforms.length+blpCount)*kws;
+  const mins=Math.round(total*delay/60);
+  el.textContent='Estimated time: ~'+mins+' min for '+_blastSelectedPlatforms.length+' main platform(s) + '+blpCount+' BLP site(s) × '+kws+' keyword(s) at '+delay+'s delay';
 }
 // ─── CREDENTIAL PRE-FLIGHT CHECKER ───────────────────────────────────────────
 // Called before blast starts. Returns { ok: bool, warnings: string[] }
@@ -6706,7 +7019,7 @@ async function runGlobalBlast(){
   const singleKw=kwEl&&kwEl.value.trim();
   const effectiveKws=singleKw?[singleKw]:(S.keywords.length?S.keywords:null);
   if(!effectiveKws){ toast('Add keywords in the Keywords page first','w'); return; }
-  if(!_blastSelectedPlatforms.length && !_blastSelectedBLPSites.length){ alert('Select at least one platform or BLP site.'); return; }
+  if(!_blastSelectedPlatforms.length && !_blastSelectedBLPPlatforms.length){ alert('Select at least one platform or BLP site.'); return; }
 
   // ── PRE-FLIGHT: warn about missing credentials before wasting time ──
   if(_blastSelectedPlatforms.length){
@@ -6733,7 +7046,7 @@ async function runGlobalBlast(){
   const term=makeTerminal(termEl);
   const liveUrls=[];
   const failedPlatforms=[];
-  const total=_blastSelectedPlatforms.length*effectiveKws.length;
+  const total=_blastSelectedPlatforms.length*effectiveKws.length; // BLP has its own counter
   let done=0;
 
   // Show routing mode
@@ -6869,146 +7182,72 @@ async function runGlobalBlast(){
   else term.add('  🔗 Proxy: browser CORS chain','warn');
   term.add('════════════════════════════════════════════','info');
 
-  btn.disabled=false; btn.innerHTML='🌍 GLOBAL BLAST — Re-run';
+  btn.disabled=false; btn.innerHTML='🌍 GLOBAL BLAST — Re-run ('+_blastSelectedPlatforms.length+' + '+_blastSelectedBLPPlatforms.length+' BLP)';
   _blastRunning=false;
   updateHeader(); updatePlatformBar();
 
-  // ── BLP BLAST ────────────────────────────────────────────────────────────
-  if(!_blastSelectedBLPSites.length) return;
+  // ── BACKLINK PRO BLAST (uses same runSingleCampaignWithRetry engine as main platforms) ──
+  if(!_blastSelectedBLPPlatforms.length) return;
 
-  const blpTerm=makeTerminal(termEl);
-  blpTerm.add('','info');
-  blpTerm.add('══ 🔗 BACKLINK PRO BLAST — '+_blastSelectedBLPSites.length+' sites ══','info');
-  const blpKws=(document.getElementById('blast-kw')||{}).value&&(document.getElementById('blast-kw')||{}).value.trim()
-    ?[(document.getElementById('blast-kw')||{}).value.trim()]
-    :(S.keywords.length?S.keywords:['seo']);
-  const moneyUrl=S.backlinkVault.length?S.backlinkVault[0].url:(S.links.length?S.links[0].url:'');
-  if(!moneyUrl) blpTerm.add('⚠ No money URL — add one in Links Manager for backlink injection','warn');
+  term.add('','info');
+  term.add('══ 🔗 BACKLINK PRO BLAST — '+_blastSelectedBLPPlatforms.length+' sites ══','info');
 
-  // Try Groq content if key set, otherwise local templates — already handled inside blpSubmitSite
-  const hasGroq=!!(settingGet('groq_api_key'));
-  if(hasGroq) blpTerm.add('  ✨ Groq AI content generation active','info');
-  else blpTerm.add('  📝 Using local content templates (add Groq key in Settings → AI for AI-generated content)','info');
+  // No-auth paste sites get a synthetic anonymous account
+  const NOAUTH_PIDS=new Set(['controlc','bitbin','dpaste','hastebin','zerobin','rentry','rentryorg','justpaste','pastelink','writeas','ideone']);
+  const ANON_ACCOUNT={platform:'anon',token:'',login:'anon',extra:'',extra2:''};
 
+  const blpKws=effectiveKws; // same keywords as main blast
   let blpOk=0,blpFail=0;
-  const BLP_REST_CAPABLE=['pastebin.com','dev.to','medium.com','hashnode.com','write.as','telegra.ph','hackmd.io','dpaste.com','controlc.com','rentry.co','hastebin.com','paste.ee'];
+  const blpTotal=_blastSelectedBLPPlatforms.length*blpKws.length;
+  let blpDone=0;
 
-  for(const kw of blpKws){
-    const effectiveMoneyUrl=moneyUrl||kw;
+  for(let ki=0;ki<blpKws.length;ki++){
+    const kw=blpKws[ki];
+    term.add('  ── BLP keyword ['+(ki+1)+'/'+blpKws.length+']: "'+kw+'"','info');
 
-    // ── Separate PDF domains — generate PDFs, show download panels, skip API ──
-    const pdfDomains=_blastSelectedBLPSites.filter(d=>_PDF_BLP_DOMAINS.has(d));
-    const nonPdfSites=_blastSelectedBLPSites.filter(d=>!_PDF_BLP_DOMAINS.has(d));
-
-    for(const domain of pdfDomains){
-      const site=BLP_SITES.find(s=>s.u===domain)||{u:domain,t:'paste',da:90};
-      const ecRaw=blpGenerateLocalContent(site,kw,effectiveMoneyUrl);
-      const ecTitle=kw+' — Complete Guide '+new Date().getFullYear();
-      const pdfBlob=generateTextPdf(ecTitle,ecRaw);
-      const uploadPage=({'issuu.com':'https://issuu.com/home/publish','scribd.com':'https://www.scribd.com/upload-document','slideshare.net':'https://www.slideshare.net/upload','academia.edu':'https://www.academia.edu/upload','archive.org':'https://archive.org/upload/'})[domain]||'https://'+domain;
-      _showPdfUploadPanel(ecTitle,pdfBlob,domain,uploadPage);
-      BLP.addLog({domain,status:'success',url:uploadPage,keyword:kw,note:'PDF generated — manual upload'});
-      blpTerm.add('  📄 '+domain+': PDF generated — download panel shown','warn'); blpOk++;
-    }
-
-    // TIER 1: Batch REST-capable sites via Vercel gb-post (parallel, fast)
-    if(vercelEnabled()){
-      const restSites=nonPdfSites.filter(d=>BLP_REST_CAPABLE.includes(d));
-      const localSites=nonPdfSites.filter(d=>!BLP_REST_CAPABLE.includes(d));
-
-      if(restSites.length){
-        blpTerm.add('  ↳ Batching '+restSites.length+' REST sites via Vercel ['+kw+']...','info');
-        let batchFallback=[];
-        try{
-          let batchBody;
-          if(hasGroq){
-            try{
-              const sys='You are an SEO content writer. Output ONLY the requested content, no preamble.';
-              const usr='Write a 300-word informational article about "'+kw+'". Include this link naturally: '+effectiveMoneyUrl+'. Plain markdown, no code blocks.';
-              batchBody=await groqComplete(sys,usr,{max_tokens:600,temperature:0.7});
-            }catch(e){ batchBody=null; }
-          }
-          if(!batchBody) batchBody=blpGenerateLocalContent({t:'paste',u:''},kw,effectiveMoneyUrl);
-          // Route each site's content correctly (plain for paste, markdown for article)
-          const sitePayloads=restSites.map(d=>{
-            const dtype=resolveDeliveryType(d);
-            const body=dtype==='plain'?_stripMarkdown(_stripHtml(batchBody)):batchBody;
-            return{url:'https://'+d,credentials:{},method:'auto',content:{title:kw+' — Resource Guide',body,tags:kw}};
-          });
-          const gbContent={title:kw+' — Resource Guide',body:batchBody,tags:kw};
-          const gbResp=await fetch(vercelUrl()+'/api/gb-post',{method:'POST',headers:vercelHeaders(),
-            body:JSON.stringify({sites:sitePayloads,content:gbContent,options:{concurrency:5,timeout:35000}})});
-
-          if(gbResp.ok){
-            const gbData=await gbResp.json();
-            for(const r of (gbData.results||[])){
-              let rDomain=r.url; try{rDomain=new URL(r.url).hostname.replace(/^www\./,'');}catch(e){}
-              if(r.ok){
-                BLP.addLog({domain:rDomain,status:'success',url:r.resultUrl||r.url,keyword:kw});
-                blpTerm.add('  ✓ '+rDomain+': '+(r.resultUrl||'submitted')+' [Vercel]','info'); blpOk++;
-              } else {
-                batchFallback.push(rDomain);
-                blpTerm.add('  ↻ '+rDomain+': Vercel failed ('+r.error+') — retrying locally','warn');
-              }
-            }
-          } else {
-            blpTerm.add('  ⚠ Vercel batch returned '+gbResp.status+' — falling back to local for all REST sites','warn');
-            batchFallback.push(...restSites);
-          }
-        }catch(e){
-          blpTerm.add('  ⚠ Vercel batch error: '+e.message+' — falling back locally','warn');
-          batchFallback.push(...restSites);
-        }
-        localSites.push(...batchFallback);
+    for(const pid of _blastSelectedBLPPlatforms){
+      const p=getPlatform(pid);
+      // Determine account: use connected account if available, else anon for no-auth sites
+      let account=S.accounts.find(a=>a.platform===pid);
+      if(!account && NOAUTH_PIDS.has(pid)){
+        account={...ANON_ACCOUNT,platform:pid};
+      }
+      if(!account){
+        term.add('  ⚠ '+p.name+': not connected — skipping (add account in Setup)','warn');
+        blpDone++; continue;
       }
 
-      // TIER 2: Local submission for non-REST or Vercel-failed sites
-      for(const domain of localSites){
-        const site=BLP_SITES.find(s=>s.u===domain); if(!site) continue;
-        blpTerm.add('  → '+domain+' ['+kw+']...','info');
-        let submitted=false;
-        for(let attempt=1;attempt<=2;attempt++){
-          try{
-            if(attempt>1){ blpTerm.add('    ↻ retry '+attempt+'/2...','warn'); await sleep(1500); }
-            const result=await blpSubmitSite(site,kw,effectiveMoneyUrl);
-            BLP.addLog({domain,status:'success',url:result.url,keyword:kw,manual:result.manual});
-            if(result.url){ blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [fallback]':''),'info'); }
-            else { blpTerm.add('  📝 '+domain+': content ready (manual paste)','warn'); }
-            blpOk++; submitted=true; break;
-          }catch(e){
-            if(attempt===2){ BLP.addLog({domain,status:'error',error:e.message,keyword:kw}); blpTerm.add('  ✗ '+domain+': '+e.message,'error'); blpFail++; }
-          }
+      term.add('  → '+p.icon+' '+p.name+'...','info');
+      let url=''; let success=false;
+      try{
+        url=await runSingleCampaignWithRetry(pid,kw,account,account.extra||prefix,ki,{add:(m,t)=>term.add('    '+m,t)},2,prefix);
+        if(url && url.length>5 && url.startsWith('http')){
+          term.add('  ✓ '+p.name+': '+url,'info');
+          success=true; blpOk++;
+        } else {
+          term.add('  ⚠ '+p.name+': posted but no URL returned','warn');
+          blpOk++;
         }
-        if(submitted) await sleep(600);
+        liveUrls.push({url:url||'#posted',keyword:kw,platform:pid});
+        const result={id:uid(),platform:pid,keyword:kw,repo:slug(prefix+'-'+kw),url,status:success?'success':'warn',ts:ts()};
+        S.campaigns=S.campaigns.filter(c=>!(c.platform===pid&&c.keyword===kw));
+        S.campaigns.push(result); saveState();
+        urlsEl.innerHTML='<div class="card slide-in"><div class="card-title">🚀 Live URLs — '+liveUrls.length+' total</div>'+liveUrls.slice(-10).map(u=>urlBannerHTML(u.url,u.keyword,u.platform)).join('')+'</div>';
+      }catch(e){
+        const errMsg=e.message||String(e);
+        term.add('  ✗ '+p.name+': '+errMsg,'error');
+        blpFail++;
+        S.campaigns.push({id:uid(),platform:pid,keyword:kw,repo:slug(prefix+'-'+kw),url:'',status:'error',ts:ts(),error:errMsg}); saveState();
       }
-
-    } else {
-      // No Vercel — run all non-PDF sites locally with retry
-      for(const domain of nonPdfSites){
-        const site=BLP_SITES.find(s=>s.u===domain); if(!site) continue;
-        blpTerm.add('  → '+domain+' ['+kw+']...','info');
-        let submitted=false;
-        for(let attempt=1;attempt<=2;attempt++){
-          try{
-            if(attempt>1){ blpTerm.add('    ↻ retry '+attempt+'/2...','warn'); await sleep(2000); }
-            const result=await blpSubmitSite(site,kw,moneyUrl||kw);
-            BLP.addLog({domain,status:'success',url:result.url,keyword:kw,manual:result.manual});
-            if(result.url){ blpTerm.add('  ✓ '+domain+': '+result.url+(result.fallback?' [fallback]':''),'info'); }
-            else { blpTerm.add('  📝 '+domain+': content ready (manual paste)','warn'); }
-            blpOk++; submitted=true; break;
-          }catch(e){
-            if(attempt===2){ BLP.addLog({domain,status:'error',error:e.message,keyword:kw}); blpTerm.add('  ✗ '+domain+': '+e.message,'error'); blpFail++; }
-          }
-        }
-        if(submitted) await sleep(900);
-      }
+      blpDone++;
+      if(blpDone<blpTotal) await sleep(delay*1000);
     }
   }
 
-  const blpTotal=blpOk+blpFail;
-  blpTerm.add('','info');
-  blpTerm.add('🔗 BLP BLAST COMPLETE: '+blpOk+'/'+blpTotal+' submitted'+(blpFail?' | '+blpFail+' failed':''),'info');
-  if(blpFail>0) blpTerm.add('  💡 Tip: Configure Vercel backend in Settings for higher BLP success rates','warn');
+  term.add('','info');
+  term.add('🔗 BLP BLAST COMPLETE: '+blpOk+'/'+(blpOk+blpFail)+' succeeded'+(blpFail?' | '+blpFail+' failed':''),'info');
+  if(blpFail>0) term.add('  💡 Failed sites: reconnect credentials in Setup or check Settings → Vercel for proxy reliability','warn');
+  updateHeader(); updatePlatformBar();
 }
 
 // ─── CONTENT STUDIO ──────────────────────────────────────────

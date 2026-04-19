@@ -13,7 +13,7 @@
  */
 
 import { requireAuth, cors, jsonErr } from '../lib/auth.js';
-import { getProfile, formatContent } from '../lib/site-profiles.js';
+import { getProfile, formatContent, isPdfPlatform } from '../lib/site-profiles.js';
 import { chromium } from 'playwright-core';
 import chromiumPkg from '@sparticuz/chromium';
 
@@ -88,13 +88,34 @@ export default async (req, res) => {
 async function processSite(site, content, options, timeout) {
   const { url, credentials = {}, method = 'auto' } = site;
 
+  // Per-site content override from frontend (routing engine sends per-site content)
+  const effectiveContent = site.content || content;
+
+  // PDF platforms cannot receive content via API — return manual signal immediately
+  if (isPdfPlatform(url)) {
+    const uploadPage = {
+      'scribd.com': 'https://www.scribd.com/upload-document',
+      'issuu.com': 'https://issuu.com/home/publish',
+      'slideshare.net': 'https://www.slideshare.net/upload',
+      'academia.edu': 'https://www.academia.edu/upload',
+      'archive.org': 'https://archive.org/upload/',
+    }[new URL(url).hostname.replace(/^www\./, '')] || url;
+    return {
+      ok: true,
+      method: 'manual_pdf',
+      resultUrl: uploadPage,
+      manual: true,
+      note: 'PDF platform — download the PDF from the frontend and upload manually to ' + uploadPage,
+    };
+  }
+
   // Determine strategy: REST API or Playwright
   const strategy = resolveStrategy(url, method, credentials);
 
   if (strategy === 'rest_api') {
-    return restApiPost(url, credentials, content, options, timeout);
+    return restApiPost(url, credentials, effectiveContent, options, timeout);
   } else {
-    return playwrightPost(url, credentials, content, options, timeout);
+    return playwrightPost(url, credentials, effectiveContent, options, timeout);
   }
 }
 
@@ -262,13 +283,24 @@ async function playwrightPost(url, credentials, content, options, timeout, fallb
 
 // ─── REST API HANDLERS (inline, fast path) ────────────────────────────────────
 
+// Strip markdown/HTML to pure plain text for paste site REST calls
+function _plainText(body) {
+  return (body || '')
+    .replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n\n').replace(/<[^>]+>/g, '')
+    .replace(/^#{1,6}\s+/gm, '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*(.+?)\*/g, '$1')
+    .replace(/`(.+?)`/g, '$1').replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+    .replace(/^[-*+]\s+/gm, '').replace(/^\d+\.\s+/gm, '').replace(/^>\s+/gm, '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, '\n\n').trim();
+}
+
 const REST_HANDLERS = {
 
   'pastebin.com': async (url, creds, content) => {
     const params = new URLSearchParams({
       api_dev_key: creds.token || creds.api_key,
       api_option: 'paste',
-      api_paste_code: content.body || '',
+      api_paste_code: _plainText(content.body) || '',
       api_paste_name: content.title || '',
       api_paste_expire_date: 'N',
       api_paste_private: '0',
@@ -373,7 +405,7 @@ const REST_HANDLERS = {
     const r = await fetch('https://dpaste.com/api/v2/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
-      body: new URLSearchParams({ content: content.body || ' ', title: content.title || '', syntax: 'text', expiry_days: '365' }).toString(),
+      body: new URLSearchParams({ content: _plainText(content.body) || ' ', title: content.title || '', syntax: 'text', expiry_days: '365' }).toString(),
       redirect: 'manual',
     });
     // dpaste returns 302 to the new paste URL
@@ -390,7 +422,7 @@ const REST_HANDLERS = {
     const r = await fetch('https://controlc.com/index.php?act=submit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://controlc.com', 'User-Agent': 'Mozilla/5.0' },
-      body: new URLSearchParams({ 'subdomain-name': '', 'paste_data': content.body || ' ', 'private': '0' }).toString(),
+      body: new URLSearchParams({ 'subdomain-name': '', 'paste_data': _plainText(content.body) || ' ', 'private': '0' }).toString(),
     });
     const html = await r.text().catch(() => '');
     // After successful submit, the response contains the paste URL
@@ -426,7 +458,7 @@ const REST_HANDLERS = {
         'X-CSRFToken': csrf,
         'Cookie': cookieHeader,
       },
-      body: new URLSearchParams({ csrfmiddlewaretoken: csrf, text: content.body || ' ', edit_code: '' }).toString(),
+      body: new URLSearchParams({ csrfmiddlewaretoken: csrf, text: _plainText(content.body) || ' ', edit_code: '' }).toString(),
     });
     const text = await r.text();
     let data;
@@ -449,7 +481,7 @@ const REST_HANDLERS = {
         const r = await fetch(ep.api, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain', 'User-Agent': 'Mozilla/5.0' },
-          body: content.body || ' ',
+          body: _plainText(content.body) || ' ',
         });
         if (!r.ok) continue;
         const data = await r.json();
@@ -480,7 +512,7 @@ const REST_HANDLERS = {
     const r = await fetch('https://pastelink.net/api/paste', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: content.body || '', unique_key: '', password: '' }),
+      body: JSON.stringify({ content: _plainText(content.body) || '', unique_key: '', password: '' }),
     });
     if (r.ok) {
       const data = await r.json().catch(() => ({}));
@@ -490,7 +522,7 @@ const REST_HANDLERS = {
     const r2 = await fetch('https://pastelink.net/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://pastelink.net/' },
-      body: new URLSearchParams({ paste_data: content.body || '', paste_title: content.title || '', paste_expire: '1m', paste_type: 'text' }).toString(),
+      body: new URLSearchParams({ paste_data: _plainText(content.body) || '', paste_title: content.title || '', paste_expire: '1m', paste_type: 'text' }).toString(),
       redirect: 'manual',
     });
     const loc = r2.headers.get('location') || '';
@@ -534,7 +566,7 @@ const REST_HANDLERS = {
       },
       body: new URLSearchParams({
         csrfmiddlewaretoken: csrf,
-        source: content.body || ' ',
+        source: _plainText(content.body) || ' ',
         lang: '116',  // Plain Text
         input: '',
         private: 'on',
@@ -1112,24 +1144,10 @@ const REST_HANDLERS = {
 
   // ── SCRIBD.COM ── upload via REST (requires upload flow)
   'scribd.com': async (url, creds, content) => {
-    const token = creds.token;
-    if (!token) throw new Error('scribd.com: session token required (cookie value)');
-    // Scribd uses a multipart upload; create a minimal text file and upload
-    const textBlob = content.body || '';
-    const formData = new FormData();
-    formData.append('session_key', token);
-    formData.append('title', content.title || 'Document');
-    formData.append('description', (content.body || '').substring(0, 500));
-    formData.append('file', new Blob([textBlob], { type: 'text/plain' }), 'document.txt');
-    const r = await fetch('https://api.scribd.com/api?method=docs.upload&api_key=' + (creds.api_key || ''), {
-      method: 'POST',
-      headers: { Authorization: `Basic ${btoa(token + ':')}` },
-      body: formData,
-    });
-    const text = await r.text();
-    const idMatch = text.match(/<doc_id>(\d+)<\/doc_id>/);
-    if (idMatch) return { resultUrl: `https://www.scribd.com/document/${idMatch[1]}` };
-    throw new Error(`scribd.com: upload failed`);
+    // Scribd requires a real PDF file upload — cannot be done via REST without a file blob.
+    // The frontend generates a PDF and shows a download panel for manual upload.
+    return { resultUrl: 'https://www.scribd.com/upload-document', manual: true,
+      note: 'Scribd requires PDF file upload. Download from the frontend PDF panel and upload at scribd.com/upload-document' };
   },
 
   // ── ISSUU.COM ── Issuu API v2
@@ -1141,7 +1159,7 @@ const REST_HANDLERS = {
     const r = await fetch('https://api.issuu.com/v2/drafts', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: content.title || 'Document', description: (content.body || '').substring(0, 500), access: 'PUBLIC' }),
+      body: JSON.stringify({ title: content.title || 'Document', description: _plainText(content.body).substring(0, 500), access: 'PUBLIC' }),
     });
     if (r.ok) {
       const data = await r.json().catch(() => ({}));
@@ -1152,7 +1170,10 @@ const REST_HANDLERS = {
 
   // ── SLIDESHARE.NET ── SlideShare upload API
   'slideshare.net': async (url, creds, content) => {
-    // SlideShare requires actual file upload; use their legacy API
+    // SlideShare requires a real file upload (PDF/PPT) — cannot be done via REST without a file blob.
+    return { resultUrl: 'https://www.slideshare.net/upload', manual: true,
+      note: 'SlideShare requires PDF/PPT file upload. Download from the frontend PDF panel and upload at slideshare.net/upload' };
+    // Legacy API kept below for reference but unreachable:
     const apiKey = creds.api_key || creds.token;
     const secret = creds.secret;
     if (!apiKey) throw new Error('slideshare.net: API key required');

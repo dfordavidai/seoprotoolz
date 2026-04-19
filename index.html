@@ -2048,7 +2048,7 @@ class NetlifyAPI {
     if(d1.required&&d1.required.length>0){
       const r2=await smartFetch(`${this.base}/deploys/${d1.id}/files/index.html`,{method:'PUT',
         headers:{'Authorization':`Bearer ${this.token}`,'Content-Type':'application/octet-stream'},
-        body:new Blob([htmlContent])});
+        body:htmlContent});
       if(!r2.ok){ const t=await r2.text(); throw new Error('File upload failed: '+r2.status); }
     }
     return d1;
@@ -2099,16 +2099,11 @@ class VercelAPI {
   }
   getUser(){ return this.req('GET','/v2/user'); }
   async createDeployment(name,htmlContent){
-    // Compute SHA1 for Vercel file manifest
-    const encoder=new TextEncoder();
-    const data=encoder.encode(htmlContent);
-    const hashBuf=await crypto.subtle.digest('SHA-1',data);
-    const sha1=Array.from(new Uint8Array(hashBuf)).map(b=>b.toString(16).padStart(2,'0')).join('');
     const bytes2=new TextEncoder().encode(htmlContent);
     const encoded=btoa(Array.from(bytes2).map(b=>String.fromCharCode(b)).join(''));
     return this.req('POST','/v13/deployments',{
       name:slug(name),
-      files:[{file:'index.html',data:encoded,encoding:'base64',sha:sha1}],
+      files:[{file:'index.html',data:encoded,encoding:'base64'}],
       projectSettings:{framework:null},
       target:'production'
     });
@@ -5876,10 +5871,10 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
 
   if(pid==='bitbin'){
     const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','bitbin.it').body));
-    // Bitbin API: POST form data, returns JSON {data:{hash:"..."}}
-    const r=await pasteProxyFetch('https://bitbin.it/api/',{method:'POST',
-      contentType:'application/x-www-form-urlencoded',
-      body:new URLSearchParams({content,language:'text',expire:'never'}).toString()});
+    // Bitbin API v2: POST JSON, returns {data:{hash:"..."}}
+    const r=await pasteProxyFetch('https://bitbin.it/api/v2/paste',{method:'POST',
+      contentType:'application/json',asJson:true,
+      body:JSON.stringify({content,language:'text',expiration:'-1'})});
     if(!r.ok&&!r.text) throw new Error('Bitbin: '+(r.error||'request failed'));
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
     // Response: {data:{hash}} or {hash} or {id} or {slug}
@@ -5887,29 +5882,30 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
     if(path) return 'https://bitbin.it/'+path+'/';
     // Fallback: check if finalUrl is the paste URL (redirect after submit)
     if(r.finalUrl && r.finalUrl.includes('bitbin.it/') && !r.finalUrl.endsWith('/api/')) return r.finalUrl;
-    throw new Error('Bitbin: no paste ID in response — '+r.text.slice(0,120));
+    throw new Error('Bitbin: no paste ID in response — '+( (r.text||'').slice(0,120) ));
   }
 
   if(pid==='pastelink'){
     const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','pastelink.net').body));
     const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
-    // Pastelink.net — POST form to root, redirects to /SLUG page
-    const r=await pasteProxyFetch('https://pastelink.net/',{method:'POST',
+    // Pastelink.net — JSON API (primary, avoids Cloudflare on form endpoint)
+    const r=await pasteProxyFetch('https://pastelink.net/api/paste',{method:'POST',
+      contentType:'application/json',asJson:true,
+      body:JSON.stringify({content,unique_key:'',password:''})});
+    let d={}; try{d=JSON.parse(r.text);}catch(e){}
+    if(d.unique_key) return 'https://pastelink.net/'+d.unique_key;
+    // Fallback: form POST
+    const r2=await pasteProxyFetch('https://pastelink.net/',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
       body:new URLSearchParams({paste_title:title,paste_data:content,paste_expire:'0'}).toString()});
-    // After redirect, finalUrl should be the paste URL
-    if(r.finalUrl && r.finalUrl.match(/pastelink\.net\/[a-zA-Z0-9_-]+$/)){
-      return r.finalUrl;
-    }
-    // Try JSON API as fallback
-    let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    const pasteId=d.paste_key||d.id||d.link||d.slug||d.handle;
+    if(r2.finalUrl && r2.finalUrl.match(/pastelink\.net\/[a-zA-Z0-9_-]+$/)) return r2.finalUrl;
+    let d2={}; try{d2=JSON.parse(r2.text);}catch(e){}
+    const pasteId=d2.paste_key||d2.id||d2.link||d2.slug||d2.handle;
     if(pasteId) return 'https://pastelink.net/'+pasteId;
-    // Extract from HTML
-    const m=(r.text||'').match(/pastelink\.net\/([a-zA-Z0-9_-]{3,})/);
+    const m=(r2.text||'').match(/pastelink\.net\/([a-zA-Z0-9_-]{3,})/);
     if(m && !m[1].startsWith('api')) return 'https://pastelink.net/'+m[1];
-    if(r.finalUrl && r.finalUrl.includes('pastelink.net/')) return r.finalUrl;
-    throw new Error('Pastelink: '+(r.error||r.text.slice(0,100)));
+    if(r2.finalUrl && r2.finalUrl.includes('pastelink.net/')) return r2.finalUrl;
+    throw new Error('Pastelink: '+(r2.error||( (r2.text||'').slice(0,100) )));
   }
 
   if(pid==='ideone'){
@@ -5926,15 +5922,15 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
     const link=(d.result&&d.result.link)||d.link||d.id;
     if(link) return 'https://ideone.com/'+link;
     // Fallback: onlinegdb as alternative code paste
-    throw new Error('Ideone: '+(d.error||r.text.slice(0,100)));
+    throw new Error('Ideone: '+(d.error||( (r.text||'').slice(0,100) )));
   }
 
   if(pid==='controlc'){
     const content=_stripMarkdown(_stripHtml(getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'anon','controlc.com').body));
     const title=getEffectiveContent(kw,getActiveBacklinks(),idx,S.keywords,'','').title;
-    const r=await pasteProxyFetch('https://controlc.com/index.php',{method:'POST',
+    const r=await pasteProxyFetch('https://controlc.com/index.php?act=submit',{method:'POST',
       contentType:'application/x-www-form-urlencoded',
-      body:new URLSearchParams({paste_data:content,paste_title:title,expire:'0',submit:'Submit'}).toString()});
+      body:new URLSearchParams({'subdomain-name':'',paste_data:content,paste_title:title,expire:'0',private:'0'}).toString()});
     // Check finalUrl first (redirect followed by proxy gives the paste URL directly)
     if(r.finalUrl && r.finalUrl.match(/controlc\.com\/[a-f0-9]+/i)){
       return r.finalUrl.replace(/\/+$/,'')+'/';
@@ -5946,7 +5942,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
     // Check if we got html of the paste page (redirect followed)
     const m2=(r.text||'').match(/href=["']https?:\/\/controlc\.com\/([a-f0-9]{4,})/i);
     if(m2) return 'https://controlc.com/'+m2[1];
-    throw new Error('ControlC: could not extract paste URL — '+(r.error||r.text.slice(0,80)));
+    throw new Error('ControlC: could not extract paste URL — '+(r.error||( (r.text||'').slice(0,80) )));
   }
 
   if(pid==='rentry'){
@@ -5966,7 +5962,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
       extraCookies: sessionCookie,
       body:new URLSearchParams({csrfmiddlewaretoken:csrf,text:content,edit_code:editCode}).toString()});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(d.status!=='200'&&d.status!==200) throw new Error('Rentry: '+r.text.slice(0,120));
+    if(d.status!=='200'&&d.status!==200) throw new Error('Rentry: '+( (r.text||'').slice(0,120) ));
     return d.url||'https://rentry.co/'+(d.url_slug||'');
   }
 
@@ -5988,7 +5984,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
       extraCookies: sessionCookie2,
       body:new URLSearchParams({csrfmiddlewaretoken:csrf2,text:content,edit_code:editCode}).toString()});
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
-    if(d.status!=='200'&&d.status!==200) throw new Error('Rentry.org: '+r.text.slice(0,120));
+    if(d.status!=='200'&&d.status!==200) throw new Error('Rentry.org: '+( (r.text||'').slice(0,120) ));
     return d.url||'https://rentry.org/'+(d.url_slug||'');
   }
 
@@ -6036,7 +6032,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
       body:new URLSearchParams({content,syntax:'text',expiry_days:'365',title:kw}).toString()});
     const url2=(r2.text||'').trim().replace(/^"|"$/g,'').replace(/\/+$/,'');
     if(url2.startsWith('http')) return url2;
-    throw new Error('dpaste: '+(r.error||r.text.slice(0,80)));
+    throw new Error('dpaste: '+(r.error||( (r.text||'').slice(0,80) )));
   }
 
   if(pid==='hastebin'){
@@ -6052,7 +6048,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
       contentType:'text/plain',body:content});
     let d2={}; try{d2=JSON.parse(r2.text);}catch(e){}
     if(d2.key) return 'https://www.toptal.com/developers/hastebin/'+d2.key;
-    throw new Error('Hastebin: '+(r.error||r.text.slice(0,80)));
+    throw new Error('Hastebin: '+(r.error||( (r.text||'').slice(0,80) )));
   }
 
   if(pid==='writeas'){
@@ -6068,7 +6064,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
     const id = postData.id || postData.slug;
     if(id) return 'https://write.as/'+id;
     if(r.finalUrl && r.finalUrl.includes('write.as/')) return r.finalUrl;
-    throw new Error('Write.as: '+(r.error||r.text.slice(0,100)));
+    throw new Error('Write.as: '+(r.error||( (r.text||'').slice(0,100) )));
   }
 
   if(pid==='pastee'){
@@ -6096,7 +6092,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
       body:JSON.stringify({key:'public',description:title,sections:[{name:kw,syntax:'text',contents:content}]})});
     let d2={}; try{d2=JSON.parse(r2.text);}catch(e){}
     if(d2.id||d2.link) return d2.link||'https://paste.ee/p/'+d2.id;
-    throw new Error('Paste.ee: '+(r.error||r.text.slice(0,100)));
+    throw new Error('Paste.ee: '+(r.error||( (r.text||'').slice(0,100) )));
   }
 
   if(pid==='justpaste'){
@@ -6148,7 +6144,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
     // Try JSON response format
     let d={}; try{d=JSON.parse(r.text);}catch(e){}
     if(d.paste_id||d.id) return 'https://0bin.net/paste/'+(d.paste_id||d.id);
-    throw new Error('0bin.net: '+(r.error||r.text.slice(0,80)));
+    throw new Error('0bin.net: '+(r.error||( (r.text||'').slice(0,80) )));
   }
 
   if(pid==='ghgist'){
@@ -6194,7 +6190,7 @@ async function runSingleCampaign(pid, kw, account, extraVal, idx, term, blastPre
     if(d.publishLink) return d.publishLink;
     if(d.id) return 'https://hackmd.io/'+d.id;
     if(d.shortId) return 'https://hackmd.io/'+d.shortId;
-    throw new Error('HackMD: '+(r.error||r.text.slice(0,100)));
+    throw new Error('HackMD: '+(r.error||( (r.text||'').slice(0,100) )));
   }
 
   // ── FORM-LOGIN PLATFORMS ───────────────────────────────────────

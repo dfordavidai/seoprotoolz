@@ -49,6 +49,18 @@
     "api/supabase.js": {
       "maxDuration": 30,
       "memory": 256
+    },
+    "api/social-blast.js": {
+      "maxDuration": 60,
+      "memory": 512
+    },
+    "api/social-blast-queue.js": {
+      "maxDuration": 60,
+      "memory": 256
+    },
+    "api/social-blast-accounts.js": {
+      "maxDuration": 120,
+      "memory": 512
     }
   },
   "routes": [

@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -863,6 +862,7 @@ tr:hover td{background:#c8d8f0}
 /* ── BACKLINK MONITOR ── */
 .bl-status-live{color:var(--win-green);font-weight:700;font-family:'Share Tech Mono',monospace;font-size:10px}
 .bl-status-dead{color:var(--win-red);font-weight:700;font-family:'Share Tech Mono',monospace;font-size:10px}
+.bl-status-checking{color:var(--term-warn);font-weight:700;font-family:'Share Tech Mono',monospace;font-size:10px}
 .bl-status-changed{color:var(--win-yellow);font-weight:700;font-family:'Share Tech Mono',monospace;font-size:10px}
 .bl-status-unknown{color:var(--win-border);font-weight:700;font-family:'Share Tech Mono',monospace;font-size:10px}
 
@@ -21307,7 +21307,14 @@ function rtExportCSV(){
 const BLM = { items:[], running:false };
 
 function renderBacklinkMonitor(el){
-  if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
+  if(!el) return;
+  // Only do full re-render if not already rendered; otherwise just refresh rows+stats
+  if(el.dataset.rendered){
+    const tb=document.getElementById('blm-tbody'); if(tb) tb.innerHTML=blmRenderRows();
+    const st=document.getElementById('blm-stats'); if(st) st.textContent=blmStats();
+    return;
+  }
+  el.dataset.rendered='1';
   el.innerHTML=`
   <div class="page-title">🔍 Backlink Monitor</div>
   <div class="page-sub">// Monitor your live parasite URLs — detect when pages go 404, get de-indexed, or change anchor text</div>
@@ -21351,7 +21358,7 @@ function blmRenderRows(){
   return BLM.items.map((b,i)=>`
     <tr>
       <td><a href="${esc(b.url)}" target="_blank" class="ta mono xs" style="text-decoration:none;max-width:220px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.url.replace('https://','').slice(0,50))}</a></td>
-      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':'? UNKNOWN'}</span></td>
+      <td><span class="bl-status-${b.status||'unknown'}">${b.status==='live'?'✓ LIVE':b.status==='dead'?'✗ DEAD':b.status==='changed'?'⚠ CHANGED':b.status==='checking'?'⟳ CHECKING…':'? UNKNOWN'}</span></td>
       <td class="mono xs" style="color:${b.httpCode>=400?'#cc0000':b.httpCode>=300?'#997700':'#006600'}">${b.httpCode||'—'}</td>
       <td class="mono xs">${esc(b.anchor||'—')}</td>
       <td class="mono xs">${esc(b.platform||'—')}</td>
@@ -21386,30 +21393,61 @@ async function blmCheckAll(){
   BLM.running=true;
   const term=document.getElementById('blm-terminal');
   const prog=document.getElementById('blm-prog');
-  function log(msg,cls='t-info'){ if(term) term.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${msg}</span></div>`; if(term) term.scrollTop=9999; }
+  function log(msg,cls='t-info'){ if(term){ term.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${msg}</span></div>`; term.scrollTop=9999; } }
+  function refreshRows(){ const tb=document.getElementById('blm-tbody'); if(tb) tb.innerHTML=blmRenderRows(); const st=document.getElementById('blm-stats'); if(st) st.textContent=blmStats(); }
   log('Checking '+BLM.items.length+' URLs...');
-  const corsProxy=settingGet('corsProxy')||'https://corsproxy.io/?';
+
+  // Multi-proxy fallback — tries GET (not HEAD) since HEAD is often blocked by proxies
+  async function blmFetchOne(url){
+    const enc=encodeURIComponent(url);
+    const proxies=[
+      `https://api.allorigins.win/get?url=${enc}`,
+      `https://corsproxy.io/?${enc}`,
+      `https://corsproxy.org/?${enc}`,
+      `https://api.codetabs.com/v1/proxy?quest=${enc}`,
+      `https://thingproxy.freeboard.io/fetch/${url}`,
+    ];
+    // Try smartFetch first (uses Vercel backend + proxy cascade internally)
+    try{
+      const r=await smartFetch(url,{method:'GET',sfTimeout:12000});
+      return {ok:r.ok, status:r.status};
+    }catch(e1){}
+    // Fallback: try each proxy with raw fetch
+    for(const p of proxies){
+      try{
+        const r=await fetch(p,{signal:AbortSignal.timeout(10000)});
+        if(r.ok||r.status<500) return {ok:r.ok||r.status<400, status:r.status};
+      }catch(e){}
+    }
+    throw new Error('all_failed');
+  }
+
   for(let i=0;i<BLM.items.length;i++){
     const b=BLM.items[i];
     if(prog) prog.style.width=((i+1)/BLM.items.length*100)+'%';
-    try {
-      const res=await fetch(corsProxy+encodeURIComponent(b.url),{method:'HEAD'});
-      b.httpCode=res.status;
-      b.status=res.ok?'live':res.status>=400?'dead':'changed';
+    b.status='checking'; refreshRows();
+    try{
+      const {ok,status}=await blmFetchOne(b.url);
+      b.httpCode=status;
+      b.status=ok?'live':status>=400?'dead':'changed';
       b.lastChecked=ts();
-      log(`  ${b.url.slice(0,50)} → ${res.status} ${b.status}`,b.status==='live'?'t-success':'t-error');
-    } catch(e){
+      log(`${b.url.slice(0,55)} → ${status} ${b.status.toUpperCase()}`, b.status==='live'?'t-success':b.status==='changed'?'t-warn':'t-error');
+    }catch(e){
       b.httpCode=0; b.status='dead'; b.lastChecked=ts();
-      log(`  ${b.url.slice(0,50)} → FAILED`,'t-error');
+      log(`${b.url.slice(0,55)} → UNREACHABLE`,'t-error');
     }
-    await sleep(800);
+    refreshRows();
+    if(i<BLM.items.length-1) await sleep(400);
   }
   BLM.running=false;
+  if(prog) prog.style.width='100%';
   const dead=BLM.items.filter(b=>b.status==='dead').length;
+  const live=BLM.items.filter(b=>b.status==='live').length;
+  log(`Done — ${live} live · ${dead} dead`,'t-success');
   if(dead>0) toast(dead+' dead URLs found!','e');
   else toast('All URLs live ✓','s');
   supaAutoSync('backlinks', BLM.items);
-  renderBacklinkMonitor(document.getElementById('page-backlink_monitor'));
+  refreshRows();
 }
 
 function blmExportCSV(){

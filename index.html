@@ -9264,8 +9264,10 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
         lower.includes('comment posted successfully') ||
         lower.includes('thanks for commenting') ||
         lower.includes('your comment has been') ||
-        (commentNameLower.length > 2 && lower.includes(commentNameLower) && lower.includes('comment')) ||
-        (commentTextSnippet.length > 10 && lower.includes(commentTextSnippet));
+        // Name match: only count if it appears near a comment-specific anchor (not just anywhere on page)
+        (commentNameLower.length > 4 && lower.includes(commentNameLower) && lower.includes('#comment-')) ||
+        // Comment text match: first 40 chars must appear verbatim in page (very specific)
+        (commentTextSnippet.length > 15 && lower.includes(commentTextSnippet) && lower.includes('comment'));
 
       if(innerStatus === 302 || innerStatus === 301 || innerRedirected || resp.redirected){
         // Real redirect from wp-comments-post.php — definitive success
@@ -9304,13 +9306,17 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
           return { success:false, moderated:false, msg:`WP Error: ${errMsg.slice(0,150)}` };
         }
         // When Vercel proxy follows the redirect internally, it returns 200 with the full post page.
-        // If we got a large page with no WP error, the comment likely went through.
-        // The post page won't have wp-die or error markers if the comment was accepted.
-        if(isVercelProxy && lower.length > 5000 && !hasWpError){
-          return { success:true, moderated:false, msg:`Comment posted — redirect followed by proxy [vercel-proxy]` };
+        // STRICT: require actual redirect flag AND a concrete comment anchor signal.
+        // "large page + no WP error" alone is NOT enough — it matches any normal page fetch.
+        const hasCommentAnchor = lower.includes('#comment-') || lower.includes('comment-body') || lower.includes('comment-content');
+        if(isVercelProxy && innerRedirected && lower.length > 5000 && !hasWpError){
+          if(hasCommentAnchor || hasSuccessSignal){
+            return { success:true, moderated:false, msg:`Comment posted — redirect followed by proxy [vercel-proxy]` };
+          }
+          // Redirected but no comment visible yet — likely went to moderation
+          return { success:true, moderated:true, msg:`Comment submitted — awaiting moderation [vercel-proxy]` };
         }
-        // Ambiguous 200 — this is a false positive trap. Skip to next proxy.
-        // The proxy likely hit a CDN cache or error page. Don't claim success.
+        // Ambiguous 200 — false positive trap. Skip to next proxy.
         continue;
       }
 
@@ -9459,10 +9465,21 @@ async function bcGenericComment(pageUrl, html, name, email, website, comment, lo
                     || lower.includes('comment submitted') || lower.includes('your comment') || lower.includes('received your')
                     || lower.includes('successfully submitted') || lower.includes('been submitted');
       // ── Error signals to prevent false positives ──
-      const gError = lower.includes('error') || lower.includes('invalid') || lower.includes('failed')
-                  || lower.includes('spam') || lower.includes('blocked') || lower.includes('wp-die');
+      // IMPORTANT: 'error' alone is far too broad — it matches normal page content, JS, CSS.
+      // Only match patterns that uniquely indicate a submission failure or spam block.
+      const gError = lower.includes('wp-die') || lower.includes('wordpress › error')
+                  || lower.includes('<title>error</title>') || lower.includes('comment is not allowed')
+                  || lower.includes('spam detected') || lower.includes('blocked by')
+                  || lower.includes('you are posting too quickly') || lower.includes('comment_flood')
+                  || lower.includes('you must be logged in to post') || lower.includes('invalid nonce')
+                  || (lower.includes('invalid') && lower.length < 3000)
+                  || (lower.includes('failed') && lower.length < 3000);
 
       if(gInnerStatus === 201 || gInnerStatus === 302 || gInnerStatus === 301 || gInnerRedirected || resp.redirected){
+        if(gError){
+          logFn(`   ⚠ Generic: redirect/201 but error signal present via [${proxyLabel}] — trying next proxy`,'warn');
+          continue;
+        }
         if(gModerated){
           logFn(`   ⏳ Generic form: pending moderation via [${proxyLabel}]`,'success');
           return { success:true, moderated:true, msg:`Submitted — pending moderation (HTTP ${gInnerStatus}) via ${proxyLabel}` };
@@ -10001,7 +10018,36 @@ async function bcCommentOnSite(site, name, email, website, comment, logFn){
       }
     }
   } else {
-    logFn(`   ⚠ Page fetch failed (${pageResult.status||pageResult.error||'network error'})`,'warn');
+    const failStatus = pageResult.status || pageResult.error || 'network error';
+    logFn(`   ⚠ Page fetch failed (${failStatus}) — retrying with alternate proxy...`,'warn');
+    // Retry with allorigins which handles many 403 sites by stripping referrer headers
+    const altProxies = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+      `https://thingproxy.freeboard.io/fetch/${url}`,
+    ];
+    for(const altUrl of altProxies){
+      try{
+        const altResp = await Promise.race([
+          fetch(altUrl),
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),14000))
+        ]);
+        let altText = '';
+        if(altUrl.includes('allorigins.win/get')){
+          try{ const d=await altResp.json(); altText=d.contents||''; }catch(e){}
+        } else {
+          altText = await altResp.text().catch(()=>'');
+        }
+        if(altText.length > 200){
+          html = altText; fetchOk = true;
+          logFn(`   ✓ Page fetched via alternate proxy (${(html.length/1024).toFixed(1)} KB)`,'success');
+          if(!isWordPress && (html.includes('wp-content')||html.includes('wp-includes')||html.includes('/wp-json/')))
+            isWordPress = true;
+          break;
+        }
+      }catch(e){ continue; }
+    }
+    if(!fetchOk) logFn(`   ✗ All page fetch attempts failed — proceeding with blind POST`,'warn');
   }
 
   // ── STEP 3: Extract post ID ──

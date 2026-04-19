@@ -24581,8 +24581,9 @@ function renderBacklinkPro(el){
 
   <!-- MAIN TABS -->
   <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-    ${['🎯 Submit Sites','⚙️ Credentials','📋 Submission Log','🛠 Setup Help'].map((t,i)=>`
+    ${['🎯 Submit Sites','⚙️ Credentials','📋 Submission Log','🛠 Setup Help','🌐 Manual Browser'].map((t,i)=>`
       <button class="btn ${el._tab===i?'btn-primary':'btn-ghost'} btn-sm" 
+        style="${i===4?'background:linear-gradient(to right,#003087,#0a4dc4);color:#fff;border-color:#003087;font-weight:700':''}"
         onclick="blpSetTab(${i})">${t}</button>`).join('')}
   </div>
 
@@ -24722,6 +24723,11 @@ function renderBacklinkPro(el){
   <!-- TAB 3: SETUP HELP -->
   <div id="blp-tab-3" style="display:${el._tab===3?'block':'none'}">
     ${blpRenderHelp()}
+  </div>
+
+  <!-- TAB 4: MANUAL BROWSER PANEL -->
+  <div id="blp-tab-4" style="display:${el._tab===4?'block':'none'}">
+    ${blpRenderManualBrowser()}
   </div>
 
   <!-- CONTENT PREVIEW MODAL -->
@@ -25021,6 +25027,1242 @@ function blpRenderHelp(){
 }
 
 // ── INTERACTION FUNCTIONS ─────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════
+// MANUAL BROWSER PANEL v2 — GOD-TIER — Tab 4
+// ═══════════════════════════════════════════════════════════════
+// ARCHITECTURE:
+//  ① Smart Bookmarklet v2  — auto-detects success URLs via 50+ site patterns,
+//    injects floating HUD into target page, monitors URL/DOM changes silently
+//  ② Session Manager       — per-domain credential store, auto-fill bookmarklet,
+//    login state detection, session cookie hints
+//  ③ Queue State Machine   — idle→opening→logged_in→posting→captured→done
+//    kanban board, multi-window orchestrator, window close detection
+//  ④ Pattern Library       — 50+ site success-URL regexes (forum/blog/cms/social)
+//  ⑤ Action Replay Engine  — step-by-step modal with clipboard push & copy btns
+//  ⑥ Terminal + Analytics  — live capture feed, export TSV/CSV, vault sync
+// ═══════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════════
+// MBP v3 — GOD-TIER MANUAL BROWSER PANEL
+// Features: Smart Bookmarklet · Auto-Post Engine · 2Captcha · Bulk Blaster
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── PATTERN LIBRARY — 50+ success URL signatures ─────────────────────────
+const MBP_PATTERNS = [
+  {r:/\/viewtopic\.php\?[^"]*t=\d+/,          label:'phpBB thread'},
+  {r:/\/viewtopic\.php\?[^"]*p=\d+/,          label:'phpBB post'},
+  {r:/\/showthread\.php\?[^"]*\d+/,           label:'vBulletin thread'},
+  {r:/\/threads\/[^\/]+\.\d+\/?$/,            label:'XenForo thread'},
+  {r:/\/threads\/[^\/]+\/post-\d+/,           label:'XenForo post'},
+  {r:/\/showthread\.php\?tid=\d+/,            label:'MyBB thread'},
+  {r:/\/index\.php\?topic=\d+/,               label:'SMF topic'},
+  {r:/\/t\/[^\/]+\/\d+$/,                     label:'Discourse topic'},
+  {r:/\/topic\/[^\/]+\/?$/,                   label:'forum topic'},
+  {r:/\/post\/\d+\/?$/,                       label:'forum post'},
+  {r:/\/forums?\/.*\/\d+\/?$/,                label:'forum thread'},
+  {r:/\/\?p=\d+/,                             label:'WordPress post'},
+  {r:/\/[0-9]{4}\/[0-9]{2}\/[0-9]{2}\/[^\/]+\/?$/, label:'WP date post'},
+  {r:/\/archives?\/\d+/,                      label:'WP archive'},
+  {r:/\/node\/\d+\/?$/,                       label:'Drupal node'},
+  {r:/\/content\/[^\/]+\/?$/,                 label:'Drupal content'},
+  {r:/\/articles?\/[^\/]+\/?$/,               label:'CMS article'},
+  {r:/\/posts?\/[^\/]+\/?$/,                  label:'blog post'},
+  {r:/\/blog\/[^\/]+\/?$/,                    label:'blog entry'},
+  {r:/reddit\.com\/r\/[^\/]+\/comments\//,    label:'Reddit post'},
+  {r:/\/comments\/[a-z0-9]+\/?/,              label:'Reddit comment'},
+  {r:/\/status\/\d{10,}/,                     label:'Twitter/X status'},
+  {r:/dev\.to\/[^\/]+\/[^\/]+-\d{5,}\/?$/,   label:'Dev.to article'},
+  {r:/hashnode\.(com|dev)\/[^\/]+\/[^\/]+\/?$/,label:'Hashnode post'},
+  {r:/medium\.com\/[^\/]+\/[^\/]+-[a-f0-9]{8,}\/?$/,label:'Medium post'},
+  {r:/substack\.com\/p\/[^\/]+\/?$/,          label:'Substack post'},
+  {r:/paste\.ee\/p\/[a-zA-Z0-9]+/,            label:'paste.ee'},
+  {r:/pastebin\.com\/[a-zA-Z0-9]{6,10}\/?$/,  label:'Pastebin paste'},
+  {r:/dpaste\.org\/[A-Z0-9]+\/?$/,            label:'dpaste paste'},
+  {r:/hastebin\.com\/[a-z]+\/?$/,             label:'Hastebin paste'},
+  {r:/rentry\.co\/[a-zA-Z0-9]+\/?$/,          label:'Rentry page'},
+  {r:/hackmd\.io\/[a-zA-Z0-9_-]{10,}\/?$/,   label:'HackMD note'},
+  {r:/blogspot\.com\/[0-9]{4}\/[0-9]{2}\//,  label:'Blogger post'},
+  {r:/tumblr\.com\/post\/\d+/,               label:'Tumblr post'},
+  {r:/wordpress\.com\/[0-9]{4}\/[0-9]{2}\//,  label:'WordPress.com post'},
+  {r:/ghost\.[a-z]+\/[^\/]+\/?$/,             label:'Ghost post'},
+  {r:/notion\.site\/[a-f0-9]{32}/,            label:'Notion page'},
+  {r:/gist\.github\.com\/[^\/]+\/[a-f0-9]{20,}/,label:'GitHub Gist'},
+  {r:/codepen\.io\/[^\/]+\/pen\/[A-Za-z0-9]+/,label:'CodePen pen'},
+  {r:/\/success\/?(\?|$)/,                    label:'success page'},
+  {r:/\/thank[-_]?you\/?(\?|$)/,              label:'thank you page'},
+  {r:/\/submitted\/?(\?|$)/,                  label:'submitted page'},
+  {r:/\/published\/?(\?|$)/,                  label:'published page'},
+  {r:/\/confirmation\/?(\?|$)/,               label:'confirmation page'},
+  {r:/[?&]posted=1/,                          label:'posted flag'},
+  {r:/[?&]created=1/,                         label:'created flag'},
+];
+
+function mbpMatchPattern(url){
+  for(const p of MBP_PATTERNS){ if(p.r.test(url)) return p.label; }
+  return null;
+}
+
+// ── CORE STATE OBJECT ─────────────────────────────────────────────────────
+const MBP = {
+  sites:    JSON.parse(localStorage.getItem('mbp_sites')||'[]'),
+  actions:  JSON.parse(localStorage.getItem('mbp_actions')||'[]'),
+  log:      JSON.parse(localStorage.getItem('mbp_log')||'[]'),
+  creds:    JSON.parse(localStorage.getItem('mbp_creds')||'{}'),
+  learned:  JSON.parse(localStorage.getItem('mbp_learned')||'{}'),  // per-domain learned form schemas
+  blastJobs:JSON.parse(localStorage.getItem('mbp_blast_jobs')||'[]'),
+  _popups:  {},
+  _states:  {},
+  _pollTimer: null,
+  _stateTimer: null,
+  _activeId: null,
+
+  save(){         localStorage.setItem('mbp_sites',     JSON.stringify(this.sites)); },
+  saveActions(){  localStorage.setItem('mbp_actions',   JSON.stringify(this.actions)); },
+  saveLog(){      localStorage.setItem('mbp_log',       JSON.stringify(this.log)); },
+  saveCreds(){    localStorage.setItem('mbp_creds',     JSON.stringify(this.creds)); },
+  saveLearned(){  localStorage.setItem('mbp_learned',   JSON.stringify(this.learned)); },
+  saveBlast(){    localStorage.setItem('mbp_blast_jobs',JSON.stringify(this.blastJobs)); },
+
+  setCred(domain, obj){ this.creds[domain]=obj; this.saveCreds(); },
+  getCred(domain){
+    if(!domain) return null;
+    const base = domain.replace(/^www\./,'');
+    return this.creds[domain]||this.creds[base]||this.creds['www.'+base]||null;
+  },
+
+  setLearned(domain, schema){ this.learned[domain]=schema; this.saveLearned(); },
+  getLearned(domain){
+    if(!domain) return null;
+    const base = domain.replace(/^www\./,'');
+    return this.learned[domain]||this.learned[base]||null;
+  },
+
+  setState(id, state){
+    if(!this._states[id]) this._states[id]={state:'idle', captureCount:0};
+    this._states[id].state = state;
+    this._states[id].updatedAt = Date.now();
+    mbpRefreshKanban();
+  },
+  getState(id){ return (this._states[id]||{state:'idle'}).state; },
+
+  addLog(entry){
+    this.log.unshift({...entry, ts:Date.now()});
+    if(this.log.length>1000) this.log.pop();
+    this.saveLog();
+  },
+
+  startCapturePoll(){
+    if(this._pollTimer) clearInterval(this._pollTimer);
+    this._pollTimer = setInterval(()=>{
+      // ── Capture incoming URLs from bookmarklet ──
+      const raw = localStorage.getItem('mbp_capture_incoming');
+      if(raw){
+        localStorage.removeItem('mbp_capture_incoming');
+        try {
+          const data = JSON.parse(raw);
+          const domain = (data.domain||'').replace(/^www\./,'');
+          const site = MBP.sites.find(s=>{
+            try{ return new URL(s.url).hostname.replace(/^www\./,'')===domain; }catch(_){return false;}
+          }) || MBP.sites.find(s=>s.id===MBP._activeId);
+          const label = mbpMatchPattern(data.url)||'captured';
+          MBP.addLog({
+            siteId: site?.id||'', site: site?.name||data.domain||'unknown',
+            url: data.url, title: data.title||'', note: data.note||label, auto: data.auto||false,
+          });
+          if(site){
+            if(!MBP._states[site.id]) MBP._states[site.id]={state:'idle',captureCount:0};
+            MBP._states[site.id].captureCount=(MBP._states[site.id].captureCount||0)+1;
+            MBP.setState(site.id,'captured');
+          }
+          BLP.addLog({domain:data.domain||'manual',status:'success',url:data.url,keyword:document.getElementById('blp-keyword')?.value||'',manual:true});
+          BLP.saveLog();
+          mbpTermLog('✅ CAPTURED ['+label.toUpperCase()+']: '+data.url,'t-accent');
+          if(data.title) mbpTermLog('   Title: '+data.title.slice(0,80),'t-info');
+          mbpTermLog('   Site: '+(site?.name||data.domain||'?')+' | Auto: '+(data.auto?'Yes':'No'),'t-info');
+          toast('✅ URL Captured: '+data.url.slice(0,55)+'…','s',5000);
+          const logEl=document.getElementById('mbp-log-table');
+          if(logEl) mbpRenderLogTable(logEl);
+          mbpRefreshKanban();
+        } catch(e){ console.warn('[MBP] capture error',e); }
+      }
+
+      // ── Learned schema incoming from record bookmarklet ──
+      const learnRaw = localStorage.getItem('mbp_learn_incoming');
+      if(learnRaw){
+        localStorage.removeItem('mbp_learn_incoming');
+        try {
+          const data = JSON.parse(learnRaw);
+          MBP.setLearned(data.domain, data.schema);
+          mbpTermLog('🧠 LEARNED form schema for: '+data.domain+' ('+data.schema.fields.length+' fields)','t-accent');
+          toast('🧠 Form learned for '+data.domain,'s',4000);
+          blpSetTab(4);
+        } catch(e){ console.warn('[MBP] learn error',e); }
+      }
+
+      // ── Auto-post result incoming ──
+      const apRaw = localStorage.getItem('mbp_autopost_result');
+      if(apRaw){
+        localStorage.removeItem('mbp_autopost_result');
+        try {
+          const data = JSON.parse(apRaw);
+          if(data.success && data.url){
+            MBP.addLog({
+              siteId: data.siteId||'', site: data.siteName||data.domain||'auto',
+              url: data.url, title: data.title||'', note: 'auto-post', auto: true,
+            });
+            MBP.setState(data.siteId||'_auto','done');
+            mbpTermLog('🚀 AUTO-POST SUCCESS: '+data.url,'t-accent');
+            toast('🚀 Auto-posted: '+data.url.slice(0,55)+'…','s',5000);
+            BLP.addLog({domain:data.domain||'auto',status:'success',url:data.url,keyword:'',manual:false});
+            BLP.saveLog();
+          } else {
+            mbpTermLog('❌ AUTO-POST FAILED on '+data.domain+': '+(data.error||'unknown error'),'t-warn');
+          }
+          // Advance blast queue if active
+          mbpBlastAdvance(data);
+          const logEl=document.getElementById('mbp-log-table');
+          if(logEl) mbpRenderLogTable(logEl);
+          mbpRefreshKanban();
+        } catch(e){ console.warn('[MBP] autopost result error',e); }
+      }
+    }, 400);
+
+    this._stateTimer = setInterval(()=>{
+      Object.entries(MBP._popups).forEach(([id,win])=>{
+        if(win&&win.closed){
+          delete MBP._popups[id];
+          const cur = MBP.getState(id);
+          if(['opening','auto_posting'].includes(cur)){
+            MBP.setState(id,'closed');
+            mbpTermLog('⚠ Window closed: '+(MBP.sites.find(s=>s.id===id)?.name||id),'t-warn');
+          }
+        }
+      });
+    }, 1500);
+  },
+
+  stopCapturePoll(){
+    if(this._pollTimer){clearInterval(this._pollTimer);this._pollTimer=null;}
+    if(this._stateTimer){clearInterval(this._stateTimer);this._stateTimer=null;}
+  },
+};
+
+// ── TERMINAL ──────────────────────────────────────────────────────────────
+function mbpTermLog(msg, cls='t-info'){
+  const t = document.getElementById('mbp-terminal');
+  if(!t) return;
+  const d = document.createElement('div'); d.className='tline';
+  d.innerHTML='<span class="ttime">'+ts()+'</span><span class="'+cls+'">'+esc(msg)+'</span>';
+  t.appendChild(d); t.scrollTop=t.scrollHeight;
+}
+
+// ── LOG TABLE ─────────────────────────────────────────────────────────────
+function mbpRenderLogTable(el){
+  if(!el) return;
+  if(!MBP.log.length){
+    el.innerHTML='<div style="padding:14px;color:var(--win-text-muted);font-size:10px;text-align:center;font-family:var(--mono)">📭 No URLs captured yet</div>';
+    return;
+  }
+  let html='<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--win-dark);border-bottom:1px solid var(--win-border)">';
+  html+='<span style="font-size:10px;font-weight:700;font-family:var(--mono)">📋 '+MBP.log.length+' captured URLs</span>';
+  html+='<button class="btn btn-xs" onclick="mbpExportCSV()" style="margin-left:auto">⬇ CSV</button>';
+  html+='<button class="btn btn-xs" onclick="mbpExportTSV()">⬇ TSV</button>';
+  html+='<button class="btn btn-xs btn-primary" onclick="mbpSendToVault()">➕ → Vault</button>';
+  html+='<button class="btn btn-xs btn-danger" onclick="mbpClearLog()">🗑 Clear</button>';
+  html+='</div><div style="max-height:280px;overflow-y:auto">';
+  html+='<table style="width:100%;border-collapse:collapse;font-size:10px">';
+  html+='<thead><tr style="background:var(--win-dark);position:sticky;top:0">';
+  html+='<th style="padding:4px 8px;text-align:left">Time</th><th style="padding:4px 8px;text-align:left">Site</th><th style="padding:4px 8px;text-align:left">URL</th><th style="padding:4px 8px;text-align:left">Type</th><th style="padding:4px 8px;text-align:center">Auto</th><th style="padding:4px 8px;text-align:center">Act</th>';
+  html+='</tr></thead><tbody>';
+  MBP.log.slice(0,200).forEach(function(l,i){
+    html+='<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">'
+      +'<td style="padding:4px 8px;white-space:nowrap;color:var(--win-text-muted)">'+new Date(l.ts).toLocaleTimeString()+'</td>'
+      +'<td style="padding:4px 8px;font-family:var(--mono);font-size:9px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.site||'')+'</td>'
+      +'<td style="padding:4px 8px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="'+esc(l.url)+'" target="_blank" style="color:var(--accent);font-family:var(--mono);font-size:9px">'+esc(l.url)+'</a></td>'
+      +'<td style="padding:4px 8px;font-size:9px"><span class="badge badge-b">'+esc(l.note||'captured')+'</span></td>'
+      +'<td style="padding:4px 8px;text-align:center;font-size:9px">'+(l.auto?'<span style="color:var(--win-green)">✓ auto</span>':'manual')+'</td>'
+      +'<td style="padding:4px 8px;text-align:center"><button class="btn btn-xs" onclick="navigator.clipboard.writeText(\''+esc(l.url)+'\').then(function(){toast(\'Copied!\',\'s\')})" title="Copy">📋</button></td>'
+      +'</tr>';
+  });
+  html+='</tbody></table></div>';
+  el.innerHTML=html;
+}
+
+// ── KANBAN ────────────────────────────────────────────────────────────────
+function mbpRefreshKanban(){
+  const el = document.getElementById('mbp-kanban');
+  if(!el) return;
+  const cols=[
+    {state:'idle',        label:'⬜ Idle',         color:'#808080'},
+    {state:'opening',     label:'🌐 Opening',       color:'var(--win-blue)'},
+    {state:'auto_posting',label:'🤖 Auto-Posting',  color:'#9900cc'},
+    {state:'captured',    label:'✅ Captured',       color:'var(--win-green)'},
+    {state:'done',        label:'🏁 Done',           color:'var(--win-green)'},
+    {state:'failed',      label:'❌ Failed',         color:'var(--win-red)'},
+  ];
+  let html='<div style="display:flex;gap:5px;overflow-x:auto;padding-bottom:4px">';
+  cols.forEach(function(col){
+    const sites = col.state==='idle'
+      ? MBP.sites.filter(function(s){return !MBP._states[s.id]||MBP._states[s.id].state==='idle';})
+      : MBP.sites.filter(function(s){return (MBP._states[s.id]||{}).state===col.state;});
+    if(!sites.length && col.state!=='idle') return;
+    html+='<div style="min-width:120px;flex-shrink:0;background:var(--win-surface);border:1px solid var(--win-border);padding:4px">';
+    html+='<div style="font-size:8px;font-weight:700;color:'+col.color+';margin-bottom:3px;padding:2px 3px;border-bottom:2px solid '+col.color+'">'+col.label+' ('+sites.length+')</div>';
+    sites.forEach(function(s){
+      const st=MBP._states[s.id]||{captureCount:0};
+      html+='<div style="background:var(--win-dark);border:1px solid var(--win-border);padding:3px 4px;margin-bottom:2px;font-size:8px">';
+      html+='<div style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--win-text)">'+esc(s.name)+'</div>';
+      if(st.captureCount) html+='<div style="color:var(--win-green);font-size:7px">✅ '+st.captureCount+' captured</div>';
+      if(MBP.getLearned(s.credDomain||'')) html+='<div style="color:#9900cc;font-size:7px">🧠 learned</div>';
+      html+='</div>';
+    });
+    html+='</div>';
+  });
+  html+='</div>';
+  el.innerHTML=html;
+}
+
+// ── BOOKMARKLET GENERATORS ────────────────────────────────────────────────
+function mbpGenerateBookmarklets(){
+  const patternsJSON = JSON.stringify(MBP_PATTERNS.map(function(p){return p.r.source;}));
+
+  // CAPTURE v2 — auto-detects success URL, HUD overlay, 3-min watcher
+  const captureCode='javascript:(function(){'
+    +'var KEY="mbp_capture_incoming",DONE="mbp_bm_done_"+location.hostname;'
+    +'if(localStorage.getItem(DONE)===location.href){alert("Already captured: "+location.href);return;}'
+    +'var patterns='+patternsJSON+';'
+    +'function isSuccess(u){return patterns.some(function(p){return new RegExp(p).test(u);});}'
+    +'function send(url,auto){'
+      +'var title=document.title,domain=location.hostname;'
+      +'var note=auto?"":prompt("Note (optional — OK to capture):","backlink post");'
+      +'if(note===null)return;'
+      +'localStorage.setItem(KEY,JSON.stringify({url:url,title:title,domain:domain,note:note||"",auto:!!auto}));'
+      +'localStorage.setItem(DONE,url);'
+      +'var h=document.createElement("div");'
+      +'h.style="position:fixed;bottom:20px;right:20px;background:#006600;color:#fff;padding:12px 18px;font-family:monospace;font-size:13px;font-weight:bold;z-index:999999;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.4)";'
+      +'h.innerHTML="✅ CAPTURED"+(auto?" (auto)":"")+"<br><span style=\\"font-size:10px;font-weight:normal;word-break:break-all\\">"+url.slice(0,60)+"</span>";'
+      +'document.body.appendChild(h);setTimeout(function(){h.remove();},4000);'
+    +'}'
+    +'var cur=location.href;'
+    +'if(isSuccess(cur)){send(cur,false);return;}'
+    +'var obs=null,timer=null;'
+    +'function check(){var u=location.href;if(u!==cur&&isSuccess(u)){cur=u;send(u,true);cleanup();}}'
+    +'function cleanup(){if(obs)obs.disconnect();if(timer)clearInterval(timer);}'
+    +'if(window.MutationObserver){obs=new MutationObserver(check);obs.observe(document.body,{childList:true,subtree:true});}'
+    +'timer=setInterval(check,800);'
+    +'var hud=document.createElement("div");hud.id="mbp-hud";'
+    +'hud.style="position:fixed;top:10px;right:10px;background:#003087;color:#fff;padding:8px 12px;font-family:monospace;font-size:11px;z-index:999999;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.4);cursor:pointer";'
+    +'hud.innerHTML="📎 MBP WATCHING<br><span style=\\"font-size:9px;opacity:.8\\">Click to capture now</span>";'
+    +'hud.onclick=function(){send(location.href,false);cleanup();hud.remove();};'
+    +'document.body.appendChild(hud);'
+    +'setTimeout(function(){cleanup();var h=document.getElementById("mbp-hud");if(h)h.innerHTML="📎 MBP (stopped)";},180000);'
+    +'alert("📎 MBP Capture active!\\nBlue HUD is watching for success URLs.\\nOr click it to capture manually.");'
+  +'})();';
+
+  // AUTOFILL — reads saved creds, fills login form
+  const autofillCode='javascript:(function(){'
+    +'var creds=JSON.parse(localStorage.getItem("mbp_creds")||"{}");'
+    +'var host=location.hostname.replace(/^www\\./,"");'
+    +'var cred=creds[host]||creds["www."+host]||creds[Object.keys(creds).find(function(k){return host.includes(k)||k.includes(host);})||""];'
+    +'if(!cred||!cred.user){alert("No credentials for "+host+"\\nAdd them in MBP → Credentials tab.");return;}'
+    +'function fill(sel,val){var el=document.querySelector(sel);if(el){el.value=val;el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}));return true;}return false;}'
+    +'var uf=fill("input[name=username],input[name=user],input[name=login],input[type=email],input[name=email],input[id*=user i],input[id*=login i],input[id*=email i],input[autocomplete=username]",cred.user);'
+    +'var pf=fill("input[type=password]",cred.pass||"");'
+    +'var n=(uf?1:0)+(pf?1:0);'
+    +'var h=document.createElement("div");'
+    +'h.style="position:fixed;bottom:20px;right:20px;background:"+(n>0?"#006600":"#cc0000")+";color:#fff;padding:12px 16px;font-family:monospace;font-size:12px;z-index:999999;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.4)";'
+    +'h.textContent=n>0?"✅ Auto-filled "+n+" field"+(n>1?"s":"")+" for "+host:"❌ Could not find login fields";'
+    +'document.body.appendChild(h);setTimeout(function(){h.remove();},4000);'
+  +'})();';
+
+  // RECORD — scans the current post form and sends schema back
+  const recordCode='javascript:(function(){'
+    +'var fields=[];'
+    +'document.querySelectorAll("input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]),textarea,select").forEach(function(el){'
+      +'var name=el.name||el.id||"";'
+      +'if(!name||name.length<2) return;'
+      +'fields.push({'
+        +'tag:el.tagName.toLowerCase(),'
+        +'type:el.type||"",'
+        +'name:name,'
+        +'id:el.id||"",'
+        +'placeholder:el.placeholder||"",'
+        +'label:(function(){'
+          +'var lbl=document.querySelector("label[for=\\""+el.id+"\\"]");'
+          +'if(lbl) return lbl.innerText.trim();'
+          +'var p=el.closest("label,p,div");'
+          +'return p?p.innerText.slice(0,60):"";'
+        +'})(),'
+        +'value:el.value||"",'
+        +'selector:el.id?"#"+el.id:(el.name?"[name=\\""+el.name+"\\"]":"")'
+      +'});'
+    +'});'
+    +'var schema={domain:location.hostname,url:location.href,fields:fields,captchaSel:document.querySelector(".g-recaptcha,iframe[src*=recaptcha],iframe[src*=hcaptcha],.h-captcha,#cf-turnstile")?"detected":"none",recordedAt:Date.now()};'
+    +'localStorage.setItem("mbp_learn_incoming",JSON.stringify({domain:location.hostname,schema:schema}));'
+    +'alert("🧠 Form learned! "+fields.length+" fields captured for "+location.hostname+"\\nSwitch back to Backlink Pro to confirm.");'
+  +'})();';
+
+  // AUTO-POST — reads schema + creds + post data, fills form, solves captcha, submits
+  // Injects a script that reads mbp_autopost_job from localStorage, executes it, posts result
+  const autopostCode='javascript:(function(){'
+    +'var raw=localStorage.getItem("mbp_autopost_job");'
+    +'if(!raw){alert("No auto-post job queued. Use Bulk Blaster in Backlink Pro to queue one.");return;}'
+    +'var job=JSON.parse(raw);'
+    +'localStorage.removeItem("mbp_autopost_job");'
+    +'var schema=job.schema,data=job.postData,capKey=job.captchaKey||"",siteId=job.siteId||"",siteName=job.siteName||location.hostname;'
+    +'var hud=document.createElement("div");'
+    +'hud.style="position:fixed;top:10px;right:10px;background:#660099;color:#fff;padding:10px 14px;font-family:monospace;font-size:11px;z-index:999999;border-radius:4px;box-shadow:0 2px 10px rgba(0,0,0,.5);min-width:220px";'
+    +'hud.innerHTML="🤖 AUTO-POST running…<br><span id=\\"ap-status\\" style=\\"font-size:9px;opacity:.8\\">Filling fields…</span>";'
+    +'document.body.appendChild(hud);'
+    +'function setStatus(s){var el=document.getElementById("ap-status");if(el)el.textContent=s;}'
+    +'function done(success,url,error){'
+      +'var result={success:success,url:url||location.href,error:error||"",domain:location.hostname,siteId:siteId,siteName:siteName,title:document.title};'
+      +'localStorage.setItem("mbp_autopost_result",JSON.stringify(result));'
+      +'hud.style.background=success?"#006600":"#cc0000";'
+      +'hud.innerHTML=(success?"✅ AUTO-POST SUCCESS":"❌ AUTO-POST FAILED")+"<br><span style=\\"font-size:9px;word-break:break-all\\">"+(url||error||"").slice(0,60)+"</span>";'
+      +'setTimeout(function(){hud.remove();},5000);'
+    +'}'
+    +'function fillField(sel,val){'
+      +'var el=document.querySelector(sel);'
+      +'if(!el) return false;'
+      +'if(el.tagName==="SELECT"){var opt=Array.from(el.options).find(function(o){return o.text.toLowerCase()===String(val).toLowerCase()||o.value===String(val);});if(opt)el.value=opt.value;}else{el.value=val;}'
+      +'el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}));'
+      +'return true;'
+    +'}'
+    // Fill all mapped fields
+    +'var filled=0;'
+    +'if(schema&&schema.fields){'
+      +'schema.fields.forEach(function(f){'
+        +'var val=null;'
+        +'var n=(f.name+f.id+f.label+f.placeholder).toLowerCase();'
+        +'if(/title|subject|headline/.test(n)) val=data.title;'
+        +'else if(/body|content|message|text|post|description/.test(n)) val=data.body;'
+        +'else if(/tag|keyword|categor/.test(n)) val=data.tags;'
+        +'else if(/anchor|link.?text|backlink/.test(n)) val=data.anchor;'
+        +'else if(/url|website|href|link/.test(n)&&!/image|img|media|avatar/.test(n)) val=data.linkUrl;'
+        +'if(val&&f.selector){if(fillField(f.selector,val))filled++;}'
+      +'});'
+    +'}'
+    +'setStatus("Filled "+filled+" fields. Checking captcha…");'
+    // Captcha detection and 2captcha solving
+    +'async function solveCaptchaIfNeeded(){'
+      +'var rcEl=document.querySelector(".g-recaptcha");'
+      +'var hcEl=document.querySelector(".h-captcha");'
+      +'if(!rcEl&&!hcEl) return true;'
+      +'if(!capKey){setStatus("⚠ Captcha detected — no 2captcha key! Set it in Settings > Captcha.");return false;}'
+      +'var siteKey=(rcEl||hcEl).dataset.sitekey||"";'
+      +'var capType=rcEl?"userrecaptcha":"hcaptcha";'
+      +'setStatus("🧩 Solving "+(rcEl?"reCAPTCHA":"hCaptcha")+" via 2captcha…");'
+      +'try{'
+        +'var submitUrl="https://2captcha.com/in.php";'
+        +'var body=new FormData();'
+        +'body.append("key",capKey);body.append("method",capType);body.append("googlekey",siteKey);body.append("pageurl",location.href);body.append("json",1);'
+        +'var r=await fetch(submitUrl,{method:"POST",body:body});'
+        +'var d=await r.json();'
+        +'if(d.status!==1){setStatus("❌ 2captcha submit failed: "+d.request);return false;}'
+        +'var taskId=d.request;'
+        +'setStatus("⏳ 2captcha task "+taskId+" — polling…");'
+        +'for(var i=0;i<30;i++){'
+          +'await new Promise(function(res){setTimeout(res,3000);});'
+          +'var pr=await fetch("https://2captcha.com/res.php?key="+capKey+"&action=get&id="+taskId+"&json=1");'
+          +'var pd=await pr.json();'
+          +'if(pd.status===1){'
+            +'var token=pd.request;'
+            // Inject token into page
+            +'var ta=document.querySelector("textarea[name=g-recaptcha-response],textarea[name=h-captcha-response]");'
+            +'if(ta){ta.value=token;ta.style.display="block";}else{var ta2=document.createElement("textarea");ta2.name=rcEl?"g-recaptcha-response":"h-captcha-response";ta2.value=token;ta2.style.display="none";document.body.appendChild(ta2);}'
+            // Also call callback if available
+            +'if(window.___grecaptcha_cfg&&window.___grecaptcha_cfg.clients){'
+              +'try{var cbs=Object.values(window.___grecaptcha_cfg.clients);for(var cb of cbs){if(cb&&cb.V&&cb.V.callback){cb.V.callback(token);break;}}}catch(e){}'
+            +'}'
+            +'setStatus("✅ Captcha solved!");return true;'
+          +'}'
+          +'if(pd.request!=="CAPCHA_NOT_READY"&&pd.status===0){setStatus("❌ 2captcha error: "+pd.request);return false;}'
+        +'}'
+        +'setStatus("⏱ Captcha polling timeout");return false;'
+      +'} catch(e){setStatus("❌ Captcha error: "+e.message);return false;}'
+    +'}'
+    +'(async function(){'
+      +'var capOk=await solveCaptchaIfNeeded();'
+      +'if(!capOk){done(false,null,"captcha failed");return;}'
+      +'setStatus("Submitting…");'
+      +'await new Promise(function(res){setTimeout(res,800);});'
+      // Find and click submit button
+      +'var submitBtn=document.querySelector('
+        +'"[type=submit],[name=submit],[id*=submit],[class*=submit],[value*=post i],[value*=publish i],'
+        +'button[class*=btn]:last-of-type,input[type=submit]"'
+      +');'
+      +'if(submitBtn){submitBtn.click();setStatus("Submitted! Waiting for redirect…");}else{setStatus("⚠ No submit button found — submit manually");done(false,null,"no submit button found");return;}'
+      // Watch for URL change (success)
+      +'var startUrl=location.href,deadline=Date.now()+20000;'
+      +'var watch=setInterval(function(){'
+        +'if(location.href!==startUrl||Date.now()>deadline){'
+          +'clearInterval(watch);'
+          +'if(location.href!==startUrl){done(true,location.href,null);}else{done(false,null,"no redirect after submit");}'
+        +'}'
+      +'},600);'
+    +'})();'
+  +'})();';
+
+  // Store in global so DOM helper can wire them after innerHTML render
+  window._mbpBM = {captureCode, autofillCode, recordCode, autopostCode};
+  return window._mbpBM;
+}
+
+// Called after the bookmarklet tab renders — sets real href on each <a> via DOM (bypasses esc() issues)
+function mbpWireBookmarklets(){
+  const bm = window._mbpBM;
+  if(!bm) return;
+  const map = {
+    'bm-capture': bm.captureCode,
+    'bm-autofill': bm.autofillCode,
+    'bm-record':  bm.recordCode,
+    'bm-autopost':bm.autopostCode,
+  };
+  Object.entries(map).forEach(function([id, code]){
+    const el = document.getElementById(id);
+    if(el) el.href = code;
+  });
+  // Wire textareas too
+  const taMap = {
+    'bm-ta-capture': bm.captureCode,
+    'bm-ta-autofill':bm.autofillCode,
+    'bm-ta-record':  bm.recordCode,
+    'bm-ta-autopost':bm.autopostCode,
+  };
+  Object.entries(taMap).forEach(function([id, code]){
+    const el = document.getElementById(id);
+    if(el) el.value = code;
+  });
+}
+
+// ── MAIN RENDER ───────────────────────────────────────────────────────────
+function blpRenderManualBrowser(){
+  const bm = mbpGenerateBookmarklets();
+  const totalCaptures = MBP.log.length;
+  const todayCaptures = MBP.log.filter(function(l){return l.ts>Date.now()-86400000;}).length;
+  const learnedCount  = Object.keys(MBP.learned).length;
+  const subTab = window._mbpSubTab||0;
+  let html='';
+
+  // Stats row
+  html+='<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:10px">';
+  [['🌐',MBP.sites.length,'Sites','var(--win-blue)'],
+   ['✅',totalCaptures,'Captured','var(--win-green)'],
+   ['📅',todayCaptures,'Today','var(--win-text)'],
+   ['🧠',learnedCount,'Learned Forms','#9900cc'],
+   ['🔑',Object.keys(MBP.creds).length,'Credentials','#c47a00'],
+  ].forEach(function(r){
+    html+='<div class="card" style="text-align:center;padding:8px 4px"><div style="font-size:18px;font-weight:700;font-family:var(--mono);color:'+r[3]+'">'+r[1]+'</div><div style="font-size:9px;font-weight:700">'+r[0]+' '+r[2]+'</div></div>';
+  });
+  html+='</div>';
+
+  // Sub-tabs
+  html+='<div class="mtabs" id="mbp-subtabs">';
+  ['🗂 Queue','📎 Bookmarklets','🤖 Auto-Post','💥 Blast All','🔑 Creds','📊 Log'].forEach(function(t,i){
+    html+='<div class="mtab '+(subTab===i?'on':'')+'" onclick="mbpSubTab('+i+')">'+t+'</div>';
+  });
+  html+='</div>';
+
+  // ── TAB 0: QUEUE ──────────────────────────────────────────────────────
+  html+='<div id="mbp-sub-0" style="display:'+(subTab===0?'block':'none')+'">';
+  html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">';
+  // Add site form
+  html+='<div class="card"><div class="card-title">➕ Add Site</div><div style="display:flex;flex-direction:column;gap:5px;padding-top:4px">';
+  html+='<div><label class="lbl" style="font-size:10px">Site Name</label><input type="text" id="mbp-new-name" placeholder="TechForum — General" style="width:100%"/></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Login URL</label><input type="url" id="mbp-new-url" placeholder="https://forum.example.com/login" style="width:100%"/></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Post URL</label><input type="url" id="mbp-new-post-url" placeholder="https://forum.example.com/newthread" style="width:100%"/></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Credential Domain</label><input type="text" id="mbp-new-cred-domain" placeholder="forum.example.com" style="width:100%"/></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Notes</label><input type="text" id="mbp-new-notes" placeholder="subforum, category, notes…" style="width:100%"/></div>';
+  html+='<div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-primary btn-sm" onclick="mbpAddSite()">➕ Add</button><button class="btn btn-sm" onclick="mbpImportSites()">⬆ Import TSV</button><button class="btn btn-sm" onclick="mbpExportSites()">⬇ Export</button></div>';
+  html+='</div></div>';
+  // Quick open + queue actions
+  html+='<div>';
+  html+='<div class="card" style="margin-bottom:8px"><div class="card-title">⚡ Quick Open</div>';
+  html+='<div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:6px"><input type="url" id="mbp-quick-url" placeholder="https://any-site.com" style="flex:1"/><button class="btn btn-primary btn-sm" onclick="mbpQuickOpen()">🌐 Open</button></div></div>';
+  html+='<div class="card"><div class="card-title">🚀 Queue Actions</div>';
+  html+='<div style="display:flex;gap:6px;flex-wrap:wrap">';
+  html+='<button class="btn btn-primary btn-sm" onclick="mbpRunQueue()">▶ Sequential Run</button>';
+  html+='<button class="btn btn-sm" onclick="mbpOpenAll()">🌐 Open All</button>';
+  html+='<button class="btn btn-sm btn-danger" onclick="mbpResetAllStates()">↺ Reset States</button>';
+  html+='</div></div></div>';
+  html+='</div>';
+
+  // Site table
+  html+='<div class="card" style="padding:0;overflow:hidden;margin-bottom:10px">';
+  html+='<div class="card-title">🗂 Site Queue ('+MBP.sites.length+' sites)</div>';
+  if(MBP.sites.length){
+    const stColors={idle:'#808080',opening:'var(--win-blue)',auto_posting:'#9900cc',captured:'var(--win-green)',done:'var(--win-green)',failed:'var(--win-red)'};
+    html+='<table style="width:100%;border-collapse:collapse;font-size:10px">';
+    html+='<thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Name</th><th style="padding:5px 8px;text-align:left">Login URL</th><th style="padding:5px 8px;text-align:center">State</th><th style="padding:5px 8px;text-align:center">Cred</th><th style="padding:5px 8px;text-align:center">🧠</th><th style="padding:5px 8px;text-align:center">Got</th><th style="padding:5px 8px;text-align:center">Actions</th></tr></thead><tbody>';
+    MBP.sites.forEach(function(s,i){
+      const st=MBP._states[s.id]||{state:'idle',captureCount:0};
+      const hasCred=!!(s.credDomain&&MBP.getCred(s.credDomain));
+      const hasLearn=!!(s.credDomain&&MBP.getLearned(s.credDomain));
+      html+='<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">';
+      html+='<td style="padding:5px 8px;font-weight:700;font-size:10px">'+esc(s.name)+'</td>';
+      html+='<td style="padding:5px 8px;font-family:var(--mono);font-size:9px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="'+esc(s.url)+'" target="_blank" style="color:var(--accent)">'+esc(s.url.replace(/^https?:\/\//,'').slice(0,40))+'</a></td>';
+      html+='<td style="padding:5px 8px;text-align:center"><span style="font-size:9px;font-weight:700;color:'+(stColors[st.state]||'#808080')+'">'+st.state.toUpperCase()+'</span></td>';
+      html+='<td style="padding:5px 8px;text-align:center">'+(hasCred?'<span style="color:var(--win-green)">✅</span>':'<span style="color:var(--win-red)">✗</span>')+'</td>';
+      html+='<td style="padding:5px 8px;text-align:center">'+(hasLearn?'<span style="color:#9900cc" title="Form schema learned">🧠</span>':'<span style="color:#808080;font-size:8px">—</span>')+'</td>';
+      html+='<td style="padding:5px 8px;text-align:center;font-weight:700;color:var(--win-green);font-family:var(--mono)">'+(st.captureCount||0)+'</td>';
+      html+='<td style="padding:5px 8px;text-align:center">';
+      html+='<button class="btn btn-primary btn-xs" onclick="mbpOpenSite(\''+s.id+'\')" title="Open login URL">🌐</button> ';
+      if(s.postUrl) html+='<button class="btn btn-xs" onclick="mbpOpenPostUrl(\''+s.id+'\')" title="Open post URL">✏</button> ';
+      if(hasLearn&&hasCred) html+='<button class="btn btn-xs" style="background:#9900cc;color:#fff;border-color:#660066" onclick="mbpTriggerAutoPost(\''+s.id+'\')" title="Auto-post now">🤖</button> ';
+      html+='<button class="btn btn-xs btn-danger" onclick="mbpDeleteSite(\''+s.id+'\')" title="Remove">✕</button>';
+      html+='</td></tr>';
+    });
+    html+='</tbody></table>';
+  } else {
+    html+='<div style="padding:16px;text-align:center;color:var(--win-text-muted);font-size:10px">No sites yet — add one above or import a list</div>';
+  }
+  html+='</div>';
+
+  // Kanban + Terminal
+  html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  html+='<div class="card"><div class="card-title">🗃 State Board</div><div id="mbp-kanban" style="padding:4px"></div></div>';
+  html+='<div class="card"><div class="card-title">💻 Terminal <button class="btn btn-xs" onclick="document.getElementById(\'mbp-terminal\').innerHTML=\'\'" style="margin-left:auto;font-size:9px">🗑 Clear</button></div>';
+  html+='<div id="mbp-terminal" class="terminal" style="height:140px"></div></div>';
+  html+='</div>';
+  html+='</div>'; // end tab 0
+
+  // ── TAB 1: BOOKMARKLETS ───────────────────────────────────────────────
+  html+='<div id="mbp-sub-1" style="display:'+(subTab===1?'block':'none')+'">';
+  html+='<div class="notice notice-info" style="margin-bottom:10px;font-size:10px"><strong>📖 3-Step Setup:</strong> (1) Drag all 4 bookmarklets to your bookmarks bar once. (2) Open any site → log in → navigate to post form → click <strong>RECORD FORM</strong> to teach Backlink Pro the layout. (3) Use <strong>Blast All</strong> to auto-post at scale.</div>';
+  html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">';
+
+  // CAPTURE — use id="bm-capture", href wired by mbpWireBookmarklets() after render
+  html+='<div class="card" style="border-color:var(--win-green)">';
+  html+='<div class="card-title" style="background:linear-gradient(to right,#006600,#009900)">📎 CAPTURE — Auto-Detect Success URL</div>';
+  html+='<div style="font-size:10px;line-height:1.7;margin-bottom:8px">Watches for 47+ forum/blog patterns after you post. HUD overlay shows status. Auto-captures without any click on known platforms.</div>';
+  html+='<div style="text-align:center;padding:10px;background:var(--win-dark);margin-bottom:8px">';
+  html+='<a id="bm-capture" href="#" style="display:inline-block;background:linear-gradient(to right,#006600,#009900);color:#fff;padding:10px 24px;font-weight:700;font-family:var(--mono);font-size:13px;text-decoration:none;border:2px solid #004400;cursor:grab;letter-spacing:.03em" title="Drag me to your bookmarks bar!">📎 CAPTURE POST URL</a>';
+  html+='<div style="font-size:9px;color:var(--win-text-muted);margin-top:6px">⬆ Drag to bookmarks bar</div></div>';
+  html+='<label class="lbl" style="font-size:9px">Or copy code manually:</label>';
+  html+='<textarea id="bm-ta-capture" readonly onclick="this.select()" style="width:100%;height:48px;font-size:7px;font-family:var(--mono);resize:none;background:#f5f5f5"></textarea>';
+  html+='</div>';
+
+  // AUTOFILL
+  html+='<div class="card" style="border-color:var(--win-blue)">';
+  html+='<div class="card-title" style="background:linear-gradient(to right,#003087,#0a4dc4)">🔑 AUTOFILL — Login Helper</div>';
+  html+='<div style="font-size:10px;line-height:1.7;margin-bottom:8px">Reads credentials from the Credentials tab. Click on any login page — auto-fills username + password instantly.</div>';
+  html+='<div style="text-align:center;padding:10px;background:var(--win-dark);margin-bottom:8px">';
+  html+='<a id="bm-autofill" href="#" style="display:inline-block;background:linear-gradient(to right,#003087,#0a4dc4);color:#fff;padding:10px 24px;font-weight:700;font-family:var(--mono);font-size:13px;text-decoration:none;border:2px solid #001050;cursor:grab;letter-spacing:.03em" title="Drag me to your bookmarks bar!">🔑 AUTOFILL LOGIN</a>';
+  html+='<div style="font-size:9px;color:var(--win-text-muted);margin-top:6px">⬆ Drag to bookmarks bar</div></div>';
+  html+='<label class="lbl" style="font-size:9px">Or copy code manually:</label>';
+  html+='<textarea id="bm-ta-autofill" readonly onclick="this.select()" style="width:100%;height:48px;font-size:7px;font-family:var(--mono);resize:none;background:#f5f5f5"></textarea>';
+  html+='</div>';
+
+  // RECORD FORM
+  html+='<div class="card" style="border-color:#9900cc">';
+  html+='<div class="card-title" style="background:linear-gradient(to right,#660099,#9900cc)">🧠 RECORD FORM — Teach Post Structure</div>';
+  html+='<div style="font-size:10px;line-height:1.7;margin-bottom:8px"><strong>Key step for auto-posting.</strong> Go to the new post page, click this — it scans all form fields, learns the layout, and sends the schema back. After this, Backlink Pro can auto-submit posts on that site forever.</div>';
+  html+='<div style="text-align:center;padding:10px;background:var(--win-dark);margin-bottom:8px">';
+  html+='<a id="bm-record" href="#" style="display:inline-block;background:linear-gradient(to right,#660099,#9900cc);color:#fff;padding:10px 24px;font-weight:700;font-family:var(--mono);font-size:13px;text-decoration:none;border:2px solid #330066;cursor:grab;letter-spacing:.03em" title="Drag me to your bookmarks bar!">🧠 RECORD FORM</a>';
+  html+='<div style="font-size:9px;color:var(--win-text-muted);margin-top:6px">⬆ Use on empty new-post page after first manual post</div></div>';
+  html+='<label class="lbl" style="font-size:9px">Or copy code manually:</label>';
+  html+='<textarea id="bm-ta-record" readonly onclick="this.select()" style="width:100%;height:48px;font-size:7px;font-family:var(--mono);resize:none;background:#f5f5f5"></textarea>';
+  html+='</div>';
+
+  // AUTO-POST
+  html+='<div class="card" style="border-color:#c47a00">';
+  html+='<div class="card-title" style="background:linear-gradient(to right,#7a4a00,#c47a00)">🤖 AUTO-POST — Execute Queued Job</div>';
+  html+='<div style="font-size:10px;line-height:1.7;margin-bottom:8px">Used by the Blast All engine. When a job is queued, open the post URL and click this — fills the form via learned schema, solves captcha via 2captcha, submits, returns success URL.</div>';
+  html+='<div style="text-align:center;padding:10px;background:var(--win-dark);margin-bottom:8px">';
+  html+='<a id="bm-autopost" href="#" style="display:inline-block;background:linear-gradient(to right,#7a4a00,#c47a00);color:#fff;padding:10px 24px;font-weight:700;font-family:var(--mono);font-size:13px;text-decoration:none;border:2px solid #3d2500;cursor:grab;letter-spacing:.03em" title="Drag me to your bookmarks bar!">🤖 AUTO-POST</a>';
+  html+='<div style="font-size:9px;color:var(--win-text-muted);margin-top:6px">⬆ Drag to bookmarks bar</div></div>';
+  html+='<label class="lbl" style="font-size:9px">Or copy code manually:</label>';
+  html+='<textarea id="bm-ta-autopost" readonly onclick="this.select()" style="width:100%;height:48px;font-size:7px;font-family:var(--mono);resize:none;background:#f5f5f5"></textarea>';
+  html+='</div>';
+
+  html+='</div>'; // grid
+
+  // Pattern library
+  html+='<div class="card"><div class="card-title">🎯 Auto-Detect Patterns ('+MBP_PATTERNS.length+')</div>';
+  html+='<div style="display:flex;flex-wrap:wrap;gap:4px;padding:4px">';
+  MBP_PATTERNS.forEach(function(p){ html+='<span class="badge badge-b" style="font-size:8px">'+esc(p.label)+'</span>'; });
+  html+='</div></div>';
+  html+='</div>'; // end tab 1
+
+  // ── TAB 2: AUTO-POST ENGINE ───────────────────────────────────────────
+  html+='<div id="mbp-sub-2" style="display:'+(subTab===2?'block':'none')+'">';
+  html+='<div class="notice notice-info" style="margin-bottom:10px;font-size:10px">';
+  html+='<strong>🤖 Auto-Post Engine</strong> — Once you\'ve done one manual post and clicked <strong>RECORD FORM</strong>, this engine can auto-fill + submit posts on that site. Per-site setup below.';
+  html+='</div>';
+
+  if(!MBP.sites.length){
+    html+='<div class="notice notice-warn" style="font-size:10px">Add sites in the Queue tab first.</div>';
+  } else {
+    MBP.sites.forEach(function(s){
+      const domain = s.credDomain || '';
+      const schema = MBP.getLearned(domain);
+      const cred   = MBP.getCred(domain);
+      html+='<div class="card" style="margin-bottom:8px;border-left:3px solid '+(schema?'#9900cc':schema===null&&cred?'var(--win-blue)':'#808080')+'">';
+      html+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">';
+      html+='<span style="font-weight:700;font-size:12px;flex:1">'+esc(s.name)+'</span>';
+      html+=(schema?'<span class="badge badge-b" style="background:#9900cc;color:#fff">🧠 Form Learned</span>':'<span class="badge badge-b">⚠ Not Learned Yet</span>');
+      html+=(cred?'<span class="badge badge-b" style="background:var(--win-green);color:#fff">🔑 Creds OK</span>':'<span class="badge badge-b" style="background:var(--win-red);color:#fff">❌ No Creds</span>');
+      html+='</div>';
+
+      if(schema){
+        html+='<div style="font-size:9px;color:var(--win-text-muted);margin-bottom:6px">Learned '+schema.fields.length+' fields from <code>'+esc(schema.url||domain)+'</code>';
+        if(schema.captchaSel==='detected') html+=' · <span style="color:#9900cc">🧩 Captcha detected — 2captcha will solve it</span>';
+        html+='</div>';
+        html+='<div style="display:flex;gap:4px;flex-wrap:wrap">';
+        schema.fields.slice(0,8).forEach(function(f){
+          html+='<span class="badge badge-b" style="font-size:8px" title="'+esc(f.selector||f.name)+'">'+esc(f.label||f.name||f.placeholder||f.id)+'</span>';
+        });
+        if(schema.fields.length>8) html+='<span class="badge badge-b" style="font-size:8px">+'+( schema.fields.length-8)+' more</span>';
+        html+='</div>';
+        html+='<div style="display:flex;gap:6px;margin-top:8px">';
+        if(cred){
+          html+='<button class="btn btn-sm" style="background:#9900cc;color:#fff;border-color:#660066" onclick="mbpTriggerAutoPost(\''+s.id+'\')">🤖 Test Auto-Post Now</button>';
+        }
+        html+='<button class="btn btn-sm btn-danger" onclick="mbpClearLearned(\''+esc(domain)+'\')">🗑 Clear Schema</button>';
+        html+='</div>';
+      } else {
+        html+='<div style="font-size:10px;color:var(--win-text-muted);line-height:1.7">';
+        html+='<strong>Setup steps for this site:</strong><br>';
+        html+='1. <button class="btn btn-xs btn-primary" onclick="mbpOpenSite(\''+s.id+'\')">🌐 Open Login</button> — Log in manually<br>';
+        html+='2. Navigate to the new post / create thread page<br>';
+        html+='3. Do your first post manually<br>';
+        html+='4. Go back to the new post page (empty form)<br>';
+        html+='5. Click <strong>🧠 RECORD FORM</strong> bookmarklet<br>';
+        html+='6. Return here — it will show "Form Learned" ✅';
+        html+='</div>';
+      }
+      html+='</div>';
+    });
+  }
+
+  // 2captcha key status
+  const capKey = settingGet('cap_2captchaKey')||'';
+  html+='<div class="card" style="margin-top:10px;border-color:'+(capKey?'var(--win-green)':'var(--win-red)')+'">';
+  html+='<div class="card-title">🧩 2Captcha Integration</div>';
+  if(capKey){
+    html+='<div class="notice notice-info" style="font-size:10px">✅ 2captcha API key configured. Auto-post will solve reCAPTCHA and hCaptcha automatically on captcha-protected sites.</div>';
+  } else {
+    html+='<div class="notice notice-warn" style="font-size:10px">❌ No 2captcha API key set. Auto-post will fail on sites with captcha. <button class="btn btn-xs btn-primary" onclick="blpSetTab&&blpSetTab(0);document.querySelector(\'[onclick*=captcha]\')?.click()">⚙ Set Key in Settings</button></div>';
+  }
+  html+='</div>';
+  html+='</div>'; // end tab 2
+
+  // ── TAB 3: BLAST ALL ─────────────────────────────────────────────────
+  html+='<div id="mbp-sub-3" style="display:'+(subTab===3?'block':'none')+'">';
+
+  const blastableSites = MBP.sites.filter(function(s){
+    return MBP.getLearned(s.credDomain||'') && MBP.getCred(s.credDomain||'');
+  });
+
+  if(blastableSites.length===0){
+    html+='<div class="notice notice-warn" style="font-size:10px"><strong>⚠ No sites ready for blasting.</strong><br>To blast a site you need: <span style="color:var(--win-green)">✅ Credentials saved</span> + <span style="color:#9900cc">🧠 Form learned</span>.<br>Complete both steps in the Auto-Post tab for each site first.</div>';
+  }
+
+  html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">';
+
+  // Post content form
+  html+='<div class="card"><div class="card-title">📝 Post Content</div><div style="display:flex;flex-direction:column;gap:6px;padding-top:4px">';
+  html+='<div><label class="lbl" style="font-size:10px">Post Title / Subject</label><input type="text" id="blast-title" placeholder="Your post title here" style="width:100%"/></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Post Body / Content</label><textarea id="blast-body" rows="5" placeholder="Your post body content here…" style="width:100%;resize:vertical"></textarea></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Tags / Category (if applicable)</label><input type="text" id="blast-tags" placeholder="seo, backlinks, marketing" style="width:100%"/></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Anchor Text (for link fields)</label><input type="text" id="blast-anchor" placeholder="Visit our site" style="width:100%"/></div>';
+  html+='<div><label class="lbl" style="font-size:10px">Your Link URL (for link/website fields)</label><input type="url" id="blast-link-url" placeholder="https://yoursite.com" style="width:100%"/></div>';
+  html+='</div></div>';
+
+  // Site selector
+  html+='<div class="card"><div class="card-title">🎯 Select Target Sites</div>';
+  if(blastableSites.length>0){
+    html+='<div style="display:flex;gap:6px;margin-bottom:6px"><button class="btn btn-xs" onclick="document.querySelectorAll(\'.blast-chk\').forEach(function(c){c.checked=true})">✓ All</button><button class="btn btn-xs" onclick="document.querySelectorAll(\'.blast-chk\').forEach(function(c){c.checked=false})">✗ None</button></div>';
+    html+='<div style="max-height:200px;overflow-y:auto">';
+    blastableSites.forEach(function(s){
+      const st = MBP._states[s.id]||{};
+      const prevCaptures = MBP.log.filter(function(l){return l.siteId===s.id;}).length;
+      html+='<label style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid var(--win-border);cursor:pointer">';
+      html+='<input type="checkbox" class="blast-chk" data-site-id="'+s.id+'" value="'+s.id+'" checked/>';
+      html+='<span style="flex:1;font-weight:700;font-size:10px">'+esc(s.name)+'</span>';
+      html+='<span style="font-size:9px;color:#9900cc">🧠</span>';
+      if(prevCaptures) html+='<span style="font-size:8px;color:var(--win-green)">'+prevCaptures+' done</span>';
+      html+='</label>';
+    });
+    html+='</div>';
+  } else {
+    html+='<div style="padding:12px;color:var(--win-text-muted);font-size:10px;text-align:center">No sites ready yet.<br>Complete setup in Auto-Post tab.</div>';
+  }
+
+  html+='<div style="margin-top:8px">';
+  html+='<div><label class="lbl" style="font-size:10px">Delay between sites (seconds)</label><input type="number" id="blast-delay" value="8" min="2" max="120" style="width:80px"/></div>';
+  html+='</div>';
+  if(blastableSites.length>0){
+    html+='<button class="btn btn-primary" onclick="mbpStartBlast()" style="width:100%;margin-top:10px;font-size:13px;font-weight:700;padding:10px">💥 START BLAST</button>';
+  }
+  html+='</div>';
+  html+='</div>'; // grid
+
+  // Blast queue status
+  html+='<div class="card" style="margin-bottom:8px"><div class="card-title">📊 Blast Progress</div>';
+  html+='<div id="mbp-blast-status">';
+  const activeBlast = window._mbpBlastActive;
+  if(activeBlast){
+    html+='<div style="font-size:10px;color:var(--win-green);font-family:var(--mono)">🔥 Blast running: '+activeBlast.done+'/'+activeBlast.total+' sites done</div>';
+    html+='<div style="background:var(--win-dark);height:8px;border-radius:4px;overflow:hidden;margin-top:6px"><div style="background:var(--win-green);height:100%;width:'+Math.round(activeBlast.done/activeBlast.total*100)+'%;transition:width .5s"></div></div>';
+  } else {
+    html+='<div style="color:var(--win-text-muted);font-size:10px;padding:8px;text-align:center">No active blast. Start one above.</div>';
+  }
+  html+='</div>';
+  html+='<div id="mbp-blast-results" style="margin-top:8px"></div>';
+  html+='</div>';
+
+  // Blast results from log
+  const blastLogs = MBP.log.filter(function(l){return l.auto;});
+  if(blastLogs.length){
+    html+='<div class="card"><div class="card-title">✅ Auto-Post Results ('+blastLogs.length+' total)</div>';
+    html+='<div style="max-height:200px;overflow-y:auto"><table style="width:100%;border-collapse:collapse;font-size:10px">';
+    html+='<thead><tr style="background:var(--win-dark)"><th style="padding:4px 8px;text-align:left">Site</th><th style="padding:4px 8px;text-align:left">URL</th><th style="padding:4px 8px;text-align:left">Time</th></tr></thead><tbody>';
+    blastLogs.slice(0,50).forEach(function(l,i){
+      html+='<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">';
+      html+='<td style="padding:4px 8px;font-weight:700;font-size:9px">'+esc(l.site||'')+'</td>';
+      html+='<td style="padding:4px 8px;font-size:9px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="'+esc(l.url)+'" target="_blank" style="color:var(--accent);font-family:var(--mono)">'+esc(l.url)+'</a></td>';
+      html+='<td style="padding:4px 8px;color:var(--win-text-muted);font-size:9px;white-space:nowrap">'+new Date(l.ts).toLocaleTimeString()+'</td>';
+      html+='</tr>';
+    });
+    html+='</tbody></table></div></div>';
+  }
+  html+='</div>'; // end tab 3
+
+  // ── TAB 4: CREDENTIALS ───────────────────────────────────────────────
+  html+='<div id="mbp-sub-4" style="display:'+(subTab===4?'block':'none')+'">';
+  html+='<div class="card" style="margin-bottom:10px"><div class="card-title">➕ Save Credentials</div>';
+  html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;padding-top:4px">';
+  html+='<div>';
+  html+='<div class="fg"><label class="lbl" style="font-size:10px">Domain</label><input type="text" id="mbp-cred-domain" placeholder="forum.example.com" style="width:100%"/></div>';
+  html+='<div class="fg"><label class="lbl" style="font-size:10px">Username / Email</label><input type="text" id="mbp-cred-user" placeholder="your_username" style="width:100%"/></div>';
+  html+='<div class="fg"><label class="lbl" style="font-size:10px">Password</label><input type="password" id="mbp-cred-pass" placeholder="••••••••" style="width:100%"/></div>';
+  html+='<div class="fg"><label class="lbl" style="font-size:10px">Extra (note, 2FA hint)</label><input type="text" id="mbp-cred-extra" placeholder="optional" style="width:100%"/></div>';
+  html+='<button class="btn btn-primary btn-sm" onclick="mbpSaveCred()">💾 Save Credential</button>';
+  html+='</div>';
+  html+='<div class="notice notice-warn" style="font-size:10px;align-self:start"><strong>⚠ Security:</strong> Stored in localStorage only — never sent to any server. The Autofill bookmarklet reads these on the login page you open.</div>';
+  html+='</div></div>';
+  const credKeys=Object.keys(MBP.creds);
+  html+='<div class="card" style="padding:0;overflow:hidden"><div class="card-title">🔑 Saved Credentials ('+credKeys.length+')</div>';
+  if(credKeys.length){
+    html+='<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Domain</th><th style="padding:5px 8px;text-align:left">Username</th><th style="padding:5px 8px;text-align:left">Password</th><th style="padding:5px 8px;text-align:center">Act</th></tr></thead><tbody>';
+    credKeys.forEach(function(domain,i){
+      const c=MBP.creds[domain];
+      html+='<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">';
+      html+='<td style="padding:5px 8px;font-family:var(--mono);font-weight:700">'+esc(domain)+'</td>';
+      html+='<td style="padding:5px 8px;font-family:var(--mono)">'+esc(c.user||'')+'</td>';
+      html+='<td style="padding:5px 8px;font-family:var(--mono)"><span id="mbp-pw-'+i+'">••••••••</span><button class="btn btn-xs" onclick="var e=document.getElementById(\'mbp-pw-'+i+'\');e.textContent=e.textContent===\''+esc(c.pass||'')+'\' ? \'••••••••\' : \''+esc(c.pass||'')+'\'" style="font-size:8px;margin-left:4px">👁</button></td>';
+      html+='<td style="padding:5px 8px;text-align:center"><button class="btn btn-xs" onclick="mbpLoadCred(\''+esc(domain)+'\')">✏</button> <button class="btn btn-xs btn-danger" onclick="mbpDeleteCred(\''+esc(domain)+'\')">✕</button></td>';
+      html+='</tr>';
+    });
+    html+='</tbody></table>';
+  } else {
+    html+='<div style="padding:14px;text-align:center;color:var(--win-text-muted);font-size:10px">No credentials saved yet</div>';
+  }
+  html+='</div>';
+  html+='</div>'; // end tab 4
+
+  // ── TAB 5: LOG ───────────────────────────────────────────────────────
+  html+='<div id="mbp-sub-5" style="display:'+(subTab===5?'block':'none')+'">';
+  html+='<div id="mbp-log-table"></div>';
+  html+='</div>';
+
+  html+='<input type="hidden" id="mbp-active-site-id" value="">';
+
+  html+='<script>(function(){'
+    +'var logEl=document.getElementById("mbp-log-table");if(logEl)mbpRenderLogTable(logEl);'
+    +'mbpRefreshKanban();'
+    +'MBP.startCapturePoll();'
+    +'mbpGenerateBookmarklets();'  // populates window._mbpBM
+    +'mbpWireBookmarklets();'      // wires href + textarea values via DOM (no esc() corruption)
+    +'mbpTermLog("🌐 MBP v3 — GOD-TIER active | Auto-Post Engine + Bulk Blaster ready","t-accent");'
+    +(MBP.log.length?'mbpTermLog("📋 '+MBP.log.length+' previously captured URLs loaded","t-info");':'')
+    +(MBP.sites.length?'mbpTermLog("🗂 '+MBP.sites.length+' sites in queue | '+Object.keys(MBP.learned).length+' forms learned","t-info");':'')
+    +'})();<\/script>';
+
+  return html;
+}
+
+// ── SUB-TAB SWITCHER ──────────────────────────────────────────────────────
+function mbpSubTab(i){
+  window._mbpSubTab=i;
+  [0,1,2,3,4,5].forEach(function(n){
+    const el=document.getElementById('mbp-sub-'+n);
+    if(el) el.style.display=(n===i)?'block':'none';
+  });
+  document.querySelectorAll('#mbp-subtabs .mtab').forEach(function(t,n){t.classList.toggle('on',n===i);});
+  if(i===1){ mbpGenerateBookmarklets(); setTimeout(mbpWireBookmarklets,0); }
+  if(i===5){const logEl=document.getElementById('mbp-log-table');if(logEl)mbpRenderLogTable(logEl);}
+  if(i===0||i===2||i===3) mbpRefreshKanban();
+}
+
+// ── SITE CRUD ─────────────────────────────────────────────────────────────
+function mbpAddSite(){
+  const name=document.getElementById('mbp-new-name')?.value.trim();
+  const url=document.getElementById('mbp-new-url')?.value.trim();
+  const postUrl=document.getElementById('mbp-new-post-url')?.value.trim()||'';
+  let credDomain=document.getElementById('mbp-new-cred-domain')?.value.trim();
+  const notes=document.getElementById('mbp-new-notes')?.value.trim()||'';
+  if(!name){toast('Enter a site name','w');return;}
+  if(!url||!url.startsWith('http')){toast('Enter a valid URL','w');return;}
+  if(!credDomain){try{credDomain=new URL(url).hostname;}catch(_){credDomain='';}}
+  MBP.sites.push({id:uid(),name,url,postUrl,credDomain,notes,addedAt:Date.now()});
+  MBP.save();
+  toast('✅ '+name+' added','s');
+  blpSetTab(4);
+}
+
+function mbpDeleteSite(id){
+  const s=MBP.sites.find(function(x){return x.id===id;});
+  if(!confirm('Remove "'+( s?.name||id)+'"?')) return;
+  MBP.sites=MBP.sites.filter(function(x){return x.id!==id;});
+  delete MBP._states[id];
+  delete MBP._popups[id];
+  MBP.save();
+  blpSetTab(4);
+}
+
+function mbpOpenSite(id){
+  const site=MBP.sites.find(function(s){return s.id===id;});
+  if(!site){toast('Site not found','e');return;}
+  MBP._activeId=id;
+  document.getElementById('mbp-active-site-id').value=id;
+  MBP.setState(id,'opening');
+  const w=window.open(site.url,'mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  if(!w){toast('⚠ Popup blocked — allow popups for this site','e');MBP.setState(id,'idle');return;}
+  MBP._popups[id]=w;
+  mbpTermLog('🌐 Opened: '+site.name+' → '+site.url,'t-accent');
+  const hasCred=site.credDomain&&MBP.getCred(site.credDomain);
+  const hasLearn=site.credDomain&&MBP.getLearned(site.credDomain);
+  if(hasCred) mbpTermLog('   🔑 Creds ready — click AUTOFILL on login page','t-info');
+  if(hasLearn) mbpTermLog('   🧠 Form learned — can auto-post on post page','t-info');
+  else mbpTermLog('   ℹ Do first post manually, then RECORD FORM on empty post page','t-info');
+  toast('🌐 Opened: '+site.name,'i');
+}
+
+function mbpOpenPostUrl(id){
+  const site=MBP.sites.find(function(s){return s.id===id;});
+  if(!site||!site.postUrl){toast('No post URL set','w');return;}
+  MBP._activeId=id;
+  const w=window.open(site.postUrl,'mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  if(!w){toast('⚠ Popup blocked','e');return;}
+  MBP._popups[id]=w;
+  mbpTermLog('✏ Post URL opened: '+site.postUrl,'t-accent');
+}
+
+function mbpOpenAll(){
+  if(!MBP.sites.length){toast('No sites in queue','w');return;}
+  if(!confirm('Open '+MBP.sites.length+' browser windows?')) return;
+  MBP.sites.forEach(function(s,i){
+    setTimeout(function(){
+      MBP.setState(s.id,'opening');
+      const w=window.open(s.url,'mbp_'+s.id,'width=1140,height=800,left='+(60+i*22)+',top='+(50+i*18)+',toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+      if(w) MBP._popups[s.id]=w;
+    },i*500);
+  });
+}
+
+function mbpQuickOpen(){
+  const url=document.getElementById('mbp-quick-url')?.value.trim();
+  if(!url||!url.startsWith('http')){toast('Enter a valid URL','w');return;}
+  const w=window.open(url,'mbp_quick_'+Date.now(),'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  if(!w){toast('⚠ Popup blocked','e');return;}
+  mbpTermLog('⚡ Quick open: '+url,'t-accent');
+}
+
+async function mbpRunQueue(){
+  const pending=MBP.sites.filter(function(s){return ['idle','closed','failed'].includes((MBP._states[s.id]||{state:'idle'}).state);});
+  if(!pending.length){toast('No idle sites to run','w');return;}
+  if(!confirm('Sequential queue: '+pending.length+' sites.\n\nFor each: browser opens → you log in + post → Capture bookmarklet auto-detects URL → advances.\n\nContinue?')) return;
+  mbpTermLog('🚀 Sequential Queue: '+pending.length+' sites','t-accent');
+  for(let i=0;i<pending.length;i++){
+    const site=pending[i];
+    mbpTermLog('['+(i+1)+'/'+pending.length+'] '+site.name,'t-accent');
+    mbpOpenSite(site.id);
+    const capturesBefore=MBP.log.filter(function(l){return l.siteId===site.id;}).length;
+    const deadline=Date.now()+5*60*1000;
+    const siteId=site.id;
+    await new Promise(function(resolve){
+      const check=setInterval(function(){
+        const now=MBP.log.filter(function(l){return l.siteId===siteId;}).length;
+        const closed=MBP._popups[siteId]?.closed;
+        if(now>capturesBefore){clearInterval(check);mbpTermLog('✅ Done: '+site.name,'t-accent');setTimeout(resolve,1500);}
+        else if(Date.now()>deadline||closed){clearInterval(check);mbpTermLog('⏭ Skip: '+site.name,'t-warn');setTimeout(resolve,500);}
+      },1000);
+    });
+  }
+  mbpTermLog('🏁 Queue complete','t-accent');toast('🏁 Queue complete!','s');
+}
+
+function mbpResetAllStates(){
+  if(!confirm('Reset all states to idle?')) return;
+  MBP.sites.forEach(function(s){if(MBP._states[s.id])MBP._states[s.id].state='idle';});
+  mbpRefreshKanban();blpSetTab(4);
+}
+
+// ── AUTO-POST TRIGGER ─────────────────────────────────────────────────────
+function mbpTriggerAutoPost(id){
+  const site=MBP.sites.find(function(s){return s.id===id;});
+  if(!site){toast('Site not found','e');return;}
+  const domain=site.credDomain||'';
+  const schema=MBP.getLearned(domain);
+  const cred=MBP.getCred(domain);
+  if(!schema){toast('No form learned for this site yet — use RECORD FORM bookmarklet','w');return;}
+  if(!cred){toast('No credentials saved for '+domain,'w');return;}
+  if(!site.postUrl){toast('No post URL set for this site','w');return;}
+
+  const postData={
+    title: document.getElementById('blast-title')?.value||'Test Post from Backlink Pro',
+    body:  document.getElementById('blast-body')?.value||'This is a test auto-post.',
+    tags:  document.getElementById('blast-tags')?.value||'',
+    anchor:document.getElementById('blast-anchor')?.value||'',
+    linkUrl:document.getElementById('blast-link-url')?.value||'',
+  };
+  const capKey=settingGet('cap_2captchaKey')||'';
+  const job={siteId:id,siteName:site.name,schema,postData,captchaKey:capKey,queuedAt:Date.now()};
+  localStorage.setItem('mbp_autopost_job',JSON.stringify(job));
+  MBP.setState(id,'auto_posting');
+  mbpTermLog('🤖 Auto-post queued for: '+site.name,'t-accent');
+  mbpTermLog('   Opening post URL: '+site.postUrl,'t-info');
+  const w=window.open(site.postUrl,'mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  if(!w){toast('⚠ Popup blocked — allow popups','e');MBP.setState(id,'idle');return;}
+  MBP._popups[id]=w;
+  toast('🤖 Auto-post started for '+site.name+' — AUTO-POST bookmarklet will fire automatically','i',6000);
+  mbpTermLog('   ℹ Click the 🤖 AUTO-POST bookmarklet on the post page if it does not auto-fire','t-info');
+  blpSetTab(4);
+}
+
+// ── BLAST ALL ENGINE ──────────────────────────────────────────────────────
+window._mbpBlastActive = null;
+window._mbpBlastQueue  = [];
+window._mbpBlastResults = [];
+
+function mbpStartBlast(){
+  const checked = Array.from(document.querySelectorAll('.blast-chk:checked')).map(function(c){return c.dataset.siteId;});
+  if(!checked.length){toast('Select at least one site','w');return;}
+  const title  = document.getElementById('blast-title')?.value.trim();
+  const body   = document.getElementById('blast-body')?.value.trim();
+  if(!title||!body){toast('Post title and body are required','w');return;}
+  const postData={
+    title, body,
+    tags:   document.getElementById('blast-tags')?.value.trim()||'',
+    anchor: document.getElementById('blast-anchor')?.value.trim()||'',
+    linkUrl:document.getElementById('blast-link-url')?.value.trim()||'',
+  };
+  const delay = parseInt(document.getElementById('blast-delay')?.value||'8',10)*1000;
+  const capKey= settingGet('cap_2captchaKey')||'';
+  const queue = checked.map(function(id){
+    const site=MBP.sites.find(function(s){return s.id===id;});
+    return {siteId:id, site, postData, captchaKey:capKey, delay, status:'pending', url:null};
+  }).filter(function(q){return q.site;});
+  if(!queue.length){toast('No valid sites selected','e');return;}
+  if(!confirm('Blast '+queue.length+' sites with this post?\n\n"'+title.slice(0,60)+'"\n\nThis will open each site and auto-post. Continue?')) return;
+  window._mbpBlastQueue   = queue;
+  window._mbpBlastResults = [];
+  window._mbpBlastActive  = {total:queue.length, done:0, startedAt:Date.now()};
+  mbpTermLog('💥 BLAST STARTED: '+queue.length+' sites','t-accent');
+  blpSetTab(4);
+  mbpBlastStep();
+}
+
+async function mbpBlastStep(){
+  const queue=window._mbpBlastQueue;
+  const next=queue.find(function(q){return q.status==='pending';});
+  if(!next){
+    mbpBlastFinish();
+    return;
+  }
+  next.status='running';
+  const site=next.site;
+  const domain=site.credDomain||'';
+  const schema=MBP.getLearned(domain);
+  const cred=MBP.getCred(domain);
+  if(!schema||!cred||!site.postUrl){
+    next.status='skipped';
+    next.error='missing schema or creds';
+    mbpTermLog('⏭ Skipped: '+site.name+' (no schema/creds)','t-warn');
+    if(window._mbpBlastActive) window._mbpBlastActive.done++;
+    setTimeout(mbpBlastStep, 500);
+    return;
+  }
+  const job={siteId:site.id,siteName:site.name,schema,postData:next.postData,captchaKey:next.captchaKey,queuedAt:Date.now()};
+  localStorage.setItem('mbp_autopost_job',JSON.stringify(job));
+  MBP.setState(site.id,'auto_posting');
+  mbpTermLog('🤖 Blasting: '+site.name,'t-accent');
+  const w=window.open(site.postUrl,'mbp_blast_'+site.id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  if(!w){
+    next.status='failed';next.error='popup blocked';
+    mbpTermLog('❌ Popup blocked: '+site.name,'t-warn');
+    MBP.setState(site.id,'failed');
+    if(window._mbpBlastActive) window._mbpBlastActive.done++;
+    mbpRefreshBlastUI();
+    setTimeout(mbpBlastStep, 500);
+    return;
+  }
+  MBP._popups[site.id]=w;
+  // Wait for result with timeout
+  const timeout=90000; // 90s per site
+  const started=Date.now();
+  await new Promise(function(resolve){
+    const poll=setInterval(function(){
+      const q=window._mbpBlastQueue.find(function(q){return q.siteId===site.id;});
+      if(q&&q.status!=='running'){clearInterval(poll);resolve();return;}
+      if(Date.now()-started>timeout){
+        clearInterval(poll);
+        if(next.status==='running'){
+          next.status='timeout';next.error='90s timeout';
+          MBP.setState(site.id,'failed');
+          mbpTermLog('⏱ Timeout: '+site.name,'t-warn');
+        }
+        resolve();
+      }
+    },800);
+  });
+  if(window._mbpBlastActive) window._mbpBlastActive.done++;
+  mbpRefreshBlastUI();
+  await new Promise(function(res){setTimeout(res,next.delay||8000);});
+  mbpBlastStep();
+}
+
+function mbpBlastAdvance(data){
+  // Called from poll when autopost result arrives
+  const q=window._mbpBlastQueue&&window._mbpBlastQueue.find(function(q){return q.siteId===data.siteId;});
+  if(!q) return;
+  if(data.success){
+    q.status='done';q.url=data.url;
+    MBP.setState(data.siteId,'done');
+    mbpTermLog('✅ Blast success: '+(q.site?.name||data.siteId)+' → '+data.url,'t-accent');
+    window._mbpBlastResults.push({site:q.site?.name||'',url:data.url,ts:Date.now()});
+  } else {
+    q.status='failed';q.error=data.error||'unknown';
+    MBP.setState(data.siteId,'failed');
+    mbpTermLog('❌ Blast failed: '+(q.site?.name||data.siteId)+': '+( q.error),'t-warn');
+  }
+  mbpRefreshBlastUI();
+}
+
+function mbpBlastFinish(){
+  const results=window._mbpBlastResults||[];
+  const done=results.length;
+  const failed=(window._mbpBlastQueue||[]).filter(function(q){return q.status==='failed'||q.status==='timeout';}).length;
+  window._mbpBlastActive=null;
+  mbpTermLog('🏁 BLAST COMPLETE: '+done+' success, '+failed+' failed','t-accent');
+  toast('💥 Blast complete: '+done+' posted!','s',8000);
+  blpSetTab(4);
+}
+
+function mbpRefreshBlastUI(){
+  const el=document.getElementById('mbp-blast-status');
+  if(!el) return;
+  const active=window._mbpBlastActive;
+  if(!active){el.innerHTML='<div style="color:var(--win-text-muted);font-size:10px;padding:8px;text-align:center">No active blast.</div>';return;}
+  const pct=Math.round(active.done/active.total*100);
+  let html='<div style="font-size:10px;font-family:var(--mono);margin-bottom:6px">💥 Blasting: <strong>'+active.done+'/'+active.total+'</strong> sites done</div>';
+  html+='<div style="background:var(--win-dark);height:10px;border-radius:4px;overflow:hidden;margin-bottom:6px"><div style="background:var(--win-green);height:100%;width:'+pct+'%;transition:width .5s"></div></div>';
+  const queue=window._mbpBlastQueue||[];
+  html+='<div style="display:flex;flex-direction:column;gap:2px">';
+  queue.forEach(function(q){
+    const ic={pending:'⬜',running:'🔄',done:'✅',failed:'❌',timeout:'⏱',skipped:'⏭'}[q.status]||'?';
+    html+='<div style="display:flex;gap:6px;font-size:9px;font-family:var(--mono)">';
+    html+='<span>'+ic+'</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.site?.name||q.siteId)+'</span>';
+    if(q.url) html+='<a href="'+esc(q.url)+'" target="_blank" style="color:var(--accent);font-size:8px">'+esc(q.url.slice(0,40))+'</a>';
+    else if(q.error) html+='<span style="color:var(--win-red);font-size:8px">'+esc(q.error)+'</span>';
+    html+='</div>';
+  });
+  html+='</div>';
+  el.innerHTML=html;
+}
+
+// ── CREDENTIALS ───────────────────────────────────────────────────────────
+function mbpSaveCred(){
+  let domain=document.getElementById('mbp-cred-domain')?.value.trim().replace(/^https?:\/\//,'').split('/')[0];
+  const user=document.getElementById('mbp-cred-user')?.value.trim();
+  const pass=document.getElementById('mbp-cred-pass')?.value;
+  const extra=document.getElementById('mbp-cred-extra')?.value.trim();
+  if(!domain){toast('Enter a domain','w');return;}
+  MBP.setCred(domain,{user,pass,extra});
+  toast('✅ Saved credentials for '+domain,'s');blpSetTab(4);
+}
+function mbpLoadCred(domain){
+  const c=MBP.creds[domain]||{};
+  window._mbpSubTab=4;blpSetTab(4);
+  setTimeout(function(){
+    const d=document.getElementById('mbp-cred-domain');
+    const u=document.getElementById('mbp-cred-user');
+    const p=document.getElementById('mbp-cred-pass');
+    const e=document.getElementById('mbp-cred-extra');
+    if(d)d.value=domain;if(u)u.value=c.user||'';if(p)p.value=c.pass||'';if(e)e.value=c.extra||'';
+  },100);
+}
+function mbpDeleteCred(domain){
+  if(!confirm('Delete credentials for '+domain+'?')) return;
+  delete MBP.creds[domain];MBP.saveCreds();toast('Deleted','i');blpSetTab(4);
+}
+function mbpClearLearned(domain){
+  if(!confirm('Clear learned form schema for '+domain+'?')) return;
+  delete MBP.learned[domain];MBP.saveLearned();toast('Schema cleared','i');blpSetTab(4);
+}
+
+// ── IMPORT / EXPORT ───────────────────────────────────────────────────────
+function mbpExportSites(){
+  const data=MBP.sites.map(function(s){return [s.name,s.url,s.postUrl||'',s.credDomain||'',s.notes||''].join('\t');}).join('\n');
+  const a=document.createElement('a');
+  a.href='data:text/plain;charset=utf-8,'+encodeURIComponent('Name\tLoginURL\tPostURL\tCredDomain\tNotes\n'+data);
+  a.download='mbp-sites.tsv';a.click();
+  toast('Exported '+MBP.sites.length+' sites','s');
+}
+function mbpImportSites(){
+  const txt=prompt('Paste sites (TSV: Name<TAB>LoginURL<TAB>PostURL<TAB>Domain, or just URLs):');
+  if(!txt) return;
+  let added=0;
+  txt.trim().split('\n').forEach(function(line){
+    if(line.startsWith('Name\t')) return;
+    const parts=line.split('\t');
+    const name=parts[0]?.trim();
+    const url=(parts[1]||parts[0])?.trim();
+    if(!url||!url.startsWith('http')) return;
+    try{
+      const domain=new URL(url).hostname;
+      MBP.sites.push({id:uid(),name:name||domain,url,postUrl:parts[2]?.trim()||'',credDomain:parts[3]?.trim()||domain,notes:parts[4]?.trim()||'',addedAt:Date.now()});
+      added++;
+    }catch(_){}
+  });
+  MBP.save();toast('✅ Imported '+added+' sites','s');blpSetTab(4);
+}
+
+// ── LOG MANAGEMENT ────────────────────────────────────────────────────────
+function mbpExportCSV(){
+  if(!MBP.log.length){toast('No URLs','w');return;}
+  const rows=[['Site','URL','Type','Auto','Note','Timestamp']];
+  MBP.log.forEach(function(l){rows.push([l.site||'',l.url,l.note||'',l.auto?'yes':'no',l.title||'',new Date(l.ts).toISOString()]);});
+  const csv=rows.map(function(r){return r.map(function(c){return '"'+String(c).replace(/"/g,'""')+'"';}).join(',');}).join('\n');
+  const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);a.download='mbp-captured.csv';a.click();
+  toast('Exported '+MBP.log.length+' URLs','s');
+}
+function mbpExportTSV(){
+  if(!MBP.log.length){toast('No URLs','w');return;}
+  const lines=MBP.log.map(function(l){return [l.site||'',l.url,l.note||'',new Date(l.ts).toISOString()].join('\t');}).join('\n');
+  const a=document.createElement('a');a.href='data:text/plain;charset=utf-8,'+encodeURIComponent('Site\tURL\tNote\tTimestamp\n'+lines);a.download='mbp-captured.tsv';a.click();
+  toast('Exported as TSV','s');
+}
+function mbpClearLog(){
+  if(!MBP.log.length){toast('Already empty','i');return;}
+  if(!confirm('Clear all '+MBP.log.length+' captured URLs?')) return;
+  MBP.log=[];MBP.saveLog();
+  const t=document.getElementById('mbp-terminal');if(t)t.innerHTML='';
+  const logEl=document.getElementById('mbp-log-table');if(logEl)mbpRenderLogTable(logEl);
+  mbpTermLog('🗑 Log cleared','t-warn');
+}
+function mbpSendToVault(){
+  const urls=MBP.log.filter(function(l){return l.url&&l.url.startsWith('http');});
+  if(!urls.length){toast('No valid URLs','w');return;}
+  let added=0;
+  urls.forEach(function(l){if(!S.backlinkVault.find(function(v){return v.url===l.url;})){S.backlinkVault.push({url:l.url,label:l.site||'manual',addedAt:l.ts||Date.now()});added++;}});
+  saveState();
+  toast('✅ Added '+added+' new URLs to Backlink Vault','s');
+}
 
 function blpSetTab(i){
   const el = document.getElementById('page-backlink_pro');

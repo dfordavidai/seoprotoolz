@@ -145,9 +145,9 @@ async function playwrightPost(url, credentials, content, options, timeout, fallb
     let browser;
     try {
       browser = await chromium.launch({
-        args: [...chromiumPkg.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage', '--no-zygote', '--disable-gpu'],
+        args: [...chromiumPkg.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-dev-shm-usage', '--single-process'],
         executablePath: await chromiumPkg.executablePath(),
-        headless: (chromiumPkg.headless === true || chromiumPkg.headless === 'new' || chromiumPkg.headless === 'shell') ? true : Boolean(chromiumPkg.headless),
+        headless: chromiumPkg.headless === 'new' ? true : chromiumPkg.headless,
       });
 
       const profile = getProfile(url);
@@ -256,12 +256,6 @@ async function playwrightPost(url, credentials, content, options, timeout, fallb
     }
 
   } catch (err) {
-    // Retry on browser-level failures (cold start, crash, timeout)
-    const retryable = /launch|timeout|crash|SIGKILL|navigation|Protocol error/i.test(err.message);
-    if (retryable && (options._attempt || 0) < 1) {
-      await new Promise(r => setTimeout(r, 2000));
-      return runSite({ url, credentials, content: rawContent, options: { ...options, _attempt: (options._attempt||0)+1 } }, res);
-    }
     return { ok: false, method: fallbackReason || 'playwright', error: err.message };
   }
 }
@@ -378,22 +372,33 @@ const REST_HANDLERS = {
   'dpaste.com': async (url, creds, content) => {
     const r = await fetch('https://dpaste.com/api/v2/', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ content: content.body, title: content.title || '', syntax: 'text', expiry_days: 365 }).toString(),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ content: content.body || ' ', title: content.title || '', syntax: 'text', expiry_days: '365' }).toString(),
+      redirect: 'manual',
     });
-    if (!r.ok) throw new Error('dpaste API error');
-    return { resultUrl: r.url || r.headers.get('location') || 'https://dpaste.com' };
+    // dpaste returns 302 to the new paste URL
+    const loc = r.headers.get('location') || '';
+    if (loc) return { resultUrl: loc.startsWith('http') ? loc : 'https://dpaste.com' + loc };
+    // Fallback: try parsing body
+    const body = await r.text().catch(() => '');
+    const match = body.match(/https?:\/\/dpaste\.com\/[A-Z0-9]+/i);
+    if (match) return { resultUrl: match[0] };
+    throw new Error('dpaste.com: no URL in response');
   },
 
   'controlc.com': async (url, creds, content) => {
     const r = await fetch('https://controlc.com/index.php?act=submit', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://controlc.com' },
-      body: new URLSearchParams({ 'subdomain-name': '', 'paste_data': content.body, 'private': '0' }).toString(),
-      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Referer': 'https://controlc.com', 'User-Agent': 'Mozilla/5.0' },
+      body: new URLSearchParams({ 'subdomain-name': '', 'paste_data': content.body || ' ', 'private': '0' }).toString(),
     });
-    const loc = r.headers.get('location') || r.url;
-    return { resultUrl: loc };
+    const html = await r.text().catch(() => '');
+    // After successful submit, the response contains the paste URL
+    const match = html.match(/https?:\/\/controlc\.com\/[a-f0-9]+/i);
+    if (match) return { resultUrl: match[0] };
+    const loc = r.headers.get('location') || '';
+    if (loc && loc !== 'https://controlc.com/') return { resultUrl: loc.startsWith('http') ? loc : 'https://controlc.com' + loc };
+    throw new Error('controlc.com: could not extract paste URL from response');
   },
 
   'rentry.co': async (url, creds, content) => {
@@ -404,23 +409,29 @@ const REST_HANDLERS = {
     const csrf =
       (html.match(/name="csrfmiddlewaretoken"\s+value="([^"]+)"/) ||
        html.match(/csrfmiddlewaretoken['":\s]+['"]([a-zA-Z0-9]{20,})/))?.[1] || '';
-    const rawCookies = homeRes.headers.get('set-cookie') || '';
-    const sessionCookie = rawCookies.match(/csrftoken=([^;]+)/)?.[1] || '';
+
+    // getAllSetCookies handles Node 18/20 multi-value Set-Cookie correctly
+    const setCookieValues = getAllSetCookies(homeRes.headers);
+    const allCookieStr = setCookieValues.join('; ');
+    const sessionCookie = allCookieStr.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
+    const cookieHeader = sessionCookie
+      ? `csrftoken=${sessionCookie}`
+      : allCookieStr;
 
     const r = await fetch('https://rentry.co/api/new', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://rentry.co',
+        'Referer': 'https://rentry.co/',
         'X-CSRFToken': csrf,
-        'Cookie': `csrftoken=${sessionCookie}`,
+        'Cookie': cookieHeader,
       },
       body: new URLSearchParams({ csrfmiddlewaretoken: csrf, text: content.body || ' ', edit_code: '' }).toString(),
     });
     const text = await r.text();
     let data;
     try { data = JSON.parse(text); } catch (_) { data = {}; }
-    if (data.url) return { resultUrl: data.url };
+    if (data.url) return { resultUrl: data.url.startsWith('http') ? data.url : 'https://rentry.co' + data.url };
     // Try extracting from redirect or HTML
     const locHeader = r.headers.get('location');
     if (locHeader) return { resultUrl: locHeader.startsWith('http') ? locHeader : 'https://rentry.co' + locHeader };
@@ -509,14 +520,17 @@ const REST_HANDLERS = {
     const html = await homePage.text();
     const csrfMatch = html.match(/name="csrfmiddlewaretoken"\s+value="([^"]+)"/);
     const csrf = csrfMatch ? csrfMatch[1] : '';
-    const cookie = homePage.headers.get('set-cookie')?.match(/csrftoken=([^;]+)/)?.[1] || '';
+    // Proper multi-value cookie extraction
+    const setCookieVals = getAllSetCookies(homePage.headers);
+    const allCookies = setCookieVals.join('; ');
+    const csrfToken = allCookies.match(/csrftoken=([^;,\s]+)/)?.[1] || '';
 
     const r = await fetch('https://ideone.com/', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Referer': 'https://ideone.com/',
-        'Cookie': `csrftoken=${cookie}`,
+        'Cookie': csrfToken ? `csrftoken=${csrfToken}` : allCookies,
       },
       body: new URLSearchParams({
         csrfmiddlewaretoken: csrf,
@@ -582,7 +596,7 @@ const REST_HANDLERS = {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'SEOBot/1.0' },
       body: new URLSearchParams({ action: 'login', lgname: creds.username || '', lgpassword: creds.password || '', lgtoken: loginToken || '', format: 'json' }).toString(),
     });
-    const loginCookies = loginRes.headers.get('set-cookie') || '';
+    const loginCookies = getAllSetCookies(loginRes.headers).join('; ');
 
     // Step 3: Get CSRF token
     const csrfRes = await fetch(`${api}?action=query&meta=tokens&format=json`, {
@@ -611,14 +625,14 @@ const REST_HANDLERS = {
     const tokenRes = await fetch(`${api}?action=query&meta=tokens&type=login&format=json`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const tokenData = await tokenRes.json().catch(() => ({}));
     const loginToken = tokenData?.query?.tokens?.logintoken || '';
-    const cookies1 = tokenRes.headers.get('set-cookie') || '';
+    const cookies1 = getAllSetCookies(tokenRes.headers).join('; ');
 
     const loginRes = await fetch(api, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookies1, 'User-Agent': 'Mozilla/5.0' },
       body: new URLSearchParams({ action: 'login', lgname: creds.username || '', lgpassword: creds.password || '', lgtoken: loginToken, format: 'json' }).toString(),
     });
-    const cookies2 = [cookies1, loginRes.headers.get('set-cookie') || ''].join('; ');
+    const cookies2 = mergeCookieStrings(cookies1, getAllSetCookies(loginRes.headers).join('; '));
 
     const csrfRes = await fetch(`${api}?action=query&meta=tokens&format=json`, { headers: { 'Cookie': cookies2, 'User-Agent': 'Mozilla/5.0' } });
     const csrfData = await csrfRes.json().catch(() => ({}));
@@ -647,7 +661,7 @@ const REST_HANDLERS = {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
       body: new URLSearchParams({ login: creds.username || '', password: creds.password || '', action: 'Login2Action', event: 'login' }).toString(),
     });
-    const cookieHeader = loginRes.headers.get('set-cookie') || '';
+    const cookieHeader = getAllSetCookies(loginRes.headers).join('; ');
 
     const pageTitle = (content.title || 'seo-post').toLowerCase().replace(/[^a-z0-9-]/g, '-');
     const createRes = await fetch(apiUrl, {
@@ -673,7 +687,7 @@ const REST_HANDLERS = {
       body: new URLSearchParams({ login: creds.username || '', password: creds.password || '' }).toString(),
       redirect: 'manual',
     });
-    const cookies = loginRes.headers.get('set-cookie') || '';
+    const cookies = getAllSetCookies(loginRes.headers).join('; ');
 
     // Create page via their API endpoint
     const createUrl = `${wikiBase}/api/page`;
@@ -922,7 +936,7 @@ const REST_HANDLERS = {
       body: new URLSearchParams({ email: creds.username || creds.email || '', password: creds.password || '', remember: '1' }).toString(),
       redirect: 'manual',
     });
-    const cookies = loginRes.headers.get('set-cookie') || '';
+    const cookies = getAllSetCookies(loginRes.headers).join('; ');
     if (!cookies) throw new Error('click4r.com: login failed — no session cookie');
 
     // Post content
@@ -1008,7 +1022,7 @@ const REST_HANDLERS = {
       body: new URLSearchParams({ email: creds.username || creds.email || '', password: creds.password || '', action: 'login' }).toString(),
       redirect: 'manual',
     });
-    const cookies = loginRes.headers.get('set-cookie') || '';
+    const cookies = getAllSetCookies(loginRes.headers).join('; ');
 
     // Submit press release
     const submitRes = await fetch('https://www.prlog.org/submit/', {
@@ -1029,7 +1043,7 @@ const REST_HANDLERS = {
       body: new URLSearchParams({ email: creds.username || creds.email || '', password: creds.password || '' }).toString(),
       redirect: 'manual',
     });
-    const cookies = loginRes.headers.get('set-cookie') || '';
+    const cookies = getAllSetCookies(loginRes.headers).join('; ');
 
     // Submit
     const r = await fetch('https://www.openpr.com/news/submit', {
@@ -1066,7 +1080,7 @@ const REST_HANDLERS = {
       body: new URLSearchParams({ Email: creds.username || creds.email || '', Password: creds.password || '', action: 'login', submit: 'Login' }).toString(),
       redirect: 'manual',
     });
-    const cookies = loginRes.headers.get('set-cookie') || '';
+    const cookies = getAllSetCookies(loginRes.headers).join('; ');
     const r = await fetch('https://ezinearticles.com/?Submit-Articles', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://ezinearticles.com/', 'User-Agent': 'Mozilla/5.0' },
@@ -1085,7 +1099,7 @@ const REST_HANDLERS = {
       body: new URLSearchParams({ login: creds.username || '', password: creds.password || '', submit: 'Login' }).toString(),
       redirect: 'manual',
     });
-    const cookies = loginRes.headers.get('set-cookie') || '';
+    const cookies = getAllSetCookies(loginRes.headers).join('; ');
     const r = await fetch('https://www.articlebase.com/submit.php', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies, 'Referer': 'https://www.articlebase.com/', 'User-Agent': 'Mozilla/5.0' },
@@ -1277,20 +1291,21 @@ const REST_HANDLERS = {
     const loginHtml = await loginPage.text();
     const tokenMatch = loginHtml.match(/name="_token"\s+value="([^"]+)"/);
     const csrfToken = tokenMatch ? tokenMatch[1] : '';
-    const loginCookies = loginPage.headers.get('set-cookie') || '';
+    const loginPageCookies = getAllSetCookies(loginPage.headers).join('; ');
 
     const loginRes = await fetch('https://justpaste.it/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Referer': 'https://justpaste.it/login',
-        'Cookie': loginCookies,
+        'Cookie': loginPageCookies,
         'User-Agent': 'Mozilla/5.0',
       },
       body: new URLSearchParams({ _token: csrfToken, email: creds.username || creds.email || '', password: creds.password || '', remember: '1' }).toString(),
       redirect: 'manual',
     });
-    const sessionCookies = [loginCookies, loginRes.headers.get('set-cookie') || ''].join('; ');
+    const loginResCookies = getAllSetCookies(loginRes.headers).join('; ');
+    const sessionCookies = mergeCookieStrings(loginPageCookies, loginResCookies);
 
     // Get create page for CSRF token
     const createPage = await fetch('https://justpaste.it/create', {
@@ -1298,13 +1313,15 @@ const REST_HANDLERS = {
     });
     const createHtml = await createPage.text();
     const createToken = (createHtml.match(/name="_token"\s+value="([^"]+)"/) || [])[1] || csrfToken;
+    // Merge any new cookies from create page
+    const createCookies = mergeCookieStrings(sessionCookies, getAllSetCookies(createPage.headers).join('; '));
 
     // Submit article
     const r = await fetch('https://justpaste.it/create', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Cookie': sessionCookies,
+        'Cookie': createCookies,
         'Referer': 'https://justpaste.it/create',
         'User-Agent': 'Mozilla/5.0',
       },
@@ -1320,8 +1337,8 @@ const REST_HANDLERS = {
       }).toString(),
       redirect: 'manual',
     });
-    const loc = r.headers.get('location') || r.url;
-    if (loc && loc !== 'https://justpaste.it/create') {
+    const loc = r.headers.get('location') || '';
+    if (loc && loc !== 'https://justpaste.it/create' && loc !== '/create') {
       return { resultUrl: loc.startsWith('http') ? loc : 'https://justpaste.it' + loc };
     }
     throw new Error('justpaste.it: post failed — check credentials');
@@ -1332,6 +1349,43 @@ const REST_HANDLERS = {
 
 function extractDomain(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
+}
+
+/**
+ * Extracts ALL Set-Cookie values from a fetch Response.
+ * fetch's headers.get('set-cookie') only returns the FIRST value on Node 18+.
+ * Node 20+ exposes headers.getSetCookie(); Node 18 requires iterating entries().
+ */
+function getAllSetCookies(headers) {
+  if (typeof headers.getSetCookie === 'function') return headers.getSetCookie();
+  const cookies = [];
+  for (const [key, value] of headers.entries()) {
+    if (key.toLowerCase() === 'set-cookie') cookies.push(value);
+  }
+  return cookies;
+}
+
+/**
+ * Merges multiple cookie strings (each may be "name=value; Path=/; ..." or "name=value; name2=value2")
+ * Returns a single "name1=value1; name2=value2" string suitable for use as a Cookie header.
+ */
+function mergeCookieStrings(...cookieStrings) {
+  const map = new Map();
+  for (const str of cookieStrings) {
+    if (!str) continue;
+    // Split on commas that separate distinct Set-Cookie entries (but not commas within values)
+    const entries = str.split(/;\s*(?=[^;=]+=[^;])/);
+    for (const entry of entries) {
+      // Take only the name=value part (before first semicolon)
+      const nameVal = entry.split(';')[0].trim();
+      const eqIdx = nameVal.indexOf('=');
+      if (eqIdx < 1) continue;
+      const k = nameVal.slice(0, eqIdx).trim();
+      const v = nameVal.slice(eqIdx + 1).trim();
+      if (k) map.set(k, v);
+    }
+  }
+  return [...map.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
 }
 
 async function safeFill(page, selector, text) {

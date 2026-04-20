@@ -1364,6 +1364,492 @@ const REST_HANDLERS = {
     }
     throw new Error('justpaste.it: post failed — check credentials');
   },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  NEW SITES (+30) — added for BLP 313→343 expansion
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── DEV / CODE HOSTING ────────────────────────────────────────────────────
+
+  'replit.com': async (url, creds, content) => {
+    const r = await fetch('https://replit.com/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Cookie': `connect.sid=${creds.token || creds.api_key}`,
+      },
+      body: JSON.stringify({
+        operationName: 'CreateRepl',
+        query: `mutation CreateRepl($input: CreateReplInput!) { createRepl(input: $input) { ... on Repl { id url } } }`,
+        variables: { input: { title: content.title || 'MyRepl', language: 'html', isPrivate: false } },
+      }),
+    });
+    const data = await r.json();
+    const replUrl = data?.data?.createRepl?.url;
+    if (!replUrl) throw new Error('replit.com: could not create repl — check session token');
+    return { resultUrl: `https://replit.com${replUrl}` };
+  },
+
+  'glitch.com': async (url, creds, content) => {
+    const r = await fetch('https://api.glitch.com/v1/projects', {
+      method: 'POST',
+      headers: { 'Authorization': creds.token || creds.api_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: (content.title || 'my-project').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30),
+        description: (content.body || '').slice(0, 200),
+        private: false,
+      }),
+    });
+    const data = await r.json();
+    if (!data?.id) throw new Error('glitch.com: project creation failed');
+    return { resultUrl: `https://${data.domain || data.name}.glitch.me` };
+  },
+
+  'codesandbox.io': async (url, creds, content) => {
+    const htmlBody = content.body?.includes('<') ? content.body : `<h1>${content.title || 'Page'}</h1><p>${content.body || ''}</p>`;
+    const r = await fetch('https://codesandbox.io/api/v1/sandboxes/define?json=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${creds.token || creds.api_key}` },
+      body: JSON.stringify({ files: { 'index.html': { content: htmlBody } } }),
+    });
+    const data = await r.json();
+    if (!data?.sandbox_id) throw new Error('codesandbox.io: sandbox creation failed');
+    return { resultUrl: `https://codesandbox.io/s/${data.sandbox_id}` };
+  },
+
+  'codeberg.org': async (url, creds, content) => {
+    const repoSlug = (content.title || 'seo-post').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40);
+    const r = await fetch('https://codeberg.org/api/v1/user/repos', {
+      method: 'POST',
+      headers: { 'Authorization': `token ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: repoSlug,
+        description: (content.body || '').slice(0, 255),
+        private: false,
+        auto_init: true,
+        default_branch: 'main',
+      }),
+    });
+    const data = await r.json();
+    if (!data?.html_url) throw new Error(`codeberg.org: repo creation failed — ${data?.message || ''}`);
+    return { resultUrl: data.html_url };
+  },
+
+  'neocities.org': async (url, creds, content) => {
+    const htmlBody = content.body?.includes('<') ? content.body : `<h1>${content.title || 'Page'}</h1><p>${content.body || ''}</p>`;
+    const formData = new FormData();
+    formData.append('index.html', new Blob([htmlBody], { type: 'text/html' }), 'index.html');
+    const r = await fetch('https://neocities.org/api/upload', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}` },
+      body: formData,
+    });
+    const data = await r.json();
+    if (data.result !== 'success') throw new Error(`neocities.org: ${data.message || 'upload failed'}`);
+    const me = await fetch('https://neocities.org/api/info', { headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}` } });
+    const meData = await me.json();
+    const sitename = meData?.info?.sitename || 'mysite';
+    return { resultUrl: `https://${sitename}.neocities.org` };
+  },
+
+  // ── HIGH-DA CONTENT PLATFORMS ─────────────────────────────────────────────
+
+  'producthunt.com': async (url, creds, content) => {
+    const r = await fetch('https://api.producthunt.com/v2/api/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `mutation CreatePost($input: CreatePostInput!) { createPost(input: $input) { post { id url } } }`,
+        variables: {
+          input: {
+            name: (content.title || 'My Product').slice(0, 60),
+            tagline: (content.body || '').slice(0, 100),
+            website: content.links?.[0]?.url || content.links?.[0] || 'https://example.com',
+          },
+        },
+      }),
+    });
+    const data = await r.json();
+    if (data.errors) throw new Error(`producthunt.com: ${data.errors[0].message}`);
+    return { resultUrl: data.data?.createPost?.post?.url || 'https://producthunt.com' };
+  },
+
+  'sourceforge.net': async (url, creds, content) => {
+    const projSlug = (content.title || 'seo-project').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30);
+    const r = await fetch('https://sourceforge.net/rest/p', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        shortname: projSlug,
+        name: content.title || projSlug,
+        short_description: (content.body || '').slice(0, 255),
+        external_homepage: content.links?.[0]?.url || content.links?.[0] || '',
+      }),
+    });
+    const data = await r.json();
+    if (!data?.shortname) throw new Error(`sourceforge.net: ${data?.error || 'project creation failed'}`);
+    return { resultUrl: `https://sourceforge.net/projects/${data.shortname}/` };
+  },
+
+  'kaggle.com': async (url, creds, content) => {
+    const basic = Buffer.from(`${creds.username}:${creds.token || creds.api_key}`).toString('base64');
+    const nbSlug = (content.title || 'notebook').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40);
+    const r = await fetch('https://www.kaggle.com/api/v1/kernels/push', {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: `${creds.username}/${nbSlug}`,
+        title: content.title || nbSlug,
+        code_file: `# ${content.title || 'Post'}\n${content.body || ''}`,
+        language: 'python',
+        kernel_type: 'script',
+        is_private: false,
+        enable_gpu: false,
+        enable_internet: false,
+        dataset_data_sources: [],
+        competition_data_sources: [],
+        kernel_data_sources: [],
+      }),
+    });
+    const data = await r.json();
+    if (!data?.ref) throw new Error(`kaggle.com: ${data?.message || 'notebook push failed'}`);
+    return { resultUrl: `https://www.kaggle.com/code/${creds.username}/${nbSlug}` };
+  },
+
+  'paperswithcode.com': async (url, creds, content) => {
+    const r = await fetch('https://paperswithcode.com/api/v1/papers/', {
+      method: 'POST',
+      headers: { 'Authorization': `Token ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: content.title || 'Paper',
+        abstract: (content.body || '').slice(0, 1000),
+        url_abs: content.links?.[0]?.url || content.links?.[0] || '',
+        url_pdf: content.links?.[1]?.url || content.links?.[1] || content.links?.[0]?.url || content.links?.[0] || '',
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`paperswithcode.com: ${JSON.stringify(data)}`);
+    return { resultUrl: data?.url || 'https://paperswithcode.com' };
+  },
+
+  // ── BLOG / NEWSLETTER PLATFORMS ───────────────────────────────────────────
+
+  'micro.blog': async (url, creds, content) => {
+    const r = await fetch('https://micro.blog/micropub', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ h: 'entry', name: content.title || '', content: content.body || '' }).toString(),
+    });
+    if (r.status === 201 || r.ok) {
+      const loc = r.headers.get('location') || 'https://micro.blog';
+      return { resultUrl: loc };
+    }
+    throw new Error(`micro.blog: HTTP ${r.status}`);
+  },
+
+  'bearblog.dev': async (url, creds, content) => {
+    const r = await fetch('https://bearblog.dev/api/posts/', {
+      method: 'POST',
+      headers: { 'Authorization': `Token ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: content.title || 'Post',
+        content: content.body || '',
+        published: true,
+        make_discoverable: true,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`bearblog.dev: ${data?.detail || 'post failed'}`);
+    return { resultUrl: data?.canonical_url || 'https://bearblog.dev' };
+  },
+
+  'mataroa.blog': async (url, creds, content) => {
+    const r = await fetch('https://mataroa.blog/api/posts/', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: content.title || 'Post', body: content.body || '' }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data?.url) throw new Error(`mataroa.blog: ${data?.error || 'post failed'}`);
+    return { resultUrl: data.url };
+  },
+
+  'buttondown.email': async (url, creds, content) => {
+    const r = await fetch('https://api.buttondown.email/v1/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Token ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject: content.title || 'Newsletter', body: content.body || '', status: 'sent' }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`buttondown.email: ${JSON.stringify(data)}`);
+    return { resultUrl: `https://buttondown.email/emails/${data.id || ''}` };
+  },
+
+  'typefully.com': async (url, creds, content) => {
+    const r = await fetch('https://api.typefully.com/v1/drafts/', {
+      method: 'POST',
+      headers: { 'X-API-KEY': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: `${content.title ? content.title + '\n\n' : ''}${content.body || ''}`,
+        schedule_date: 'next-free-slot',
+        share: true,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`typefully.com: ${data?.detail || 'draft creation failed'}`);
+    return { resultUrl: data?.share_url || 'https://typefully.com' };
+  },
+
+  'plume.social': async (url, creds, content) => {
+    const instance = creds.instance || 'https://plume.social';
+    const r = await fetch(`${instance}/api/v1/posts`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: content.title || 'Post',
+        subtitle: '',
+        content: content.body || '',
+        source: content.body || '',
+        cover_id: null,
+        tags: (content.tags || '').split(',').map(t => t.trim()).filter(Boolean),
+        license: '',
+        creation_date: new Date().toISOString(),
+        published: true,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`plume.social: ${data?.error || 'post failed'}`);
+    return { resultUrl: data?.url || instance };
+  },
+
+  // ── LINK AGGREGATORS ──────────────────────────────────────────────────────
+
+  'lobste.rs': async (url, creds, content) => {
+    const r = await fetch('https://lobste.rs/stories', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Token ${creds.token || creds.api_key}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        story: {
+          title: content.title || 'Link',
+          url: content.links?.[0]?.url || content.links?.[0] || url,
+          description: (content.body || '').slice(0, 500),
+          tags: (content.tags || 'programming').split(',').map(t => t.trim()).slice(0, 3),
+        },
+      }),
+    });
+    const data = await r.json();
+    if (!data?.short_id) throw new Error(`lobste.rs: ${data?.error || 'submission failed'}`);
+    return { resultUrl: `https://lobste.rs/s/${data.short_id}` };
+  },
+
+  'lemmy.world': async (url, creds, content) => {
+    const instance = creds.instance || 'https://lemmy.world';
+    // Login for JWT (or use token directly)
+    let jwt = creds.token || creds.api_key;
+    if (!jwt && creds.username && creds.password) {
+      const loginRes = await fetch(`${instance}/api/v3/user/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username_or_email: creds.username, password: creds.password }),
+      });
+      const loginData = await loginRes.json();
+      jwt = loginData?.jwt;
+    }
+    if (!jwt) throw new Error('lemmy.world: login failed — provide token or username+password');
+
+    // Resolve community id
+    const communityRes = await fetch(`${instance}/api/v3/community?name=${encodeURIComponent(creds.community || 'main')}`, {
+      headers: { 'Authorization': `Bearer ${jwt}` },
+    });
+    const communityData = await communityRes.json();
+    const communityId = communityData?.community_view?.community?.id || 2;
+
+    const r = await fetch(`${instance}/api/v3/post`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: content.title || 'Post',
+        body: content.body || '',
+        url: content.links?.[0]?.url || content.links?.[0] || undefined,
+        community_id: communityId,
+        nsfw: false,
+      }),
+    });
+    const data = await r.json();
+    if (!data?.post_view?.post?.ap_id) throw new Error(`lemmy.world: ${JSON.stringify(data.error || data)}`);
+    return { resultUrl: data.post_view.post.ap_id };
+  },
+
+  'kbin.social': async (url, creds, content) => {
+    // kbin uses Mastodon-compatible API
+    const instance = creds.instance || 'https://kbin.social';
+    const r = await fetch(`${instance}/api/v1/statuses`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: `${content.title ? content.title + '\n\n' : ''}${content.body || ''}\n\n${content.links?.[0]?.url || content.links?.[0] || ''}`.trim(),
+        visibility: 'public',
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`kbin.social: ${data?.error || 'post failed'}`);
+    return { resultUrl: data?.url || instance };
+  },
+
+  'stacker.news': async (url, creds, content) => {
+    const r = await fetch('https://stacker.news/api/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `session=${creds.token || creds.api_key}`,
+      },
+      body: JSON.stringify({
+        query: `mutation UpsertLink($url: String!, $title: String!) { upsertLink(url: $url, title: $title) { id } }`,
+        variables: {
+          url: content.links?.[0]?.url || content.links?.[0] || 'https://example.com',
+          title: content.title || 'Link',
+        },
+      }),
+    });
+    const data = await r.json();
+    const id = data?.data?.upsertLink?.id;
+    if (!id) throw new Error(`stacker.news: ${data?.errors?.[0]?.message || 'submission failed'}`);
+    return { resultUrl: `https://stacker.news/items/${id}` };
+  },
+
+  // ── SOCIAL / BOOKMARKING ──────────────────────────────────────────────────
+
+  'raindrop.io': async (url, creds, content) => {
+    const r = await fetch('https://api.raindrop.io/rest/v1/raindrop', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        link: content.links?.[0]?.url || content.links?.[0] || url,
+        title: content.title || 'Bookmark',
+        excerpt: (content.body || '').slice(0, 500),
+        tags: (content.tags || '').split(',').map(t => t.trim()).filter(Boolean),
+        collection: { $id: creds.collectionId ? Number(creds.collectionId) : 0 },
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data?.item?._id) throw new Error(`raindrop.io: ${data?.errorMessage || 'bookmark failed'}`);
+    return { resultUrl: `https://raindrop.io/my/links` };
+  },
+
+  'lu.ma': async (url, creds, content) => {
+    const r = await fetch('https://api.lu.ma/public/v1/event/create', {
+      method: 'POST',
+      headers: { 'x-luma-api-key': creds.token || creds.api_key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: content.title || 'Event',
+        description: content.body || '',
+        start_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+        end_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000).toISOString(),
+        timezone: 'America/New_York',
+        geo_address_visibility: 'none',
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`lu.ma: ${data?.error || 'event creation failed'}`);
+    return { resultUrl: data?.event?.url || 'https://lu.ma' };
+  },
+
+  'lottiefiles.com': async (url, creds, content) => {
+    const r = await fetch('https://graphql.lottiefiles.com/2022-08/', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `mutation CreatePost($input: CreateCommunityPostInput!) { createCommunityPost(input: $input) { id url } }`,
+        variables: {
+          input: {
+            title: content.title || 'Animation',
+            description: content.body || '',
+            url: content.links?.[0]?.url || content.links?.[0] || '',
+          },
+        },
+      }),
+    });
+    const data = await r.json();
+    if (data.errors) throw new Error(`lottiefiles.com: ${data.errors[0].message}`);
+    return { resultUrl: data?.data?.createCommunityPost?.url || 'https://lottiefiles.com' };
+  },
+
+  'launchpad.net': async (url, creds, content) => {
+    // Launchpad uses OAuth 1.0a — requires pre-authorized access token + secret
+    const projSlug = (content.title || 'seo-project').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 32);
+    const r = await fetch('https://api.launchpad.net/1.0/projects', {
+      method: 'POST',
+      headers: {
+        'Authorization': `OAuth realm="https://api.launchpad.net/",oauth_token="${creds.token}",oauth_consumer_key="${creds.consumer_key || 'seobot'}",oauth_signature_method="PLAINTEXT",oauth_signature="&${creds.token_secret || ''}"`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        'ws.op': 'new_project',
+        name: projSlug,
+        display_name: content.title || projSlug,
+        title: content.title || projSlug,
+        summary: (content.body || '').slice(0, 255),
+        description: content.body || '',
+      }).toString(),
+    });
+    if (!r.ok) throw new Error(`launchpad.net: HTTP ${r.status} — verify OAuth token, token_secret, and consumer_key in credentials`);
+    const loc = r.headers.get('location') || 'https://launchpad.net';
+    return { resultUrl: loc };
+  },
+
+  'sr.ht': async (url, creds, content) => {
+    const repoSlug = (content.title || 'repo').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30);
+    const r = await fetch('https://git.sr.ht/api/v1/repos', {
+      method: 'POST',
+      headers: { 'Authorization': `token ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: repoSlug,
+        description: (content.body || '').slice(0, 255),
+        visibility: 'public',
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(`sr.ht: ${data?.errors?.[0]?.reason || data?.reason || 'repo creation failed'}`);
+    return { resultUrl: `https://git.sr.ht/~${creds.username}/${repoSlug}` };
+  },
+
+  // ── OTHER ─────────────────────────────────────────────────────────────────
+
+  'pastery.net': async (url, creds, content) => {
+    const apiKey = creds.token || creds.api_key;
+    if (!apiKey) throw new Error('pastery.net: API key required');
+    const r = await fetch(`https://www.pastery.net/api/paste/?api_key=${apiKey}&title=${encodeURIComponent(content.title || '')}&duration=525600`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: content.body || ' ',
+    });
+    const data = await r.json();
+    if (!data?.id) throw new Error(`pastery.net: ${data?.error || 'paste failed'}`);
+    return { resultUrl: `https://www.pastery.net/${data.id}/` };
+  },
+
+  'outline.com': async (url, creds, content) => {
+    // outline = getoutline.com — self-hostable wiki; creds.host overrides base URL
+    const host = (creds.host || 'https://app.getoutline.com').replace(/\/$/, '');
+    const r = await fetch(`${host}/api/documents.create`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${creds.token || creds.api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: content.title || 'Document',
+        text: content.body || '',
+        publish: true,
+        ...(creds.collectionId ? { collectionId: creds.collectionId } : {}),
+      }),
+    });
+    const data = await r.json();
+    if (!data?.data?.url) throw new Error(`outline: ${data?.error || 'document creation failed'}`);
+    return { resultUrl: `${host}${data.data.url}` };
+  },
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────

@@ -8934,9 +8934,16 @@ async function bcProxyFetch(targetUrl, opts={}){
         }catch(e){
           text = await resp.text().catch(()=>'');
         }
-        // If the upstream site returned an error (4xx/5xx), continue to next proxy
-        // rather than returning immediately — another proxy might succeed
-        if(realStatus >= 400){ continue; }
+        // If the upstream site returned a hard error (5xx from target), skip to next proxy.
+        // For 4xx: return immediately — these are definitive rejections from the target
+        // (403 nonce fail, 404 not found, 429 rate limit, etc).
+        // Exception: 408 (Request Timeout) and 0 (Vercel itself failed) — try next proxy.
+        if(realStatus >= 500){ continue; }
+        if(realStatus === 408 || realStatus === 0){ continue; }
+        if(realStatus >= 400){
+          // Return the real status + any text so callers can inspect WP error pages
+          return { ok: false, status: realStatus, text, redirected: realRedirected, cookies: _bcLastCookies, proxy: proxy.label||proxy.url };
+        }
       } else if(proxy.json && resp.ok){
         try{ const d=await resp.json(); text=d.contents||''; }catch(e){ text=await resp.text().catch(()=>''); }
       } else {
@@ -8982,6 +8989,8 @@ function bcExtractWpPostId(html, pageUrl){
 
 // ── WORDPRESS REST API COMMENTER (PRIMARY) ──────────────────────
 async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
+  // Snapshot cookies from page GET — needed if WP requires session context for REST comments
+  const pageCookies = _bcLastCookies || '';
   const origin = new URL(pageUrl).origin;
   const restEndpoint = `${origin}/wp-json/wp/v2/comments`;
 
@@ -9016,7 +9025,7 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
       const restFetchOpts = proxy.vercel ? {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(vercelSecret() ? {'X-API-Key': vercelSecret()} : {}) },
-        body: JSON.stringify({ url: restEndpoint, method: 'POST', body: payload, headers: { 'Content-Type': 'application/json' } })
+        body: JSON.stringify({ url: restEndpoint, method: 'POST', body: payload, headers: { 'Content-Type': 'application/json' }, cookies: pageCookies, returnCookies: true })
       } : {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(proxy.extraHeaders||{}) },
@@ -9094,6 +9103,8 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
 
 // ── LEGACY wp-comments-post.php ENGINE v2 ───────────────────────
 async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
+  // Snapshot cookies from the page GET — required for WP nonce validation on the POST
+  const pageCookies = _bcLastCookies || '';
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
 
@@ -9189,7 +9200,9 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
             'Content-Type': 'application/x-www-form-urlencoded',
             'Referer': pageUrl,
             'Origin': new URL(pageUrl).origin
-          }
+          },
+          cookies: pageCookies,
+          returnCookies: true
         })
       } : {
         method: 'POST',
@@ -9954,7 +9967,12 @@ async function bcCommentOnSite(site, name, email, website, comment, logFn){
   let html = '';
   let fetchOk = false;
 
-  const pageResult = await bcProxyFetch(url, { timeout: 18000 });
+  let pageResult = await bcProxyFetch(url, { timeout: 18000 });
+  // If page fetch failed (408 timeout / all proxies exhausted), retry once with longer timeout
+  if(!pageResult.ok && (pageResult.status===408 || pageResult.status===0 || pageResult.error)){
+    logFn(`   ↻ Page fetch retry (extended timeout + fresh proxy rotation)...`,'warn');
+    pageResult = await bcProxyFetch(url, { timeout: 32000 });
+  }
   if(pageResult.ok && pageResult.text.length > 200){
     html = pageResult.text;
     fetchOk = true;
@@ -10046,10 +10064,12 @@ async function bcCommentOnSite(site, name, email, website, comment, logFn){
     }
   }
 
-  // ── STEP 7: Blind WP attempt ──
+  // ── STEP 7: Blind WP attempt (use real post ID if we have it) ──
   if(isWordPress){
     logFn(`   → Last resort: blind wp-comments-post.php POST...`,'info');
-    const fakeHtml = `<form action="${origin}/wp-comments-post.php"><input name="comment_post_ID" value="1"><input name="author"><input name="email"><input name="url"><textarea name="comment"></textarea></form>`;
+    // Use actual post ID from slug lookup (STEP 4) if available; fall back to '1' only as last resort
+    const blindPostId = wpPostId || '1';
+    const fakeHtml = `<form action="${origin}/wp-comments-post.php"><input name="comment_post_ID" value="${blindPostId}"><input name="author"><input name="email"><input name="url"><textarea name="comment"></textarea></form>`;
     return await bcWpLegacyComment(url, fakeHtml, name, email, website, comment);
   }
 
@@ -16915,59 +16935,28 @@ function renderSocialBlaster(el){
   }).join('');
 
   // Credential fields — only show relevant ones
-  // ── FULL CREDENTIAL FIELDS — all platforms that require auth ──
   const credFields = [
-    // TIER 1 — High-crawl social
-    {id:'pinterest',    label:'Pinterest Access Token',         ph:'Bearer token from Pinterest Developer Console',         link:'https://developers.pinterest.com/'},
-    {id:'reddit',       label:'Reddit OAuth Token',             ph:'OAuth access_token from reddit.com/prefs/apps',         link:'https://www.reddit.com/prefs/apps'},
-    {id:'twitter',      label:'Twitter/X Bearer Token',         ph:'Bearer token from developer.twitter.com',               link:'https://developer.twitter.com/en/portal/dashboard'},
-    {id:'linkedin',     label:'LinkedIn Access Token',          ph:'OAuth token from linkedin.com/developers',              link:'https://www.linkedin.com/developers/apps'},
-    {id:'facebook',     label:'Facebook Page Access Token',     ph:'Graph API page token from developers.facebook.com',     link:'https://developers.facebook.com/tools/explorer/'},
-    {id:'tumblr',       label:'Tumblr OAuth Token',             ph:'OAuth bearer token from tumblr.com/oauth/apps',         link:'https://www.tumblr.com/oauth/apps'},
-    {id:'quora',        label:'Quora Session Cookie',           ph:'m-b cookie value from browser devtools',               link:'https://www.quora.com/login'},
-    // TIER 2 — Bookmarking
-    {id:'pocket',       label:'Pocket consumer_key|access',     ph:'consumer_key|access_token (pipe-separated)',            link:'https://getpocket.com/developer/apps/new'},
-    {id:'diigo',        label:'Diigo username|apikey',          ph:'username|apikey (pipe-separated)',                      link:'https://www.diigo.com/api_keys/new/'},
-    {id:'instapaper',   label:'Instapaper OAuth Token',         ph:'OAuth access token from instapaper.com/api',            link:'https://www.instapaper.com/api'},
-    {id:'mix',          label:'Mix API Token',                  ph:'Bearer token from mix.com developer settings',          link:'https://mix.com/about/api'},
-    {id:'folkd',        label:'Folkd API Key',                  ph:'API key from folkd.com settings',                      link:'https://www.folkd.com/settings'},
-    {id:'flipboard',    label:'Flipboard API Token',            ph:'token from flipboard.com/developer',                   link:'https://flipboard.com/about/api'},
-    {id:'feedly',       label:'Feedly OAuth Token',             ph:'OAuth token from feedly.com/v3/auth/dev',               link:'https://developer.feedly.com/'},
-    {id:'raindrop',     label:'Raindrop.io Token',              ph:'OAuth token from app.raindrop.io/settings/developer',   link:'https://app.raindrop.io/settings/developer'},
-    {id:'pinboard',     label:'Pinboard user:apitoken',         ph:'username:YYYY-MM-DD:TOKEN (colon-separated)',            link:'https://pinboard.in/settings/password'},
-    {id:'wakelet',      label:'Wakelet Bearer Token',           ph:'Bearer token from wakelet.com developer settings',      link:'https://wakelet.com/developer'},
-    {id:'listly',       label:'List.ly API Token',              ph:'API token from list.ly/settings',                      link:'https://list.ly/settings'},
-    // TIER 3 — Niche / tech
-    {id:'lobsters',     label:'Lobste.rs Session Cookie',       ph:'_lobsters_session cookie from browser devtools',        link:'https://lobste.rs/login'},
-    {id:'producthunt',  label:'Product Hunt Token',             ph:'Bearer token from api.producthunt.com/v2/oauth',        link:'https://api.producthunt.com/v2/oauth/applications'},
-    {id:'hackernews',   label:'Hacker News user|password',      ph:'username|password (pipe-separated)',                    link:'https://news.ycombinator.com/login'},
-    {id:'crunchbase',   label:'Crunchbase API Key',             ph:'API key from crunchbase.com/account/api',               link:'https://www.crunchbase.com/account/api_info'},
-    // TIER 4 — Visual & creative
-    {id:'imgur',        label:'Imgur Access Token',             ph:'Bearer token from api.imgur.com/oauth2/addclient',      link:'https://api.imgur.com/oauth2/addclient'},
-    {id:'flickr',       label:'Flickr OAuth Token',             ph:'OAuth token from flickr.com/services/apps',             link:'https://www.flickr.com/services/apps/create/'},
-    {id:'500px',        label:'500px OAuth Token',              ph:'OAuth access token from 500px API app',                 link:'https://api.500px.com/'},
-    {id:'behance',      label:'Behance API Key',                ph:'API key from developer.behance.net',                   link:'https://developers.behance.net/'},
-    {id:'dribbble',     label:'Dribbble Access Token',          ph:'OAuth token from dribbble.com/account/applications',    link:'https://dribbble.com/account/applications'},
-    {id:'deviantart',   label:'DeviantArt OAuth Token',         ph:'OAuth token from deviantart.com/developers',            link:'https://www.deviantart.com/developers/'},
-    {id:'we_heart_it',  label:'We Heart It API Token',          ph:'access_token from weheartit.com/api',                  link:'https://weheartit.com/api/documentation'},
-    // TIER 5 — Social networks & micro-blogs
-    {id:'vk',           label:'VKontakte Access Token',         ph:'token from vk.com/dev → standalone app',               link:'https://vk.com/apps?act=manage'},
-    {id:'ok',           label:'Odnoklassniki Access Token',     ph:'access_token from api.ok.ru app',                      link:'https://apiok.ru/en/dev/'},
-    {id:'mastodon',     label:'Mastodon instance|token',        ph:'mastodon.social|access_token',                         link:'https://mastodon.social/settings/applications'},
-    {id:'bluesky',      label:'Bluesky handle|app-password',    ph:'user.bsky.social|app-password',                        link:'https://bsky.app/settings/app-passwords'},
-    {id:'threads',      label:'Threads Access Token',           ph:'OAuth token from developers.facebook.com/docs/threads', link:'https://developers.facebook.com/docs/threads'},
-    // TIER 6 — Blog / Publishing
-    {id:'medium',       label:'Medium Integration Token',       ph:'Token from medium.com/me/settings/security',            link:'https://medium.com/me/settings/security'},
-    {id:'devto',        label:'DEV.to API Key',                 ph:'API key from dev.to/settings/extensions',               link:'https://dev.to/settings/extensions'},
-    {id:'slideshare',   label:'SlideShare OAuth Token',         ph:'OAuth token from slideshare.net API app',               link:'https://www.slideshare.net/developers'},
-    {id:'goodreads',    label:'Goodreads OAuth Token',          ph:'OAuth token from goodreads.com/api/keys',               link:'https://www.goodreads.com/api/keys'},
-    {id:'angellist',    label:'Wellfound OAuth Token',          ph:'OAuth token from wellfound.com/api',                   link:'https://wellfound.com/api'},
-    // TIER 7 — Professional
-    {id:'digg',         label:'Digg Session Cookie',            ph:'Session cookie from browser devtools when logged in',   link:'https://digg.com/login'},
-    {id:'growthhackers',label:'GrowthHackers Session Cookie',   ph:'Session cookie from browser devtools when logged in',   link:'https://growthhackers.com/login'},
-    {id:'inbound',      label:'Inbound.org Session Cookie',     ph:'Session cookie from browser devtools when logged in',   link:'https://inbound.org/login'},
-    {id:'bizsugar',     label:'BizSugar Session Cookie',        ph:'Session cookie from browser devtools when logged in',   link:'https://bizsugar.com/login'},
-    {id:'metafilter',   label:'MetaFilter Session Cookie',      ph:'Session cookie from browser devtools when logged in',   link:'https://www.metafilter.com/login'},
+    {id:'pinterest',   label:'Pinterest Access Token',       ph:'Bearer token from Pinterest Developer Console'},
+    {id:'reddit',      label:'Reddit OAuth Token',           ph:'OAuth access_token from reddit.com/prefs/apps'},
+    {id:'twitter',     label:'Twitter/X Bearer Token',       ph:'Bearer token from developer.twitter.com'},
+    {id:'linkedin',    label:'LinkedIn Access Token',         ph:'OAuth token from linkedin.com/developers'},
+    {id:'tumblr',      label:'Tumblr OAuth Token',           ph:'OAuth token from tumblr.com/oauth/apps'},
+    {id:'pocket',      label:'Pocket consumer_key|access',   ph:'consumer_key|access_token (pipe-separated)'},
+    {id:'diigo',       label:'Diigo user|apikey',            ph:'username|apikey (pipe-separated)'},
+    {id:'imgur',       label:'Imgur Access Token',           ph:'Bearer token from api.imgur.com'},
+    {id:'flickr',      label:'Flickr OAuth Token',           ph:'OAuth token from flickr.com/services/apps'},
+    {id:'devto',       label:'DEV.to API Key',               ph:'API key from dev.to/settings/extensions'},
+    {id:'mastodon',    label:'Mastodon instance|token',      ph:'mastodon.social|access_token'},
+    {id:'bluesky',     label:'Bluesky handle|app-password',  ph:'user.bsky.social|app-password'},
+    {id:'feedly',      label:'Feedly OAuth Token',           ph:'OAuth token from feedly.com/v3/auth'},
+    {id:'raindrop',    label:'Raindrop.io Token',            ph:'OAuth token from raindrop.io/settings/developer'},
+    {id:'pinboard',    label:'Pinboard user|apitoken',       ph:'username:YYYY-MM-DD:HEX (pipe-separated)'},
+    {id:'medium',      label:'Medium Integration Token',     ph:'Token from medium.com/me/settings'},
+    {id:'producthunt', label:'Product Hunt Token',           ph:'Bearer token from api.producthunt.com'},
+    {id:'behance',     label:'Behance API Key',              ph:'API key from developer.behance.net'},
+    {id:'dribbble',    label:'Dribbble Access Token',        ph:'OAuth token from dribbble.com/account/applications'},
+    {id:'wakelet',     label:'Wakelet Bearer Token',         ph:'Bearer token from wakelet.com/developer'},
+    {id:'threads',     label:'Threads Access Token',         ph:'OAuth token from developers.facebook.com'},
   ];
 
   el.innerHTML=`
@@ -17102,44 +17091,20 @@ function renderSocialBlaster(el){
 
   <!-- TAB 1: CREDENTIALS -->
   <div id="ssb-tab-1" style="display:none">
-    <div class="notice notice-warn" style="font-size:10px">🔒 Credentials are stored in <strong>localStorage only</strong> — never transmitted anywhere except directly to each platform API. Click <strong>Save</strong> to persist a credential or <strong>Test</strong> to verify it live.</div>
-    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
-      <button class="btn btn-primary btn-sm" onclick="ssbSaveAllCreds()">💾 Save All Credentials</button>
-      <button class="btn btn-sm" onclick="ssbShowAllCreds()">👁 Show All</button>
-      <button class="btn btn-sm" onclick="ssbHideAllCreds()">🙈 Hide All</button>
-      <button class="btn btn-danger btn-sm" onclick="ssbClearAllCreds()">🗑 Clear All</button>
-      <span id="ssb-save-status" style="font-size:10px;font-family:var(--mono);color:var(--win-green);margin-left:6px"></span>
-    </div>
+    <div class="notice notice-warn" style="font-size:10px">Credentials are stored in localStorage only. Never transmitted anywhere except the platform APIs directly. Each field shows the exact auth format required.</div>
     <div class="grid2" style="gap:10px">
-      ${credFields.map((f)=>{
-        const plat = SSB_PLATFORMS.find(p=>p.id===f.id);
-        const saved = (()=>{ try{ return localStorage.getItem('ssb_cred_'+f.id)||''; }catch(e){ return ''; } })();
-        const hasSaved = saved.length > 0;
-        return `
-      <div class="card" style="margin-bottom:0;border:2px solid ${hasSaved?'var(--win-green)':'var(--win-border)'};" id="ssb-card-${f.id}">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-          <div class="card-title" style="font-size:9px;margin-bottom:0">${plat?.icon||'🔑'} ${f.label}</div>
-          <div style="display:flex;gap:3px;align-items:center">
-            <span id="ssb-badge-${f.id}" class="badge ${hasSaved?'badge-g':'badge-r'}" style="font-size:7px">${hasSaved?'SAVED':'EMPTY'}</span>
-          </div>
+      ${credFields.map((f,i)=>`
+      <div class="card" style="margin-bottom:0">
+        <div class="card-title" style="font-size:9px">${SSB_PLATFORMS.find(p=>p.id===f.id)?.icon||'🔑'} ${f.label}</div>
+        <input type="password" id="ssb-cred-${f.id}" placeholder="${f.ph}"
+          value="${(()=>{ try{ return localStorage.getItem('ssb_cred_'+f.id)||''; }catch(e){ return ''; } })()}"
+          oninput="try{localStorage.setItem('ssb_cred_${f.id}',this.value)}catch(e){}"
+          style="width:100%;font-size:10px" />
+        <div style="font-size:9px;color:var(--win-text-muted);margin-top:3px;font-family:var(--mono)">
+          Auth: <strong>${SSB_PLATFORMS.find(p=>p.id===f.id)?.auth||'token'}</strong> ·
+          <a href="${ssbGetAuthLink(f.id)}" target="_blank" style="color:var(--win-blue);text-decoration:underline">Get token →</a>
         </div>
-        <div style="display:flex;gap:4px;margin-bottom:4px">
-          <input type="password" id="ssb-cred-${f.id}" placeholder="${f.ph}"
-            value="${saved.replace(/"/g,'&quot;')}"
-            style="flex:1;font-size:10px;font-family:var(--mono)" />
-          <button class="btn btn-xs" style="white-space:nowrap" onclick="ssbToggleCredVis('${f.id}')">👁</button>
-        </div>
-        <div style="display:flex;gap:4px;margin-bottom:4px">
-          <button class="btn btn-xs btn-primary" style="flex:1" onclick="ssbSaveCred('${f.id}')">💾 Save</button>
-          <button class="btn btn-xs btn-blue" style="flex:1" onclick="ssbTestCred('${f.id}')">🔌 Test</button>
-          <button class="btn btn-xs btn-danger" onclick="ssbClearCred('${f.id}')">✕</button>
-        </div>
-        <div style="font-size:9px;color:var(--win-text-muted);font-family:var(--mono);display:flex;gap:6px;align-items:center">
-          <span>Auth: <strong>${plat?.auth||'token'}</strong></span>·
-          <a href="${f.link}" target="_blank" style="color:var(--win-blue);text-decoration:underline">Get token →</a>
-        </div>
-        <div id="ssb-test-result-${f.id}" style="font-size:9px;font-family:var(--mono);margin-top:3px;display:none"></div>
-      </div>`; }).join('')}
+      </div>`).join('')}
     </div>
   </div>
 
@@ -17185,149 +17150,6 @@ function renderSocialBlaster(el){
   ssbUpdateLiveStats();
 }
 
-// ── SSB CREDENTIAL HELPERS ──────────────────────────────────────
-
-function ssbSaveCred(id){
-  const el = document.getElementById('ssb-cred-'+id);
-  if(!el) return;
-  const val = el.value.trim();
-  try{ localStorage.setItem('ssb_cred_'+id, val); }catch(e){}
-  // Update badge + border
-  const badge = document.getElementById('ssb-badge-'+id);
-  const card  = document.getElementById('ssb-card-'+id);
-  if(badge){ badge.textContent = val?'SAVED':'EMPTY'; badge.className='badge '+(val?'badge-g':'badge-r'); }
-  if(card)  card.style.border  = '2px solid '+(val?'var(--win-green)':'var(--win-border)');
-  ssbFlashStatus(val ? '✔ Saved: '+id : '✕ Cleared: '+id);
-}
-
-function ssbClearCred(id){
-  const el = document.getElementById('ssb-cred-'+id);
-  if(el) el.value = '';
-  try{ localStorage.removeItem('ssb_cred_'+id); }catch(e){}
-  const badge = document.getElementById('ssb-badge-'+id);
-  const card  = document.getElementById('ssb-card-'+id);
-  if(badge){ badge.textContent='EMPTY'; badge.className='badge badge-r'; }
-  if(card)  card.style.border='2px solid var(--win-border)';
-  const res = document.getElementById('ssb-test-result-'+id);
-  if(res){ res.style.display='none'; res.textContent=''; }
-  ssbFlashStatus('✕ Cleared: '+id);
-}
-
-function ssbSaveAllCreds(){
-  const inputs = document.querySelectorAll('#ssb-tab-1 input[id^="ssb-cred-"]');
-  let count=0;
-  inputs.forEach(inp=>{
-    const id=inp.id.replace('ssb-cred-','');
-    const val=inp.value.trim();
-    try{ if(val){ localStorage.setItem('ssb_cred_'+id,val); count++; } else { localStorage.removeItem('ssb_cred_'+id); } }catch(e){}
-    const badge=document.getElementById('ssb-badge-'+id);
-    const card =document.getElementById('ssb-card-'+id);
-    if(badge){ badge.textContent=val?'SAVED':'EMPTY'; badge.className='badge '+(val?'badge-g':'badge-r'); }
-    if(card)  card.style.border='2px solid '+(val?'var(--win-green)':'var(--win-border)');
-  });
-  ssbFlashStatus('💾 Saved '+count+' credentials');
-}
-
-function ssbClearAllCreds(){
-  if(!confirm('Clear ALL saved credentials? This cannot be undone.')) return;
-  const inputs = document.querySelectorAll('#ssb-tab-1 input[id^="ssb-cred-"]');
-  inputs.forEach(inp=>{
-    const id=inp.id.replace('ssb-cred-','');
-    inp.value='';
-    try{ localStorage.removeItem('ssb_cred_'+id); }catch(e){}
-    const badge=document.getElementById('ssb-badge-'+id);
-    const card =document.getElementById('ssb-card-'+id);
-    if(badge){ badge.textContent='EMPTY'; badge.className='badge badge-r'; }
-    if(card)  card.style.border='2px solid var(--win-border)';
-    const res=document.getElementById('ssb-test-result-'+id);
-    if(res){ res.style.display='none'; }
-  });
-  ssbFlashStatus('🗑 All credentials cleared');
-}
-
-function ssbShowAllCreds(){
-  document.querySelectorAll('#ssb-tab-1 input[id^="ssb-cred-"]').forEach(i=>i.type='text');
-}
-function ssbHideAllCreds(){
-  document.querySelectorAll('#ssb-tab-1 input[id^="ssb-cred-"]').forEach(i=>i.type='password');
-}
-function ssbToggleCredVis(id){
-  const el=document.getElementById('ssb-cred-'+id);
-  if(el) el.type = el.type==='password'?'text':'password';
-}
-
-function ssbFlashStatus(msg){
-  const el=document.getElementById('ssb-save-status');
-  if(!el) return;
-  el.textContent=msg;
-  clearTimeout(el._t);
-  el._t=setTimeout(()=>{ el.textContent=''; }, 3000);
-}
-
-// Live credential test — pings each platform's verify endpoint
-async function ssbTestCred(id){
-  const token = (document.getElementById('ssb-cred-'+id)?.value||'').trim();
-  const res   = document.getElementById('ssb-test-result-'+id);
-  if(!res) return;
-  res.style.display='block';
-
-  if(!token){ res.style.color='var(--win-red)'; res.textContent='⚠ No credential entered.'; return; }
-  res.style.color='var(--win-text-muted)'; res.textContent='⏳ Testing…';
-
-  const testMap = {
-    pinterest:    ()=> smartFetch('https://api.pinterest.com/v5/user_account',{headers:{'Authorization':'Bearer '+token}}),
-    reddit:       ()=> smartFetch('https://oauth.reddit.com/api/v1/me',{headers:{'Authorization':'Bearer '+token,'User-Agent':'SEOPro/2.0'}}),
-    twitter:      ()=> smartFetch('https://api.twitter.com/2/users/me',{headers:{'Authorization':'Bearer '+token}}),
-    linkedin:     ()=> smartFetch('https://api.linkedin.com/v2/me',{headers:{'Authorization':'Bearer '+token}}),
-    facebook:     ()=> smartFetch('https://graph.facebook.com/me?access_token='+encodeURIComponent(token)),
-    tumblr:       ()=> smartFetch('https://api.tumblr.com/v2/user/info',{headers:{'Authorization':'Bearer '+token}}),
-    pocket:       ()=>{ const [ck,at]=token.split('|'); return smartFetch('https://getpocket.com/v3/get',{method:'POST',headers:{'Content-Type':'application/json','X-Accept':'application/json'},body:JSON.stringify({consumer_key:ck,access_token:at,count:1})}); },
-    diigo:        ()=>{ const [user,key]=token.split('|'); return smartFetch(`https://secure.diigo.com/api/v2/bookmarks?key=${key}&user=${user}&count=1`); },
-    imgur:        ()=> smartFetch('https://api.imgur.com/3/account/me',{headers:{'Authorization':'Bearer '+token}}),
-    flickr:       ()=> smartFetch(`https://api.flickr.com/services/rest/?method=flickr.test.login&format=json&nojsoncallback=1&oauth_token=${token}`),
-    devto:        ()=> smartFetch('https://dev.to/api/users/me',{headers:{'api-key':token}}),
-    mastodon:     ()=>{ const [inst,tok]=token.split('|'); return smartFetch(`https://${inst||'mastodon.social'}/api/v1/verify_credentials`,{headers:{'Authorization':'Bearer '+tok}}); },
-    bluesky:      ()=>{ const [handle,pwd]=token.split('|'); return smartFetch('https://bsky.social/xrpc/com.atproto.server.createSession',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({identifier:handle,password:pwd})}); },
-    feedly:       ()=> smartFetch('https://cloud.feedly.com/v3/profile',{headers:{'Authorization':'OAuth '+token}}),
-    raindrop:     ()=> smartFetch('https://api.raindrop.io/rest/v1/user',{headers:{'Authorization':'Bearer '+token}}),
-    pinboard:     ()=> smartFetch(`https://api.pinboard.in/v1/user/api_token/?auth_token=${token}&format=json`),
-    medium:       ()=> smartFetch('https://api.medium.com/v1/me',{headers:{'Authorization':'Bearer '+token}}),
-    producthunt:  ()=> smartFetch('https://api.producthunt.com/v2/api/graphql',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({query:'{viewer{user{id name}}}'})}),
-    behance:      ()=> smartFetch(`https://api.behance.net/v2/users/me?api_key=${token}`),
-    dribbble:     ()=> smartFetch('https://api.dribbble.com/v2/user',{headers:{'Authorization':'Bearer '+token}}),
-    wakelet:      ()=> smartFetch('https://wakelet.com/wake/api/user',{headers:{'Authorization':'Bearer '+token}}),
-    threads:      ()=> smartFetch('https://graph.threads.net/v1.0/me?access_token='+encodeURIComponent(token)),
-    vk:           ()=> smartFetch(`https://api.vk.com/method/users.get?access_token=${token}&v=5.131`),
-    mastodon:     ()=>{ const [inst,tok]=token.split('|'); return smartFetch(`https://${inst||'mastodon.social'}/api/v1/verify_credentials`,{headers:{'Authorization':'Bearer '+tok}}); },
-    crunchbase:   ()=> smartFetch(`https://api.crunchbase.com/api/v4/entities/organizations?user_key=${token}&limit=1`),
-    instapaper:   ()=> smartFetch('https://www.instapaper.com/api/1/account/verify_credentials',{method:'POST',headers:{'Authorization':'Bearer '+token}}),
-    flickr:       ()=> smartFetch(`https://www.flickr.com/services/rest/?method=flickr.test.login&format=json&nojsoncallback=1&auth_token=${token}`),
-    goodreads:    ()=> smartFetch(`https://www.goodreads.com/api/auth_user?key=${token}&format=json`),
-  };
-
-  try{
-    const fn = testMap[id];
-    if(!fn){ res.style.color='var(--win-yellow)'; res.textContent='⚠ No test endpoint for this platform — save and try blasting.'; return; }
-    const r = await fn();
-    if(r && r.ok){
-      res.style.color='var(--win-green)'; res.textContent='✔ Connection successful! Token is valid.';
-      // auto-save on successful test
-      try{ localStorage.setItem('ssb_cred_'+id, token); }catch(e){}
-      const badge=document.getElementById('ssb-badge-'+id);
-      const card=document.getElementById('ssb-card-'+id);
-      if(badge){ badge.textContent='SAVED'; badge.className='badge badge-g'; }
-      if(card)  card.style.border='2px solid var(--win-green)';
-    } else {
-      const statusCode = r ? r.status : '?';
-      res.style.color='var(--win-red)';
-      res.textContent=`✕ Failed (HTTP ${statusCode}) — check your token format or expiry.`;
-    }
-  } catch(e){
-    res.style.color='var(--win-red)';
-    res.textContent='✕ Error: '+e.message+' (CORS or network issue — token may still work in blast)';
-  }
-}
-
 function ssbSwitchTab(idx, el){
   [0,1,2,3].forEach(i=>{ const t=document.getElementById('ssb-tab-'+i); if(t) t.style.display=i===idx?'block':'none'; });
   document.querySelectorAll('#page-social_blaster .mtab').forEach((t,i)=>t.classList.toggle('on',i===idx));
@@ -17347,46 +17169,23 @@ function ssbGetAuthLink(pid){
     reddit:'https://www.reddit.com/prefs/apps',
     twitter:'https://developer.twitter.com/en/portal/dashboard',
     linkedin:'https://www.linkedin.com/developers/apps',
-    facebook:'https://developers.facebook.com/tools/explorer/',
     tumblr:'https://www.tumblr.com/oauth/apps',
-    quora:'https://www.quora.com/login',
     pocket:'https://getpocket.com/developer/apps/new',
     diigo:'https://www.diigo.com/api_keys/new/',
-    instapaper:'https://www.instapaper.com/api',
-    mix:'https://mix.com/about/api',
-    folkd:'https://www.folkd.com/settings',
-    flipboard:'https://flipboard.com/about/api',
+    imgur:'https://api.imgur.com/oauth2/addclient',
+    flickr:'https://www.flickr.com/services/apps/create/',
+    devto:'https://dev.to/settings/extensions',
+    mastodon:'https://mastodon.social/settings/applications',
+    bluesky:'https://bsky.app/settings/app-passwords',
     feedly:'https://developer.feedly.com/',
     raindrop:'https://app.raindrop.io/settings/developer',
     pinboard:'https://pinboard.in/settings/password',
-    wakelet:'https://wakelet.com/developer',
-    listly:'https://list.ly/settings',
-    lobsters:'https://lobste.rs/login',
+    medium:'https://medium.com/me/settings/security',
     producthunt:'https://api.producthunt.com/v2/oauth/applications',
-    hackernews:'https://news.ycombinator.com/login',
-    crunchbase:'https://www.crunchbase.com/account/api_info',
-    imgur:'https://api.imgur.com/oauth2/addclient',
-    flickr:'https://www.flickr.com/services/apps/create/',
-    '500px':'https://api.500px.com/',
     behance:'https://developers.behance.net/',
     dribbble:'https://dribbble.com/account/applications',
-    deviantart:'https://www.deviantart.com/developers/',
-    we_heart_it:'https://weheartit.com/api/documentation',
-    vk:'https://vk.com/apps?act=manage',
-    ok:'https://apiok.ru/en/dev/',
-    mastodon:'https://mastodon.social/settings/applications',
-    bluesky:'https://bsky.app/settings/app-passwords',
+    wakelet:'https://wakelet.com/developer',
     threads:'https://developers.facebook.com/docs/threads',
-    medium:'https://medium.com/me/settings/security',
-    devto:'https://dev.to/settings/extensions',
-    slideshare:'https://www.slideshare.net/developers',
-    goodreads:'https://www.goodreads.com/api/keys',
-    angellist:'https://wellfound.com/api',
-    digg:'https://digg.com/login',
-    growthhackers:'https://growthhackers.com/login',
-    inbound:'https://inbound.org/login',
-    bizsugar:'https://bizsugar.com/login',
-    metafilter:'https://www.metafilter.com/login',
   };
   return links[pid]||'#';
 }

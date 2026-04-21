@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2079,7 +2080,7 @@ class VercelAPI {
       if(!proxyResp.ok) throw new Error('Vercel backend proxy failed: HTTP '+proxyResp.status);
       const proxyData = await proxyResp.json();
       if(!proxyData.ok) {
-        let errMsg = 'HTTP '+(proxyData.status_code||proxyData.status);
+        let errMsg = 'HTTP '+proxyData.status_code;
         // proxyData.body is pre-parsed JSON when response was JSON, otherwise text
         const errBody = typeof proxyData.body === 'object' ? proxyData.body : {};
         try {
@@ -8923,10 +8924,10 @@ async function bcProxyFetch(targetUrl, opts={}){
 
       if(proxy.vercel){
         // Our Vercel proxy always returns 200 with a JSON envelope.
-        // Unwrap to get the real upstream status, body, redirect flag, and cookies.
+        // Unwrap to get the real upstream status_code, body, redirect flag, and cookies.
         try{
           const envelope = await resp.json();
-          realStatus    = envelope.status !== undefined ? envelope.status : (envelope.status_code || resp.status);
+          realStatus    = envelope.status_code || resp.status;
           realRedirected= envelope.redirected  || false;
           text          = envelope.body || envelope.text || '';
           // Thread cookies back so callers can use them in subsequent requests
@@ -9032,11 +9033,11 @@ async function bcWpRestComment(pageUrl, postId, name, email, website, comment){
       let json = null;
       try{ json = JSON.parse(rawText); }catch(e){}
 
-      // Vercel proxy: always 200 outer, real status in json.status, real body in json.body/json.text
+      // Vercel proxy: always 200 outer, real status in json.status_code, real body in json.body/json.text
       let innerStatus = resp.status;
       let wpData = null;
-      if(proxy.vercel && json && json.status !== undefined){
-        innerStatus = json.status;
+      if(proxy.vercel && json && json.status_code !== undefined){
+        innerStatus = json.status_code;
         const innerBody = json.body || json.text || '';
         if(typeof innerBody === 'string'){
           try{ wpData = JSON.parse(innerBody); }catch(e){ wpData = null; }
@@ -9208,7 +9209,7 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       let rawText = '';
       try { rawText = await resp.text(); } catch(e) { continue; }
 
-      // Vercel proxy always wraps response in JSON envelope with status + body.
+      // Vercel proxy always wraps response in JSON envelope with status_code + body.
       // Public proxies pass through the raw response directly.
       let innerStatus = resp.status;
       let text = rawText;
@@ -9216,8 +9217,8 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       if(isVercelProxy){
         let outerJson = null;
         try { outerJson = JSON.parse(rawText); } catch(e) {}
-        if(outerJson && outerJson.status !== undefined){
-          innerStatus    = outerJson.status;
+        if(outerJson && outerJson.status_code !== undefined){
+          innerStatus    = outerJson.status_code;
           innerRedirected= outerJson.redirected || false;
           if(typeof outerJson.body === 'string')       text = outerJson.body;
           else if(typeof outerJson.text === 'string')  text = outerJson.text;
@@ -9440,8 +9441,8 @@ async function bcGenericComment(pageUrl, html, name, email, website, comment, lo
       if(isVercel){
         let gOuter = null;
         try { gOuter = JSON.parse(gRawText); } catch(e) {}
-        if(gOuter && gOuter.status !== undefined){
-          gInnerStatus     = gOuter.status;
+        if(gOuter && gOuter.status_code !== undefined){
+          gInnerStatus     = gOuter.status_code;
           gInnerRedirected = gOuter.redirected || false;
           if(typeof gOuter.body === 'string')       gText = gOuter.body;
           else if(typeof gOuter.text === 'string')  gText = gOuter.text;

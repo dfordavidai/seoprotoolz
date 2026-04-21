@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8803,12 +8802,9 @@ function bcGetVercelProxyUrl(targetUrl, isPost, extraCookies) {
   const apiBase = (vercelUrl() || 'https://seoprotoolz.vercel.app').replace(/\/+$/,'');
   const secret  = vercelSecret(); // X-API-Key from Settings → Vercel Secret Key
   const ck = extraCookies||'';
-  if(isPost) {
-    return { url: `${apiBase}/api/proxy`, vercel: true, passBody: true, label: 'vercel-proxy', secret, extraCookies: ck };
-  } else {
-    const cookieParam = ck ? '&cookies='+encodeURIComponent(ck) : '';
-    return { url: `${apiBase}/api/proxy?url=${encodeURIComponent(targetUrl)}${cookieParam}`, vercel: true, passBody: false, label: 'vercel-proxy', secret, extraCookies: ck };
-  }
+  // Both GET and POST routes go through POST envelope so auth header is always included
+  // and the response always comes back as a JSON envelope with status_code.
+  return { url: `${apiBase}/api/proxy`, vercel: true, passBody: isPost, label: 'vercel-proxy', secret, extraCookies: ck, forcePost: !isPost, targetForGet: targetUrl };
 }
 
 function bcGetProxyList(targetUrl, isPost, opts){
@@ -8887,28 +8883,28 @@ async function bcProxyFetch(targetUrl, opts={}){
       }
       if(opts.asJson) fetchOpts.headers['Content-Type'] = 'application/json';
 
-      // For Vercel proxy POST: wrap target URL + body in JSON envelope + send API key
-      if(isPost && proxy.vercel && opts.body){
+      // For Vercel proxy: always wrap in JSON envelope so auth header is sent and
+      // response always comes back as { status_code, body, text, cookies, redirected }
+      if(proxy.vercel){
+        fetchOpts.method = 'POST';
         fetchOpts.headers['Content-Type'] = 'application/json';
         if(proxy.secret) fetchOpts.headers['X-API-Key'] = proxy.secret;
-        // Build upstream headers — preserve Authorization from opts.headers so API keys flow through
         const upstreamHdrs = {
-          'Content-Type': opts.contentType || (opts.asJson ? 'application/json' : 'application/x-www-form-urlencoded'),
-          'Referer': targetUrl,
           ...(opts.headers||{}),
           ...(opts.extraHeaders||{})
         };
+        if(isPost){
+          upstreamHdrs['Content-Type'] = opts.contentType || (opts.asJson ? 'application/json' : 'application/x-www-form-urlencoded');
+          upstreamHdrs['Referer'] = targetUrl;
+        }
         fetchOpts.body = JSON.stringify({
-          url: targetUrl,
-          method: opts.method || 'POST',
-          body: opts.body,
+          url: proxy.targetForGet || targetUrl,
+          method: isPost ? (opts.method || 'POST') : 'GET',
+          body: isPost ? (opts.body || null) : null,
           headers: upstreamHdrs,
           cookies: proxy.extraCookies || opts.extraCookies || '',
           returnCookies: true
         });
-      } else if(proxy.vercel && proxy.secret){
-        // GET via Vercel proxy — still needs auth header if secret is set
-        fetchOpts.headers['X-API-Key'] = proxy.secret;
       } else if(isPost && proxy.passBody && opts.body){
         fetchOpts.body = opts.body;
       }
@@ -8924,12 +8920,18 @@ async function bcProxyFetch(targetUrl, opts={}){
 
       if(proxy.vercel){
         // Our Vercel proxy always returns 200 with a JSON envelope.
-        // Unwrap to get the real upstream status_code, body, redirect flag, and cookies.
+        // Unwrap to get the real upstream status_code/status, body, redirect flag, and cookies.
         try{
           const envelope = await resp.json();
-          realStatus    = envelope.status_code || resp.status;
+          // Backend returns both status_code and status — accept either
+          realStatus    = envelope.status_code || envelope.status || resp.status;
           realRedirected= envelope.redirected  || false;
-          text          = envelope.body || envelope.text || '';
+          // Body may be parsed JSON object or raw text string
+          if(typeof envelope.body === 'string') text = envelope.body;
+          else if(typeof envelope.text === 'string') text = envelope.text;
+          else if(envelope.body && typeof envelope.body === 'object') {
+            try{ text = JSON.stringify(envelope.body); }catch(e){ text=''; }
+          }
           // Thread cookies back so callers can use them in subsequent requests
           if(envelope.cookies) _bcLastCookies = envelope.cookies;
         }catch(e){

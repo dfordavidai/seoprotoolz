@@ -4,6 +4,7 @@
  * Supports cookie threading for CSRF-protected sites (rentry.co, etc).
  * Supports arbitrary headers including auth tokens for API sites.
  *
+ * GET  /api/proxy?url=<encoded>&cookies=<encoded>   — simple GET proxy
  * POST /api/proxy
  * Body: {
  *   url        string   — Target URL to fetch
@@ -15,12 +16,14 @@
  *   returnCookies boolean — Whether to return Set-Cookie values
  * }
  * Response: {
- *   ok         boolean
- *   status     number
- *   text       string  — Response body as text
- *   body       object  — Response body parsed as JSON (if applicable)
- *   cookies    string  — All Set-Cookie values joined
- *   finalUrl   string  — Final URL after redirects
+ *   ok          boolean
+ *   status      number
+ *   status_code number  — alias of status (frontend reads this field)
+ *   redirected  boolean
+ *   text        string  — Response body as text
+ *   body        object  — Response body parsed as JSON (if applicable)
+ *   cookies     string  — All Set-Cookie values joined
+ *   finalUrl    string  — Final URL after redirects
  * }
  */
 
@@ -39,7 +42,7 @@ function isAuthorized(req) {
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, Authorization');
 }
 
@@ -56,20 +59,12 @@ function isBlockedUrl(url) {
 
 // ── COOKIE HELPERS ────────────────────────────────────────────────────────────
 
-function parseSetCookieHeaders(headers) {
-  // Node fetch returns set-cookie as array or single string
-  const raw = headers.raw?.()?.['set-cookie'] || [];
-  return Array.isArray(raw) ? raw : [raw].filter(Boolean);
-}
-
 function mergeCookies(existing, incoming) {
   const cookieMap = new Map();
-  // Parse existing
   (existing || '').split(';').forEach(pair => {
     const [k, ...v] = pair.trim().split('=');
     if (k && k.trim()) cookieMap.set(k.trim(), v.join('=').trim());
   });
-  // Parse incoming (set-cookie values, newline separated)
   incoming.forEach(setCookie => {
     const nameVal = setCookie.split(';')[0].trim();
     const [k, ...v] = nameVal.split('=');
@@ -83,30 +78,39 @@ function mergeCookies(existing, incoming) {
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!['GET', 'POST'].includes(req.method)) return res.status(405).json({ error: 'Method not allowed' });
   if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
 
-  let body = {};
-  try {
-    body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-  } catch (e) {
-    return res.status(400).json({ error: 'Invalid JSON body' });
-  }
+  // Parse request — GET uses query params, POST uses JSON body
+  let url, method, reqHeaders, reqBody, incomingCookies, timeout, returnCookies;
 
-  const {
-    url,
-    method = 'GET',
-    headers: reqHeaders = {},
-    body: reqBody = null,
-    cookies: incomingCookies = '',
-    timeout = 30,
-    returnCookies = true,
-  } = body;
+  if (req.method === 'GET') {
+    url             = req.query.url || '';
+    method          = 'GET';
+    reqHeaders      = {};
+    reqBody         = null;
+    incomingCookies = req.query.cookies || '';
+    timeout         = parseInt(req.query.timeout) || 30;
+    returnCookies   = true;
+  } else {
+    let body = {};
+    try {
+      body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid JSON body' });
+    }
+    url             = body.url;
+    method          = body.method || 'GET';
+    reqHeaders      = body.headers || {};
+    reqBody         = body.body || null;
+    incomingCookies = body.cookies || '';
+    timeout         = body.timeout || 30;
+    returnCookies   = body.returnCookies !== undefined ? body.returnCookies : true;
+  }
 
   if (!url) return res.status(400).json({ error: 'url is required' });
   if (isBlockedUrl(url)) return res.status(403).json({ error: 'Blocked URL' });
 
-  // Validate URL
   let parsedUrl;
   try { parsedUrl = new URL(url); } catch (e) {
     return res.status(400).json({ error: 'Invalid URL: ' + url });
@@ -115,18 +119,17 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Only http/https URLs allowed' });
   }
 
-  // Build fetch options
+  // Build fetch headers
   const fetchHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
     ...reqHeaders,
   };
 
-  // Inject cookies if provided (for CSRF threading)
   if (incomingCookies) {
     fetchHeaders['Cookie'] = incomingCookies;
   }
 
-  // Remove headers that could cause issues
+  // Remove problematic hop-by-hop headers
   delete fetchHeaders['host'];
   delete fetchHeaders['Host'];
   delete fetchHeaders['origin'];
@@ -139,27 +142,27 @@ export default async function handler(req, res) {
   const redirectHistory = [];
 
   try {
-    // Manual redirect handling to capture intermediate Set-Cookie headers
-    let currentUrl = url;
-    let accumulatedCookies = incomingCookies;
-    let redirectCount = 0;
+    let currentUrl          = url;
+    let accumulatedCookies  = incomingCookies;
+    let currentMethod       = method.toUpperCase();
+    let currentBody         = reqBody;
+    let redirectCount       = 0;
 
     while (redirectCount < 10) {
       const opts = {
-        method: method.toUpperCase(),
-        headers: { ...fetchHeaders, ...(accumulatedCookies ? { Cookie: accumulatedCookies } : {}) },
-        signal: controller.signal,
-        redirect: 'manual', // handle redirects manually to capture cookies
+        method:   currentMethod,
+        headers:  { ...fetchHeaders, ...(accumulatedCookies ? { Cookie: accumulatedCookies } : {}) },
+        signal:   controller.signal,
+        redirect: 'manual',
       };
 
-      // Only send body for non-GET/HEAD requests
-      if (reqBody != null && !['GET','HEAD'].includes(opts.method)) {
-        opts.body = typeof reqBody === 'string' ? reqBody : JSON.stringify(reqBody);
+      if (currentBody != null && !['GET', 'HEAD'].includes(currentMethod)) {
+        opts.body = typeof currentBody === 'string' ? currentBody : JSON.stringify(currentBody);
       }
 
       fetchResponse = await fetch(currentUrl, opts);
 
-      // Collect cookies from this response
+      // Accumulate Set-Cookie headers
       if (returnCookies) {
         const setCookies = [];
         fetchResponse.headers.forEach((value, key) => {
@@ -170,30 +173,34 @@ export default async function handler(req, res) {
         }
       }
 
-      // Follow redirect
+      // Follow redirects manually so we capture every Set-Cookie along the chain
       if ([301, 302, 303, 307, 308].includes(fetchResponse.status)) {
         const location = fetchResponse.headers.get('location');
         if (!location) break;
         redirectHistory.push(currentUrl);
         currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
-        // For 303, always switch to GET
+        // 303 always becomes GET with no body
         if (fetchResponse.status === 303) {
-          opts.method = 'GET';
-          delete opts.body;
+          currentMethod = 'GET';
+          currentBody   = null;
+        }
+        // 301/302 POST→GET convention (match browser behaviour)
+        if ([301, 302].includes(fetchResponse.status) && currentMethod === 'POST') {
+          currentMethod = 'GET';
+          currentBody   = null;
         }
         redirectCount++;
         continue;
       }
-      break; // Non-redirect — we're done
+      break; // non-redirect → done
     }
 
     clearTimeout(timer);
 
     const responseText = await fetchResponse.text().catch(() => '');
-    let responseJson = null;
+    let responseJson   = null;
     try { responseJson = JSON.parse(responseText); } catch (_) {}
 
-    // Collect all Set-Cookie from final response
     const finalSetCookies = [];
     fetchResponse.headers.forEach((value, key) => {
       if (key.toLowerCase() === 'set-cookie') finalSetCookies.push(value);
@@ -202,25 +209,29 @@ export default async function handler(req, res) {
       ? mergeCookies(incomingCookies, finalSetCookies)
       : '';
 
-    const wasRedirected = redirectHistory.length > 0;
+    const upstreamStatus = fetchResponse.status;
+    const wasRedirected  = redirectHistory.length > 0;
+
     return res.status(200).json({
-      ok: fetchResponse.ok,
-      status: fetchResponse.status,        // backward compat
-      status_code: fetchResponse.status,   // frontend reads status_code — this was the false-flag bug
-      text: responseText,
-      body: responseJson,
-      cookies: allCookies,
-      finalUrl: fetchResponse.url || currentUrl,
-      redirects: redirectHistory,
-      redirected: wasRedirected,           // frontend reads redirected for WP 302 success detection
+      ok:          fetchResponse.ok,
+      status:      upstreamStatus,
+      status_code: upstreamStatus,   // ← frontend reads status_code in all unwrap paths
+      redirected:  wasRedirected,
+      text:        responseText,
+      body:        responseJson,
+      cookies:     allCookies,
+      finalUrl:    currentUrl,
+      redirects:   redirectHistory,
     });
 
   } catch (err) {
     clearTimeout(timer);
     const isTimeout = err.name === 'AbortError';
     return res.status(502).json({
-      ok: false,
-      error: isTimeout ? `Request timed out after ${timeout}s` : err.message,
+      ok:          false,
+      status:      502,
+      status_code: 502,
+      error:       isTimeout ? `Request timed out after ${timeout}s` : err.message,
       url,
     });
   }

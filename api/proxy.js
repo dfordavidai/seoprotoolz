@@ -202,14 +202,17 @@ export default async function handler(req, res) {
       ? mergeCookies(incomingCookies, finalSetCookies)
       : '';
 
+    const wasRedirected = redirectHistory.length > 0;
     return res.status(200).json({
       ok: fetchResponse.ok,
-      status: fetchResponse.status,
+      status: fetchResponse.status,        // backward compat
+      status_code: fetchResponse.status,   // frontend reads status_code — this was the false-flag bug
       text: responseText,
       body: responseJson,
       cookies: allCookies,
       finalUrl: fetchResponse.url || currentUrl,
       redirects: redirectHistory,
+      redirected: wasRedirected,           // frontend reads redirected for WP 302 success detection
     });
 
   } catch (err) {

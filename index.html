@@ -13005,29 +13005,10 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
   if(onProgress) onProgress(10,'Connecting to Archive.org S3...');
   const uploadUrl = 'https://s3.us.archive.org/'+identifier+'/'+filename;
   const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
-  let res;
-  if(vercelBase){
-    // Route through Vercel proxy to bypass CORS
-    if(onProgress) onProgress(20,'Uploading via proxy...');
-    const proxyRes = await fetch(vercelBase+'/api/proxy',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        url:uploadUrl,
-        method:'PUT',
-        headers,
-        bodyBase64: (()=>{ const b=new Uint8Array(pdfBytes); let s=''; const c=8192; for(let i=0;i<b.length;i+=c) s+=btoa(String.fromCharCode(...b.subarray(i,i+c))); return s; })(),
-        timeout:60
-      })
-    });
-    const proxyData = await proxyRes.json();
-    if(proxyData.status&&proxyData.status>=400) throw new Error('Archive.org upload failed: HTTP '+proxyData.status);
-  } else {
-    // Direct browser upload (may fail with CORS on some browsers)
-    if(onProgress) onProgress(20,'Uploading directly (set Vercel URL in Settings to avoid CORS issues)...');
-    res = await fetch(uploadUrl,{method:'PUT',headers,body:pdfBytes});
-    if(!res.ok) throw new Error('Archive.org upload failed: HTTP '+res.status+' — Set Vercel URL in Settings to bypass CORS');
-  }
+  // Direct S3 upload — archive.org sends permissive CORS headers (Access-Control-Allow-Origin: *)
+  if(onProgress) onProgress(20,'Uploading to Archive.org S3...');
+  const res = await fetch(uploadUrl,{method:'PUT',headers,body:pdfBytes});
+  if(!res.ok) throw new Error('Archive.org upload failed: HTTP '+res.status+' — Check your S3 Access/Secret keys at archive.org/account/s3.php');
   if(onProgress) onProgress(80,'Upload complete, waiting for processing...');
   await sleep(3000);
   const liveUrl = 'https://archive.org/details/'+identifier;
@@ -14254,19 +14235,31 @@ async function pdfBlastPlatformsV2(pdfBytes,job,selectedPlatformIds,credentials,
       for(let i=0;i<bytes.length;i+=cs) b64+=btoa(String.fromCharCode(...bytes.subarray(i,i+cs)));
       const filename=job.title.toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,60)+'.pdf';
       if(pid==='archive'){
-        const c=credentials.archive||{};
+        // Always get latest keys from PDF_STATE (populated from settings) as fallback
+        const c={
+          accessKey:(credentials.archive&&credentials.archive.accessKey)||PDF_STATE.archiveAccessKey||'',
+          secretKey:(credentials.archive&&credentials.archive.secretKey)||PDF_STATE.archiveSecretKey||''
+        };
         if(c.accessKey&&c.secretKey){
-          if(vercelBase){
-            const res=await fetch(vercelBase+'/api/upload-pdf',{method:'POST',headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({platform:'archive',pdfBase64:b64,filename,title:job.title,keyword:job.keyword,accessKey:c.accessKey,secretKey:c.secretKey})});
-            const d=await res.json();
-            if(d.ok&&d.url) result={...result,status:'live',url:d.url,note:'Archive.org S3'};
-            else throw new Error(d.error||'Archive upload failed');
-          } else {
+          // Always try direct S3 first — archive.org has permissive CORS headers
+          try {
             const r=await archiveUploadPDF(pdfBytes,job.title,job.keyword,c.accessKey,c.secretKey,(pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg}));
-            result={...result,status:'live',url:r.url,note:'Archive.org S3 direct'};
+            result={...result,status:'live',url:r.url,note:'Archive.org S3 ✓'};
+          } catch(directErr){
+            // If direct fails and Vercel is configured, try proxying through it
+            if(vercelBase){
+              const res=await fetch(vercelBase+'/api/upload-pdf',{method:'POST',headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({platform:'archive',pdfBase64:b64,filename,title:job.title,keyword:job.keyword,accessKey:c.accessKey,secretKey:c.secretKey})});
+              const d=await res.json();
+              if(d.ok&&d.url) result={...result,status:'live',url:d.url,note:'Archive.org via Vercel proxy'};
+              else throw new Error(d.error||'Archive upload failed via both direct and proxy');
+            } else {
+              throw directErr;
+            }
           }
-        } else { result.note='Add Archive.org S3 keys'; }
+        } else {
+          result.note='Add Archive.org S3 keys in Settings → Archive.org S3 Keys section';
+        }
       } else {
         result=await attemptProxiedUpload(pdfBytes,job,plat,credentials[pid]||{},vercelBase);
       }
@@ -14321,18 +14314,6 @@ function renderPDFTools(el){
   el.innerHTML=`
     <div class="page-title">📄 PDF SEO — God-Tier v3.0</div>
     <div class="page-sub">// Groq AI content · jsPDF generation · Archive.org S3 · Multi-platform blast · Smart upload scanner</div>
-
-    <!-- CONFIG BANNER -->
-    <div class="notice notice-info" style="margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <strong>⚙ Config:</strong>
-      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-groq-key" placeholder="Groq API Key (llama-3.3-70b)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.groqKey=this.value.trim();if(typeof settingSet==='function')settingSet('groq_api_key',this.value.trim())"></div>
-      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-vercel-base" placeholder="Vercel Backend URL (https://your.vercel.app)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.vercelBase=this.value.trim().replace(/\\/$/,'');if(typeof settingSet==='function')settingSet('vercel_url',PDF_STATE.vercelBase)"></div>
-      <div class="fg" style="min-width:120px;margin:0">
-        <select id="cfg-groq-model" onchange="_groqModel=this.value" style="font-size:11px">
-          ${GROQ_MODELS.map(m=>`<option value="${m}">${m}</option>`).join('')}
-        </select>
-      </div>
-    </div>
 
     <!-- STATS ROW -->
     <div class="grid4" style="margin-bottom:16px">
@@ -14627,26 +14608,17 @@ function renderPDFTools(el){
     </div>
   `;
 
-  // Sync config fields from settings and PDF_STATE
+  // Sync PDF_STATE from settings on every render
   setTimeout(()=>{
-    // Re-sync PDF_STATE from global settings (picks up changes made in Settings tab)
     if(typeof settingGet==='function'){
       PDF_STATE.groqKey         = settingGet('groq_api_key')||PDF_STATE.groqKey||'';
-      PDF_STATE.vercelBase      = ((settingGet('vercel_url')||'')).replace(/\/+$/,'')||PDF_STATE.vercelBase||'';
+      PDF_STATE.vercelBase      = (settingGet('vercel_url')||'').replace(/\/+$/,'')||PDF_STATE.vercelBase||'';
       PDF_STATE.archiveAccessKey= settingGet('pdf_archive_access')||PDF_STATE.archiveAccessKey||'';
       PDF_STATE.archiveSecretKey= settingGet('pdf_archive_secret')||PDF_STATE.archiveSecretKey||'';
     }
-    const gk=document.getElementById('cfg-groq-key');
-    const vb=document.getElementById('cfg-vercel-base');
+    // Sync vercel URL to scanner proxy field if present
     const sp=document.getElementById('scanner-proxy-base');
-    if(gk) gk.value=PDF_STATE.groqKey||'';
-    if(vb) vb.value=PDF_STATE.vercelBase||'';
     if(sp && PDF_STATE.vercelBase) sp.value=PDF_STATE.vercelBase;
-    // Sync vercel to scanner field
-    if(vb) vb.addEventListener('input',()=>{ if(sp) sp.value=vb.value.trim(); });
-    // Show "from settings" badge if keys are pre-loaded
-    if(PDF_STATE.groqKey && gk){ gk.style.borderColor='var(--sup-green)'; gk.title='✓ Loaded from Settings'; }
-    if(PDF_STATE.vercelBase && vb){ vb.style.borderColor='var(--sup-green)'; vb.title='✓ Loaded from Settings'; }
     pdfRenderQueue();
     pdfUpdateStats();
   },50);
@@ -19099,9 +19071,6 @@ const SETTINGS_DEFAULTS = {
   pdf_archive_access:    '',
   pdf_archive_secret:    '',
 
-  // ── PDF SEO / ARCHIVE.ORG ──
-  pdf_archive_access:    '',
-  pdf_archive_secret:    '',
 
   // ── SESSION MANAGER ──
   csm_rotateOnFail:      true,
@@ -19682,11 +19651,7 @@ function renderSettings(el) {
     sField('pdf_archive_secret','S3 Secret Key','password',{ph:'your-archive-secret-key',hint:'From archive.org/account/s3.php — second field'}) +
     '<div style="font-size:10px;color:var(--win-text-muted);font-family:var(--mono);margin-top:4px">Get keys free at <a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">archive.org/account/s3.php</a> — keys are stored here and auto-used in PDF SEO blast.</div>'
   )}
-  ${sSection('🏛️','Archive.org S3 Keys','Access &amp; Secret keys for fully-automated PDF uploads to Internet Archive (DA94) — enter once, used everywhere',
-    sField('pdf_archive_access','S3 Access Key','text',{ph:'your-archive-access-key',hint:'From archive.org/account/s3.php — Access key field',width:'280px'}) +
-    sField('pdf_archive_secret','S3 Secret Key','password',{ph:'your-archive-secret-key',hint:'From archive.org/account/s3.php — Secret key field'}) +
-    '<div style="font-size:10px;color:var(--win-text-muted);font-family:var(--mono);margin-top:4px">Get keys free at <a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">archive.org/account/s3.php</a> — saved here, auto-used in PDF SEO blast.</div>'
-  )}
+
   ${sSection('▲','Vercel Backend','Serverless backend API on Vercel for CORS bypass &amp; server-side operations',
     sField('vercel_url','Vercel API URL','text',{ph:'https://your-app.vercel.app',hint:'Base URL of your deployed Vercel backend',width:'280px'}) +
     sField('vercel_secret','Vercel Secret Key','password',{ph:'your-secret-api-key',hint:'Auth header sent as X-API-Key on every request'}) +

@@ -1,9 +1,10 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>SEO PARASITE PRO v18 — 313 Actionable Sites · Cleaned · Vercel + Supabase</title>
+<title>DaveAI SEO</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Tahoma:wght@400;700&display=swap" rel="stylesheet">
 <style>
 /* =============================================
@@ -899,7 +900,7 @@ tr:hover td{background:#c8d8f0}
   <div class="header">
     <div class="logo">
       <div class="logo-icon">⚡</div>
-      SEO PARASITE PRO
+      DaveAI SEO
       <span class="logo-ver">v9.0 · GLOBAL BLAST · 20 PLATFORMS</span>
     </div>
     <div class="header-right">
@@ -1069,7 +1070,7 @@ tr:hover td{background:#c8d8f0}
     <div class="sb-panel" id="sb-accounts">Accounts: 0</div>
     <div class="sb-panel" id="sb-keywords">Keywords: 0</div>
     <div class="sb-panel" id="sb-urls">Live URLs: 0</div>
-    <div class="sb-panel" style="margin-left:auto">SEO Parasite Pro v9 · 20 Platforms</div>
+    <div class="sb-panel" style="margin-left:auto">DaveAI SEO</div>
   </div>
 </div>
 
@@ -2541,6 +2542,110 @@ document.querySelectorAll('.nav-item[data-page]').forEach(el=>{
 // ═══════════════════════════════════════════════════════════════
 // PAGE RENDERERS
 // ═══════════════════════════════════════════════════════════════
+// Proxy Manager standalone page — renders proxy settings + fetch/test UI
+function renderProxyManagerPage(el){
+  if(!el) el = document.getElementById('page-proxy_manager');
+  if(!el) return;
+  const proxies = JSON.parse(localStorage.getItem('spp_proxies')||'[]');
+  el.innerHTML = `
+  <div class="page-title">🛡 Proxy Manager</div>
+  <div class="page-sub">// IP rotation · Testing · Geo-filtering · Sources</div>
+  <div class="grid2" style="gap:10px;margin-bottom:10px">
+    <div class="card">
+      <div class="card-title flex aic jb">📥 Proxy Sources <span style="font-size:9px;opacity:0.7">paste list or fetch from URL</span></div>
+      <div class="fg"><label class="lbl">Paste Proxies (ip:port or ip:port:user:pass)</label>
+        <textarea id="pm-paste" style="height:120px;font-size:10px" placeholder="192.168.1.1:8080&#10;10.0.0.1:3128:user:pass"></textarea>
+      </div>
+      <div class="fg"><label class="lbl">Fetch from URL</label>
+        <div class="row"><input type="url" id="pm-url" placeholder="https://example.com/proxies.txt" style="flex:1">
+        <button class="btn btn-primary" onclick="pmFetchUrl()">Fetch</button></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button class="btn btn-primary" onclick="pmImport()">⬆ Import</button>
+        <button class="btn" onclick="pmTestAll()">⚡ Test All</button>
+        <button class="btn btn-danger" onclick="pmClear()">🗑 Clear</button>
+        <span class="mono xs tm" style="margin-left:auto">${proxies.length} loaded</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">⚙ Rotation Settings</div>
+      <div class="fg"><label class="lbl">Rotation Mode</label>
+        <select id="pm-rotation" onchange="pmSaveSetting('pm_rotationMode',this.value)">
+          <option value="roundrobin" ${settingGet('pm_rotationMode')==='roundrobin'?'selected':''}>Round Robin</option>
+          <option value="random" ${settingGet('pm_rotationMode')==='random'?'selected':''}>Random</option>
+          <option value="elite-first" ${settingGet('pm_rotationMode')==='elite-first'?'selected':''}>Elite First</option>
+        </select>
+      </div>
+      <div class="fg"><label class="lbl">Test Timeout (ms)</label>
+        <input type="number" id="pm-timeout" value="${settingGet('pm_testTimeout')||5000}" min="2000" max="30000" step="500" onchange="pmSaveSetting('pm_testTimeout',+this.value)">
+      </div>
+      <div class="fg"><label class="lbl">Concurrent Tests</label>
+        <input type="number" id="pm-concurrent" value="${settingGet('pm_concurrentTests')||5}" min="1" max="20" onchange="pmSaveSetting('pm_concurrentTests',+this.value)">
+      </div>
+      <div class="fg" style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="pm-elite" ${settingGet('pm_preferElite')?'checked':''} onchange="pmSaveSetting('pm_preferElite',this.checked)">
+        <label for="pm-elite" class="lbl" style="margin:0">Prefer Elite Proxies</label>
+      </div>
+      <div class="fg" style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="pm-western" ${settingGet('pm_westernOnly')?'checked':''} onchange="pmSaveSetting('pm_westernOnly',this.checked)">
+        <label for="pm-western" class="lbl" style="margin:0">Western Countries Only</label>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title flex aic jb">📋 Proxy List <span style="font-size:9px;opacity:0.7">${proxies.filter(p=>p.ok).length} alive · ${proxies.filter(p=>p.dead).length} dead</span></div>
+    ${proxies.length === 0 ? '<div class="notice notice-info">No proxies loaded. Paste a list above and click Import, or fetch from a URL.</div>' :
+    '<div class="tw"><table><thead><tr><th>Proxy</th><th>Status</th><th>Speed</th><th>Country</th><th>Type</th><th></th></tr></thead><tbody>' +
+    proxies.slice(0,200).map((p,i)=>`<tr>
+      <td class="mono" style="font-size:10px">${esc(p.proxy||p)}</td>
+      <td><span class="badge ${p.ok?'badge-g':p.dead?'badge-r':'badge-y'}">${p.ok?'✓ alive':p.dead?'✗ dead':'? untested'}</span></td>
+      <td class="mono" style="font-size:10px">${p.ms?p.ms+'ms':'—'}</td>
+      <td style="font-size:10px">${p.country||'—'}</td>
+      <td style="font-size:10px">${p.type||'HTTP'}</td>
+      <td><button class="btn btn-xs" onclick="pmRemove(${i})">✕</button></td>
+    </tr>`).join('') +
+    '</tbody></table></div>'}
+  </div>`;
+
+  // Helper fns scoped to page
+  window.pmSaveSetting = (k,v)=>{ const S2=JSON.parse(localStorage.getItem('spp_settings')||'{}'); S2[k]=v; localStorage.setItem('spp_settings',JSON.stringify(S2)); };
+  window.pmImport = ()=>{
+    const raw = document.getElementById('pm-paste').value.trim();
+    if(!raw){ toast('Paste some proxies first','w'); return; }
+    const list = raw.split(/[\n,]+/).map(s=>s.trim()).filter(Boolean);
+    const existing = JSON.parse(localStorage.getItem('spp_proxies')||'[]');
+    const merged = [...existing, ...list.map(proxy=>({proxy, ok:false, dead:false}))];
+    const deduped = [...new Map(merged.map(p=>[p.proxy,p])).values()];
+    localStorage.setItem('spp_proxies', JSON.stringify(deduped));
+    toast('✅ Imported '+list.length+' proxies','s');
+    renderProxyManagerPage(el);
+  };
+  window.pmFetchUrl = async ()=>{
+    const url = document.getElementById('pm-url').value.trim();
+    if(!url){ toast('Enter a URL first','w'); return; }
+    try {
+      toast('⏳ Fetching...','i');
+      const r = await fetch(url);
+      const text = await r.text();
+      document.getElementById('pm-paste').value = text;
+      toast('✅ Fetched — click Import to load','s');
+    } catch(e){ toast('❌ Fetch failed: '+e.message,'e'); }
+  };
+  window.pmTestAll = ()=>{ toast('Proxy testing requires a backend connection. Configure Vercel in Settings.','i'); };
+  window.pmClear = ()=>{
+    if(!confirm('Clear all proxies?')) return;
+    localStorage.removeItem('spp_proxies');
+    toast('Proxies cleared','s');
+    renderProxyManagerPage(el);
+  };
+  window.pmRemove = (i)=>{
+    const list = JSON.parse(localStorage.getItem('spp_proxies')||'[]');
+    list.splice(i,1);
+    localStorage.setItem('spp_proxies', JSON.stringify(list));
+    renderProxyManagerPage(el);
+  };
+}
+
 function renderPage(id){
   const el=document.getElementById('page-'+id);
   if(!el) return;
@@ -5523,7 +5628,7 @@ function exportCampaignResults(runId, fmt){
     content=JSON.stringify({campaign:{platform:pid,date:run.runTs,success:run.liveUrls.length,failed:run.failedUrls.length},results:all},null,2);
     mime='application/json';ext='json';
   }else{
-    content='SEO Parasite Pro \u2014 Campaign Results\nPlatform: '+pid+' | Date: '+dt+'\nSuccess: '+run.liveUrls.length+' | Failed: '+run.failedUrls.length+'\n'+'='.repeat(60)+'\n\nSUCCESSFUL LINKS:\n';
+    content='DaveAI SEO \u2014 Campaign Results\nPlatform: '+pid+' | Date: '+dt+'\nSuccess: '+run.liveUrls.length+' | Failed: '+run.failedUrls.length+'\n'+'='.repeat(60)+'\n\nSUCCESSFUL LINKS:\n';
     run.liveUrls.forEach(r=>{ content+='['+r.keyword+'] '+r.url+'\n'; });
     content+='\nFAILED:\n';
     run.failedUrls.forEach(r=>{ content+='['+r.keyword+'] ERROR: '+r.error+'\n'; });
@@ -12658,1706 +12763,1557 @@ function csAddToCommenter(url, name){
   alert(`✓ ${name} added to Blog Commenter queue!`);
 }
 
+
 // ═══════════════════════════════════════════════════════════════
-// PDF PARASITE MODULE
+// GOD-TIER PDF SEO MODULE v3.0
+// Groq AI content · jsPDF generation · Archive.org S3 API
+// Multi-platform blast · Smart upload scanner · URL capture
 // ═══════════════════════════════════════════════════════════════
 
-/* ── PDF Parasite State ── */
-const PDF_STATE = {
-  jobs: [],          // [{id, keyword, title, platform, status, pdfBlob, pdfUrl, uploadUrl, ts, size, pages, log}]
-  settings: {
-    font: 'helvetica',
-    primaryColor: '#0057ff',
-    includeLinks: true,
-    includeSchema: true,
-    addBacklinks: true,
-    addTableOfContents: true,
-    pagesPerDoc: 3,
-    density: 'rich'   // 'thin' | 'rich' | 'ultra'
+/* ── GROQ CONFIG ── */
+const GROQ_MODELS = ['llama-3.3-70b-versatile','llama3-70b-8192','mixtral-8x7b-32768'];
+let _groqModel = GROQ_MODELS[0];
+
+async function groqGenerate(prompt, apiKey, maxTokens=1800){
+  if(!apiKey) throw new Error('No Groq API key set');
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+apiKey,'Content-Type':'application/json'},
+    body: JSON.stringify({
+      model: _groqModel,
+      max_tokens: maxTokens,
+      temperature: 0.82,
+      messages:[{role:'user',content:prompt}]
+    })
+  });
+  if(!res.ok){
+    const err = await res.json().catch(()=>({}));
+    // Try next model on model error
+    const idx = GROQ_MODELS.indexOf(_groqModel);
+    if(idx < GROQ_MODELS.length-1){ _groqModel = GROQ_MODELS[idx+1]; return groqGenerate(prompt,apiKey,maxTokens); }
+    throw new Error(err.error?.message||'Groq API error '+res.status);
   }
+  const d = await res.json();
+  return d.choices[0].message.content.trim();
+}
+
+/* ── NLP / LSI ENGINE ── */
+function nlpExpandKeyword(kw){
+  const w = kw.toLowerCase().trim();
+  const words = w.split(/\s+/);
+  const intents = ['how to','what is','best','top','guide to','vs','review','tutorial','checklist','tips for','cost of','benefits of','examples of','types of','alternatives to'];
+  const modifiers = ['2025','2026','for beginners','advanced','complete','ultimate','free','professional','online','near me','services','tools','software','strategy'];
+  const questions = [`what is ${w}`,`how does ${w} work`,`why use ${w}`,`${w} best practices`,`${w} case study`,`${w} statistics`,`${w} trends 2025`];
+  const lsi = [];
+  intents.slice(0,5).forEach(i => lsi.push(`${i} ${w}`));
+  modifiers.slice(0,5).forEach(m => lsi.push(`${w} ${m}`));
+  questions.forEach(q => lsi.push(q));
+  // Co-occurrence clusters by topic detection
+  const topicMap = {
+    seo:['search engine optimization','keyword research','backlink building','on-page seo','technical seo','serp ranking','google algorithm','organic traffic'],
+    marketing:['digital marketing','content strategy','lead generation','conversion rate','roi','brand awareness','social media','email campaign'],
+    finance:['investment strategy','financial planning','portfolio management','risk assessment','compound interest','market analysis','passive income'],
+    health:['wellness routine','fitness program','nutrition guide','mental health','workout plan','healthy lifestyle','diet tips','medical advice'],
+    tech:['software development','cloud computing','artificial intelligence','machine learning','cybersecurity','api integration','devops','saas'],
+    ecom:['ecommerce strategy','product listing','conversion optimization','shopping cart','dropshipping','amazon fba','product review','buyer guide'],
+  };
+  let cluster = [];
+  for(const [topic, terms] of Object.entries(topicMap)){
+    if(terms.some(t=>w.includes(t.split(' ')[0])) || words.some(w2=>terms.some(t=>t.includes(w2)))){
+      cluster = terms; break;
+    }
+  }
+  if(!cluster) cluster = topicMap.seo; // default cluster
+  return { lsi: [...new Set(lsi)], cluster: cluster.slice(0,6), questions };
+}
+
+function pdfSEOScore(job){
+  let score = 0; const issues = []; const wins = [];
+  const wc = job.wordCount||0;
+  if(wc>=800){score+=20;wins.push('Word count ✓ ('+wc+' words)');}
+  else{issues.push('Word count too low ('+wc+' — aim for 800+)');}
+  if(job.backlinks){score+=15;wins.push('Backlink embedded ✓');}
+  else{issues.push('No backlink URL set');}
+  if(job.lsiUsed>=5){score+=15;wins.push('LSI coverage ✓ ('+job.lsiUsed+' terms)');}
+  else{issues.push('Low LSI density (add more semantic terms)');}
+  if(job.hasSchema){score+=15;wins.push('Schema JSON-LD ✓');}
+  else{issues.push('No structured data schema');}
+  if(job.hasTOC){score+=10;wins.push('Table of Contents ✓');}
+  else{issues.push('No TOC (Google uses for featured snippets)');}
+  if(job.titleOptimized){score+=10;wins.push('Title optimized ✓');}
+  else{issues.push('Title missing target keyword');}
+  if(job.aiGenerated){score+=15;wins.push('AI-generated unique content ✓');}
+  else{issues.push('Template content (use AI Generate)');}
+  return {score:Math.min(score,100), issues, wins};
+}
+
+/* ── PDF STATE ── */
+const PDF_STATE = {
+  jobs:[],
+  groqKey:'',
+  vercelBase:'',
+  settings:{ density:'rich', font:'helvetica', color:'#0057ff', includeLinks:true, includeSchema:true, addTOC:true }
 };
 
-/* ── PDF Platforms Config ── */
+/* ── PLATFORM REGISTRY — 20 platforms with real upload intel ── */
 const PDF_PLATFORMS = [
-  { id:'scribd',    name:'Scribd',       icon:'📚', da:96,  freeUpload:true,  indexed:true,  apiNote:'Cookie/Form POST – Scribd auto-indexes & ranks PDFs on Google. DA 96.', uploadUrl:'https://www.scribd.com/upload-document', method:'form' },
-  { id:'issuu',     name:'Issuu',        icon:'📰', da:92,  freeUpload:true,  indexed:true,  apiNote:'Issuu API v2 / Form POST – Publications indexed by Google. DA 92.',    uploadUrl:'https://issuu.com/home/publications',        method:'api'  },
-  { id:'slideshare',name:'SlideShare',   icon:'📊', da:95,  freeUpload:true,  indexed:true,  apiNote:'LinkedIn SlideShare – upload via form. DA 95.',                        uploadUrl:'https://www.slideshare.net/upload',           method:'form' },
-  { id:'academia',  name:'Academia.edu', icon:'🎓', da:93,  freeUpload:true,  indexed:true,  apiNote:'Free upload – Google crawls Academia.edu pages heavily. DA 93.',       uploadUrl:'https://www.academia.edu/upload',             method:'form' },
-  { id:'researchgate',name:'ResearchGate',icon:'🔬',da:91, freeUpload:true,  indexed:true,  apiNote:'Upload preprints/papers – crawled aggressively by Google. DA 91.',     uploadUrl:'https://www.researchgate.net/publication/upload', method:'form' },
-  { id:'archive',   name:'Internet Archive',icon:'🏛️',da:94,freeUpload:true,indexed:true,  apiNote:'archive.org S3-like API – permanent URLs, well crawled. DA 94.',        uploadUrl:'https://archive.org/upload/',                 method:'api'  },
-  { id:'box',       name:'Box.com',      icon:'📦', da:90,  freeUpload:false, indexed:true,  apiNote:'Box.com shared links are indexed by Google. DA 90.',                   uploadUrl:'https://app.box.com/upload',                  method:'form' },
-  { id:'docsend',   name:'DocSend',      icon:'📨', da:72,  freeUpload:false, indexed:false, apiNote:'Tracks opens; public links can rank. DA 72.',                          uploadUrl:'https://docsend.com/upload',                  method:'form' },
-  { id:'calameo',   name:'Calameo',      icon:'📖', da:88,  freeUpload:true,  indexed:true,  apiNote:'Flipbook publisher – good indexation, DA 88.',                         uploadUrl:'https://en.calameo.com/publish/',             method:'form' },
-  { id:'yumpu',     name:'Yumpu',        icon:'📗', da:82,  freeUpload:true,  indexed:true,  apiNote:'ePublishing platform – well crawled by Google. DA 82.',                uploadUrl:'https://www.yumpu.com/en/upload',             method:'form' },
-  { id:'edocr',     name:'edocr',        icon:'📂', da:73,  freeUpload:true,  indexed:true,  apiNote:'Document sharing DA 73 – allows keyword-rich titles & descriptions.',  uploadUrl:'https://www.edocr.com/upload',                method:'form' },
-  { id:'slideserve',name:'SlideServe',   icon:'🎞', da:79,  freeUpload:true,  indexed:true,  apiNote:'Upload presentations as PDFs – DA 79, Google-indexed.',                uploadUrl:'https://www.slideserve.com/upload',           method:'form' },
+  { id:'archive',     name:'Internet Archive', icon:'🏛️', da:94, free:true,  indexed:true,  method:'s3_api',
+    uploadUrl:'https://s3.us.archive.org/', apiDocs:'https://archive.org/developers/ias3.html',
+    successPattern:/identifier/i, note:'S3 API — fully automated, permanent URLs, immediate indexing. Best for SEO.' },
+  { id:'scribd',      name:'Scribd',           icon:'📚', da:96, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.scribd.com/upload-document', loginUrl:'https://www.scribd.com/login',
+    formFields:{file:'file',title:'title',description:'description',tags:'tags'},
+    note:'Form POST — login cookie required. DA96, Google indexes within 24h.' },
+  { id:'slideshare',  name:'SlideShare',       icon:'📊', da:95, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.slideshare.net/upload', loginUrl:'https://www.slideshare.net/login',
+    note:'LinkedIn-owned. DA95. Upload slides as PDF — extremely well crawled.' },
+  { id:'academia',    name:'Academia.edu',     icon:'🎓', da:93, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.academia.edu/upload', loginUrl:'https://www.academia.edu/login',
+    note:'Academic uploads — Google crawls heavily. DA93.' },
+  { id:'issuu',       name:'Issuu',            icon:'📰', da:92, free:true,  indexed:true,  method:'api_v2',
+    uploadUrl:'https://api.issuu.com/v2/drafts', apiBase:'https://api.issuu.com/v2',
+    note:'REST API v2 — OAuth token or email/pass. Publications indexed by Google.' },
+  { id:'calameo',     name:'Calameo',          icon:'📖', da:88, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://en.calameo.com/publish/', loginUrl:'https://en.calameo.com/login',
+    note:'Flipbook publisher. DA88 — great for visual documents.' },
+  { id:'yumpu',       name:'Yumpu',            icon:'📗', da:82, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.yumpu.com/en/upload', loginUrl:'https://www.yumpu.com/en/account/login',
+    note:'ePub + PDF. DA82, well crawled. Free unlimited uploads.' },
+  { id:'edocr',       name:'edocr',            icon:'📂', da:73, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.edocr.com/upload', loginUrl:'https://www.edocr.com/user/login',
+    note:'Document sharing DA73. Keyword-rich meta allowed.' },
+  { id:'slideserve',  name:'SlideServe',       icon:'🎞', da:79, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.slideserve.com/upload', loginUrl:'https://www.slideserve.com/users/login',
+    note:'DA79 — presentations as PDF. Google-indexed.' },
+  { id:'researchgate',name:'ResearchGate',     icon:'🔬', da:91, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.researchgate.net/publication/upload', loginUrl:'https://www.researchgate.net/login',
+    note:'Research/preprints. DA91, aggressively crawled by Google.' },
+  { id:'docstoc',     name:'Docstoc',          icon:'📄', da:71, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.docstoc.com/upload', loginUrl:'https://www.docstoc.com/login',
+    note:'Business docs. DA71.' },
+  { id:'box',         name:'Box.com',          icon:'📦', da:90, free:false, indexed:true,  method:'api',
+    uploadUrl:'https://upload.box.com/api/2.0/files/content', apiBase:'https://api.box.com/2.0',
+    note:'Box API v2 — token required. Shared links indexed by Google. DA90.' },
+  { id:'mediafire',   name:'MediaFire',        icon:'🔥', da:91, free:true,  indexed:false, method:'form_post',
+    uploadUrl:'https://www.mediafire.com/upload/', loginUrl:'https://www.mediafire.com/login/',
+    note:'DA91, massive CDN. Direct share links indexed via referrers.' },
+  { id:'4shared',     name:'4shared',          icon:'💾', da:87, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.4shared.com/web/share/upload.jsp', loginUrl:'https://www.4shared.com/login.jsp',
+    note:'Cloud storage. DA87 — document links indexed.' },
+  { id:'pdfcoffee',   name:'PDF.coffee',       icon:'☕', da:61, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://pdfcoffee.com/upload/', loginUrl:'https://pdfcoffee.com/wp-login.php',
+    note:'PDF sharing site DA61. Auto-creates SEO page per upload.' },
+  { id:'kupdf',       name:'KUPDF',            icon:'📑', da:59, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://kupdf.net/upload', loginUrl:'https://kupdf.net/account/login',
+    note:'DA59 — simple PDF share. Google indexes every upload page.' },
+  { id:'pdfsearch',   name:'PDFsearch.org',    icon:'🔍', da:52, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://pdfsearch.org/upload', loginUrl:'https://pdfsearch.org/login',
+    note:'PDF index. DA52.' },
+  { id:'slideboom',   name:'SlideBoom',        icon:'💥', da:67, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.slideboom.com/upload', loginUrl:'https://www.slideboom.com/account/login',
+    note:'Presentation host DA67. Embeds indexed by Google.' },
+  { id:'authorstream',name:'AuthorStream',     icon:'📡', da:72, free:true,  indexed:true,  method:'form_post',
+    uploadUrl:'https://www.authorstream.com/upload/', loginUrl:'https://www.authorstream.com/login.aspx',
+    note:'Presentation sharing DA72 — indexed upload pages.' },
+  { id:'google_drive',name:'Google Drive',     icon:'📁', da:100,free:false, indexed:true,  method:'api',
+    uploadUrl:'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+    note:'Google Drive API — requires OAuth. Shared files indexed instantly. DA100.' },
 ];
 
-/* ── Content Templates by Niche ── */
-const PDF_TEMPLATES = {
-  guide:    { label:'Ultimate Guide',   pages:['Introduction','Why {KW} Matters','Step-by-Step Process','Expert Tips','Common Mistakes','Conclusion & Next Steps'] },
-  review:   { label:'Product Review',   pages:['Overview','Key Features','Pros & Cons','Pricing Analysis','Comparison Chart','Final Verdict'] },
-  checklist:{ label:'Checklist / SOP',  pages:['Quick Reference Checklist','Detailed Breakdown','Tools Required','Expert Recommendations','FAQ','Resources'] },
-  report:   { label:'Industry Report',  pages:['Executive Summary','Market Overview','Data & Statistics','Expert Insights','Predictions','Key Takeaways'] },
-  casestudy:{ label:'Case Study',       pages:['Background','The Challenge','Strategy Used','Results Achieved','Lessons Learned','How to Apply This'] },
-  listicle: { label:'Top-N Listicle',   pages:['Introduction','#1 – Best Option','#2 – Runner-Up','#3 – Budget Pick','#4 – Hidden Gem','Final Rankings'] },
-};
-
-/* ── Keyword Density Profiles ── */
-const PDF_DENSITY = {
-  thin:  { wordsPerSection:80,  kwFreq:2, lsiCount:2 },
-  rich:  { wordsPerSection:180, kwFreq:4, lsiCount:5 },
-  ultra: { wordsPerSection:320, kwFreq:7, lsiCount:9 },
-};
-
-/* ── LSI/semantic keyword generator ── */
-function pdfLSI(kw, count=5){
-  const base = kw.toLowerCase().split(/\s+/);
-  const modifiers = ['best','top','cheap','affordable','professional','guide','review','tutorial','tips','how to','online','near me','2024','2025','services','comparison','vs','for beginners','advanced','complete'];
-  const lsi = [];
-  for(let i=0;i<count;i++){
-    const mod = modifiers[i % modifiers.length];
-    lsi.push(i%2===0 ? `${mod} ${kw}` : `${kw} ${mod}`);
-  }
-  return lsi;
-}
-
-/* ── Schema JSON-LD builder for PDF metadata ── */
-function pdfSchema(kw, title, url){
-  return {
-    "@context": "https://schema.org",
-    "@type": "Article",
-    "headline": title,
-    "name": title,
-    "description": `Comprehensive guide on ${kw}. Covers everything you need to know about ${kw} in 2025.`,
-    "keywords": `${kw}, ${pdfLSI(kw,5).join(', ')}`,
-    "url": url || '#',
-    "datePublished": new Date().toISOString().split('T')[0],
-    "author": {"@type":"Organization","name":"Expert Guide Series"},
-    "publisher": {"@type":"Organization","name":"Industry Authority","logo":{"@type":"ImageObject","url":"https://example.com/logo.png"}}
+/* ── ARCHIVE.ORG S3 UPLOAD (FULLY AUTOMATED) ── */
+async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, onProgress){
+  const identifier = 'seo-'+slug(keyword)+'-'+(Date.now().toString(36));
+  const filename = slug(title)+'.pdf';
+  const headers = {
+    'Authorization':'LOW '+accessKey+':'+secretKey,
+    'Content-Type':'application/pdf',
+    'x-archive-meta-title':title,
+    'x-archive-meta-subject':keyword,
+    'x-archive-meta-description':'Comprehensive guide on '+keyword+'. SEO-optimized resource.',
+    'x-archive-meta-mediatype':'texts',
+    'x-archive-meta-collection':'opensource',
+    'x-archive-auto-make-bucket':'1',
   };
+  if(onProgress) onProgress(10,'Connecting to Archive.org S3...');
+  const url = 'https://s3.us.archive.org/'+identifier+'/'+filename;
+  const res = await fetch(url,{method:'PUT',headers,body:pdfBytes});
+  if(!res.ok) throw new Error('Archive.org upload failed: HTTP '+res.status);
+  if(onProgress) onProgress(80,'Upload complete, waiting for processing...');
+  await sleep(3000);
+  const liveUrl = 'https://archive.org/details/'+identifier;
+  if(onProgress) onProgress(100,'Live!');
+  return { url:liveUrl, identifier };
 }
 
-/* ── Build rich HTML document that gets "printed to PDF" ── */
-function pdfBuildHTML(keyword, title, template, backlinks, density){
-  const lsi = pdfLSI(keyword, 9);
-  const tpl = PDF_TEMPLATES[template] || PDF_TEMPLATES.guide;
-  const dens = PDF_DENSITY[density] || PDF_DENSITY.rich;
-  const pages = tpl.pages.map(p=>p.replace(/{KW}/g, keyword));
-  const kw = keyword;
-  const schema = JSON.stringify(pdfSchema(kw, title, ''), null, 2);
-
-  const sectionHTML = pages.map((heading, idx) => {
-    const para1 = `When researching ${kw}, one of the most important aspects to understand is ${heading.toLowerCase()}. Many professionals working with ${kw} agree that this section covers the core principles every user must know. According to industry experts, ${kw} has evolved significantly in recent years.`;
-    const para2 = `The ${kw} landscape continues to shift. Whether you're a beginner or an advanced user exploring ${kw}, the following insights will help you make informed decisions. Data from recent surveys shows that those who master ${lsi[idx%lsi.length]} outperform competitors by a wide margin.`;
-    const para3 = dens.wordsPerSection > 150 ? `For the best results with ${kw}, always consider the context. Top practitioners of ${lsi[(idx+1)%lsi.length]} recommend a structured approach. This section breaks down the methodology so you can apply it immediately — whether you're dealing with ${lsi[(idx+2)%lsi.length]} or ${lsi[(idx+3)%lsi.length]}.` : '';
-    const para4 = dens.wordsPerSection > 250 ? `Advanced ${kw} users have found that combining multiple approaches — including ${lsi[(idx+4)%lsi.length]} — yields the highest ROI. The data consistently shows that a well-executed ${kw} strategy reduces costs, increases visibility, and drives sustainable growth over time.` : '';
-
-    const bls = backlinks && idx === Math.floor(pages.length/2)
-      ? `<div style="margin:16px 0;padding:12px 16px;background:#f0f4ff;border-left:4px solid #0057ff;border-radius:4px;font-size:11pt"><strong>📌 Resource:</strong> For more on ${kw}, visit <a href="${backlinks}" style="color:#0057ff">${backlinks}</a></div>` : '';
-
-    return `
-      <div style="page-break-inside:avoid;margin-bottom:28px">
-        <h2 style="font-size:16pt;color:#0057ff;border-bottom:2px solid #e8edff;padding-bottom:6px;margin-bottom:12px">${idx+1}. ${heading}</h2>
-        <p style="font-size:11pt;line-height:1.8;color:#1a1a2e;margin-bottom:10px">${para1}</p>
-        <p style="font-size:11pt;line-height:1.8;color:#1a1a2e;margin-bottom:10px">${para2}</p>
-        ${para3 ? `<p style="font-size:11pt;line-height:1.8;color:#1a1a2e;margin-bottom:10px">${para3}</p>` : ''}
-        ${para4 ? `<p style="font-size:11pt;line-height:1.8;color:#1a1a2e;margin-bottom:10px">${para4}</p>` : ''}
-        ${bls}
-      </div>`;
-  }).join('');
-
-  const tocHTML = `
-    <div style="background:#f8fafc;border:1px solid #dde3ec;padding:16px 20px;border-radius:8px;margin-bottom:24px">
-      <h2 style="font-size:13pt;color:#0057ff;margin-bottom:10px">📋 Table of Contents</h2>
-      <ol style="font-size:11pt;line-height:2;color:#333;padding-left:20px">
-        ${pages.map((p,i)=>`<li>${p}</li>`).join('')}
-      </ol>
-    </div>`;
-
-  const metaTags = lsi.slice(0,6).map(l=>`<meta name="keywords" content="${esc(l)}">`).join('\n    ');
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>${esc(title)}</title>
-  <meta name="description" content="Complete guide on ${esc(kw)} — covering everything from basics to advanced strategies. Updated for 2025.">
-  ${metaTags}
-  <meta property="og:title" content="${esc(title)}">
-  <meta property="og:description" content="Expert guide on ${esc(kw)}.">
-  <script type="application/ld+json">${schema}<\/script>
-  <style>
-    body{font-family:'Georgia',serif;font-size:12pt;color:#1a1a2e;line-height:1.7;max-width:750px;margin:0 auto;padding:28px 36px}
-    h1{font-size:22pt;color:#0057ff;margin-bottom:6px;line-height:1.3}
-    .subtitle{font-size:12pt;color:#666;margin-bottom:20px;font-style:italic}
-    .kw-chip{display:inline-block;background:#e8edff;color:#0057ff;font-size:9pt;padding:2px 10px;border-radius:20px;margin:2px;font-family:monospace}
-    .lsi-box{background:#fff9e6;border:1px solid #ffe080;padding:12px 16px;border-radius:6px;margin:20px 0}
-    .lsi-box h3{font-size:10pt;color:#92400e;margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em}
-    .cta-box{background:linear-gradient(135deg,#0057ff,#7c3aed);color:#fff;padding:20px 24px;border-radius:8px;margin:28px 0;text-align:center}
-    .cta-box p{font-size:12pt;margin-bottom:10px}
-    .cta-box a{color:#fff;font-weight:bold;font-size:13pt}
-    @media print{.no-print{display:none}}
-  </style>
-</head>
-<body>
-  <h1>${esc(title)}</h1>
-  <div class="subtitle">The Definitive 2025 Resource on ${esc(kw)}</div>
-
-  <div class="lsi-box">
-    <h3>🔑 Related Searches</h3>
-    ${lsi.map(l=>`<span class="kw-chip">${esc(l)}</span>`).join(' ')}
-  </div>
-
-  ${tocHTML}
-
-  ${sectionHTML}
-
-  ${backlinks ? `
-  <div class="cta-box">
-    <p>Want to learn more about <strong>${esc(kw)}</strong>?</p>
-    <a href="${esc(backlinks)}">${esc(backlinks)}</a>
-  </div>` : ''}
-
-  <hr style="margin:28px 0;border:none;border-top:1px solid #dde3ec">
-  <p style="font-size:9pt;color:#999;text-align:center">© 2025 Expert Guide Series · All rights reserved · Comprehensive guide on ${esc(kw)}</p>
-</body>
-</html>`;
-}
-
-/* ── Generate PDF via print window trick (browser-native) ── */
-function pdfGenerate(job){
-  return new Promise(resolve => {
-    const html = pdfBuildHTML(job.keyword, job.title, job.template, job.backlinks, job.density);
-    const printWin = window.open('', '_blank', 'width=900,height=700');
-    if(!printWin){ resolve(null); return; }
-    printWin.document.open();
-    printWin.document.write(html);
-    printWin.document.close();
-    setTimeout(() => {
-      printWin.print();
-      printWin.onafterprint = () => { printWin.close(); resolve(html); };
-      setTimeout(() => { try{ printWin.close(); }catch(e){} resolve(html); }, 4000);
-    }, 900);
+/* ── JSPDF LOADER ── */
+let _jsPDFLoaded = false;
+async function loadJsPDF(){
+  if(_jsPDFLoaded || window.jspdf) return;
+  await new Promise((resolve,reject)=>{
+    const s = document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+    s.onload=()=>{_jsPDFLoaded=true;resolve();};
+    s.onerror=reject;
+    document.head.appendChild(s);
   });
 }
 
-/* ── Download HTML as file (fallback for those who want direct download) ── */
-function pdfDownloadHTML(job){
-  const html = pdfBuildHTML(job.keyword, job.title, job.template, job.backlinks, job.density);
-  const blob = new Blob([html], {type:'text/html'});
+/* ── REAL PDF BUILDER using jsPDF ── */
+async function buildRealPDF(job){
+  await loadJsPDF();
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation:'portrait', unit:'mm', format:'a4' });
+  const W=210, H=297, mx=18, tw=W-mx*2;
+  const kw = job.keyword, title = job.title;
+  const color = job.color||'#0057ff';
+  const rgb = hexToRgb(color)||{r:0,g:87,b:255};
+  const nlp = nlpExpandKeyword(kw);
+  const sections = job.sections || defaultSections(kw);
+  let y = 0;
+
+  function hexToRgb(h){
+    const r=/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(h);
+    return r?{r:parseInt(r[1],16),g:parseInt(r[2],16),b:parseInt(r[3],16)}:null;
+  }
+  function newPage(){ doc.addPage(); y=18; }
+  function checkY(need){ if(y+need>H-20) newPage(); }
+  function wrapText(text,maxW,fontSize){
+    doc.setFontSize(fontSize||11);
+    return doc.splitTextToSize(text,maxW);
+  }
+
+  // ── COVER PAGE ──
+  doc.setFillColor(rgb.r,rgb.g,rgb.b);
+  doc.rect(0,0,W,60,'F');
+  doc.setFillColor(rgb.r,rgb.g,rgb.b);
+  doc.setDrawColor(255,255,255);
+  doc.rect(0,55,W,5,'F');
+  doc.setTextColor(255,255,255);
+  doc.setFontSize(22); doc.setFont('helvetica','bold');
+  const titleLines = doc.splitTextToSize(title,tw);
+  let ty=22;
+  titleLines.forEach(l=>{ doc.text(l,mx,ty); ty+=9; });
+  doc.setFontSize(12); doc.setFont('helvetica','normal');
+  doc.text('The Definitive 2025 Resource on '+kw, mx, ty+4);
+  doc.setTextColor(0,0,0);
+  y = 75;
+
+  // ── METADATA BOX ──
+  doc.setFillColor(245,247,255);
+  doc.roundedRect(mx,y,tw,22,3,3,'F');
+  doc.setFontSize(9); doc.setTextColor(100,100,100);
+  doc.text('Published: '+new Date().toLocaleDateString(), mx+4, y+7);
+  doc.text('Keyword: '+kw, mx+4, y+13);
+  doc.text('Words: '+(job.wordCount||'—'), mx+4, y+19);
+  doc.text('Related: '+nlp.lsi.slice(0,3).join(' · '), mx+50, y+7);
+  if(job.backlinks) doc.text('Source: '+job.backlinks.substring(0,55), mx+50, y+13);
+  y += 30;
+
+  // ── LSI CHIPS ROW ──
+  doc.setFontSize(8); doc.setTextColor(rgb.r,rgb.g,rgb.b);
+  let cx = mx;
+  nlp.lsi.slice(0,8).forEach(term=>{
+    const tw2=doc.getTextWidth(term)+6;
+    if(cx+tw2>W-mx){ y+=8; cx=mx; }
+    doc.setFillColor(232,237,255);
+    doc.roundedRect(cx,y-4,tw2,6,1,1,'F');
+    doc.setTextColor(rgb.r,rgb.g,rgb.b);
+    doc.text(term,cx+3,y);
+    cx+=tw2+3;
+  });
+  y+=12;
+
+  // ── TABLE OF CONTENTS ──
+  doc.setTextColor(0,0,0);
+  doc.setFontSize(14); doc.setFont('helvetica','bold');
+  doc.setFillColor(rgb.r,rgb.g,rgb.b);
+  doc.rect(mx,y,tw,8,'F');
+  doc.setTextColor(255,255,255);
+  doc.text('TABLE OF CONTENTS',mx+4,y+5.5);
+  y+=12;
+  doc.setTextColor(0,0,0);
+  doc.setFont('helvetica','normal');
+  sections.forEach((s,i)=>{
+    checkY(7);
+    doc.setFontSize(10);
+    doc.setFillColor(i%2===0?248:255,i%2===0?249:255,i%2===0?252:255);
+    doc.rect(mx,y-4,tw,6,'F');
+    doc.setTextColor(rgb.r,rgb.g,rgb.b);
+    doc.text((i+1)+'.', mx+2, y);
+    doc.setTextColor(0,0,0);
+    doc.text(s.heading, mx+10, y);
+    doc.setTextColor(150,150,150);
+    doc.text('p.'+(i+2), W-mx-8, y);
+    y+=7;
+  });
+  y+=6;
+
+  // ── SECTION CONTENT PAGES ──
+  sections.forEach((sec, idx)=>{
+    newPage();
+    // Section header bar
+    doc.setFillColor(rgb.r,rgb.g,rgb.b);
+    doc.rect(0,0,W,14,'F');
+    doc.setTextColor(255,255,255);
+    doc.setFontSize(15); doc.setFont('helvetica','bold');
+    doc.text((idx+1)+'. '+sec.heading, mx, 9);
+    doc.setTextColor(150,200,255); doc.setFontSize(8);
+    doc.text(kw+' — Section '+(idx+1)+' of '+sections.length, W-mx-40,9);
+    y=22;
+
+    doc.setTextColor(0,0,0); doc.setFont('helvetica','normal');
+
+    // Body paragraphs
+    const paras = sec.content ? sec.content.split('\n\n').filter(Boolean) : [sec.heading+' content for '+kw];
+    paras.forEach(para=>{
+      if(!para.trim()) return;
+      const lines = wrapText(para.trim(), tw, 11);
+      checkY(lines.length*5.5+4);
+      doc.setFontSize(11);
+      lines.forEach(l=>{ doc.text(l,mx,y); y+=5.5; });
+      y+=4;
+    });
+
+    // Highlight box for key insight
+    if(sec.insight){
+      checkY(20);
+      doc.setFillColor(232,237,255);
+      doc.roundedRect(mx,y,tw,18,3,3,'F');
+      doc.setDrawColor(rgb.r,rgb.g,rgb.b);
+      doc.setLineWidth(0.8);
+      doc.line(mx,y,mx,y+18);
+      doc.setFontSize(9); doc.setFont('helvetica','bold');
+      doc.setTextColor(rgb.r,rgb.g,rgb.b);
+      doc.text('💡 KEY INSIGHT', mx+4, y+5);
+      doc.setFont('helvetica','normal'); doc.setTextColor(40,40,60);
+      const insLines = wrapText(sec.insight, tw-8, 9);
+      insLines.slice(0,2).forEach((l,i)=>{ doc.text(l,mx+4,y+10+(i*4)); });
+      y+=22;
+    }
+
+    // LSI terms box
+    const secLsi = nlp.lsi.slice(idx*2, idx*2+3);
+    if(secLsi.length){
+      checkY(14);
+      doc.setFillColor(252,252,248);
+      doc.roundedRect(mx,y,tw,12,2,2,'F');
+      doc.setFontSize(8); doc.setTextColor(120,120,80);
+      doc.text('Related: '+secLsi.join(' · '),mx+3,y+5);
+      doc.text('Also search: '+nlp.questions.slice(idx,idx+2).join(' · ').substring(0,90),mx+3,y+10);
+      y+=16;
+    }
+
+    // Backlink embed mid-doc
+    if(job.backlinks && idx===Math.floor(sections.length/2)){
+      checkY(18);
+      doc.setFillColor(rgb.r,rgb.g,rgb.b);
+      doc.roundedRect(mx,y,tw,16,3,3,'F');
+      doc.setFontSize(10); doc.setTextColor(255,255,255); doc.setFont('helvetica','bold');
+      doc.text('📌 Learn more about '+kw+':',mx+4,y+6);
+      doc.setFont('helvetica','normal'); doc.setFontSize(9);
+      doc.text(job.backlinks.substring(0,80),mx+4,y+12);
+      doc.link(mx,y,tw,16,{url:job.backlinks});
+      y+=20;
+    }
+
+    // Page number
+    doc.setFontSize(8); doc.setTextColor(180,180,180); doc.setFont('helvetica','normal');
+    doc.text(''+doc.getNumberOfPages(), W/2, H-8, {align:'center'});
+    doc.text(kw, mx, H-8);
+    doc.text('seoprotoolz.com', W-mx, H-8, {align:'right'});
+  });
+
+  // ── FINAL PAGE: Schema + CTA ──
+  newPage();
+  doc.setFillColor(rgb.r,rgb.g,rgb.b);
+  doc.rect(0,0,W,14,'F');
+  doc.setFontSize(14); doc.setTextColor(255,255,255); doc.setFont('helvetica','bold');
+  doc.text('RESOURCES & REFERENCES', mx, 9);
+  y=22;
+
+  // Schema JSON embed as text
+  const schema={
+    '@context':'https://schema.org','@type':'Article',
+    headline:title,name:title,
+    description:'Comprehensive guide on '+kw,
+    keywords:kw+', '+nlp.lsi.slice(0,5).join(', '),
+    datePublished:new Date().toISOString().split('T')[0],
+    author:{'@type':'Organization',name:'Industry Expert'},
+    url:job.backlinks||'https://seoprotoolz.com'
+  };
+  doc.setFontSize(7); doc.setTextColor(100,100,100); doc.setFont('courier','normal');
+  const schemaStr = JSON.stringify(schema,null,1);
+  const schLines = doc.splitTextToSize(schemaStr, tw);
+  schLines.slice(0,30).forEach(l=>{ checkY(5); doc.text(l,mx,y); y+=4; });
+  y+=6;
+
+  // CTA backlink
+  if(job.backlinks){
+    doc.setFillColor(rgb.r,rgb.g,rgb.b);
+    doc.roundedRect(mx,y,tw,20,3,3,'F');
+    doc.setFontSize(12); doc.setTextColor(255,255,255); doc.setFont('helvetica','bold');
+    doc.text('Want more on '+kw+'?',mx+4,y+8);
+    doc.setFontSize(10); doc.setFont('helvetica','normal');
+    doc.text(job.backlinks,mx+4,y+15);
+    doc.link(mx,y,tw,20,{url:job.backlinks});
+  }
+
+  // Footer on all pages
+  const pgCount = doc.getNumberOfPages();
+  for(let i=1;i<=pgCount;i++){
+    doc.setPage(i);
+    doc.setFontSize(7); doc.setTextColor(180,180,180);
+    doc.text('Page '+i+' of '+pgCount+' · '+title, W/2, H-4, {align:'center'});
+  }
+
+  return doc.output('arraybuffer');
+}
+
+/* ── DEFAULT SECTION HEADINGS ── */
+function defaultSections(kw){
+  return [
+    {heading:'Introduction to '+kw, content:'', insight:''},
+    {heading:'Why '+kw+' Matters in 2025', content:'', insight:''},
+    {heading:'Step-by-Step Guide to '+kw, content:'', insight:''},
+    {heading:'Expert Tips & Best Practices', content:'', insight:''},
+    {heading:'Common Mistakes to Avoid', content:'', insight:''},
+    {heading:'Conclusion & Next Steps', content:'', insight:''},
+  ];
+}
+
+/* ── GROQ AI CONTENT GENERATOR ── */
+async function groqBuildSections(keyword, title, template, density, groqKey, onSection){
+  const densityWords = {thin:120, rich:220, ultra:380};
+  const wTarget = densityWords[density]||220;
+  const nlp = nlpExpandKeyword(keyword);
+  const headings = templateHeadings(template, keyword);
+  const sections = [];
+
+  for(let i=0;i<headings.length;i++){
+    const h = headings[i];
+    const lsiForSection = nlp.lsi.slice(i*2, i*2+4).join(', ');
+    const clusterTerms = nlp.cluster.slice(0,3).join(', ');
+    const prompt =
+`Write a ${wTarget}-word section for a PDF document about "${keyword}".
+Section title: "${h}"
+Include these LSI/semantic terms naturally: ${lsiForSection}
+Related topic cluster: ${clusterTerms}
+Rules:
+- Write in authoritative, expert tone
+- NO markdown formatting (no **, ##, -)
+- Use plain paragraph text only
+- 2-3 solid paragraphs
+- Include specific, actionable insights
+- Vary sentence structure
+- End with a compelling insight sentence
+
+After the paragraphs, on a new line write:
+INSIGHT: [one sentence key takeaway starting with "The key to..."]`;
+
+    let text='', insight='';
+    try{
+      const raw = await groqGenerate(prompt, groqKey, 600);
+      const insightMatch = raw.match(/INSIGHT:\s*(.+)/i);
+      insight = insightMatch ? insightMatch[1].trim() : '';
+      text = raw.replace(/INSIGHT:.*$/im,'').trim();
+    }catch(e){
+      // Fallback template content
+      text = templateFallback(keyword, h, nlp, i);
+      insight = 'The key to mastering '+keyword+' lies in consistent application of proven strategies.';
+    }
+    const sec = {heading:h, content:text, insight};
+    sections.push(sec);
+    if(onSection) onSection(i+1, headings.length, sec);
+    await sleep(300); // respect rate limits
+  }
+  return sections;
+}
+
+function templateHeadings(template, kw){
+  const T = {
+    guide:    [`Introduction to ${kw}`,`Why ${kw} Matters in 2025`,`Step-by-Step ${kw} Process`,`Expert Tips for ${kw}`,`Common ${kw} Mistakes`,`${kw} Conclusion & Next Steps`],
+    review:   [`${kw} Overview`,`Key Features of ${kw}`,`${kw} Pros & Cons`,`${kw} Pricing Analysis`,`${kw} vs Competitors`,`Final Verdict on ${kw}`],
+    checklist:[`${kw} Quick Reference`,`${kw} Detailed Breakdown`,`Tools for ${kw}`,`Expert ${kw} Recommendations`,`${kw} FAQ`,`${kw} Resources`],
+    report:   [`${kw} Executive Summary`,`${kw} Market Overview`,`${kw} Data & Statistics`,`${kw} Expert Insights`,`${kw} Future Predictions`,`${kw} Key Takeaways`],
+    casestudy:[`${kw} Background`,`The ${kw} Challenge`,`${kw} Strategy Used`,`${kw} Results Achieved`,`${kw} Lessons Learned`,`Apply ${kw} to Your Business`],
+    listicle: [`Top ${kw} Introduction`,`Best ${kw} Option #1`,`Best ${kw} Option #2`,`Best ${kw} Option #3`,`${kw} Comparison Chart`,`Final ${kw} Rankings`],
+  };
+  return T[template]||T.guide;
+}
+
+function templateFallback(kw, heading, nlp, idx){
+  const lsi = nlp.lsi.slice(idx*2,idx*2+3);
+  return `When it comes to ${heading.toLowerCase()}, professionals working with ${kw} consistently highlight the importance of a structured approach. Understanding ${kw} requires both theoretical knowledge and practical application, particularly when considering ${lsi[0]||kw+' strategies'} and related concepts.
+
+The ${kw} landscape has evolved significantly. Whether you're exploring ${lsi[1]||'best practices for '+kw} or looking to advance your existing knowledge, this section provides the framework needed to make informed decisions. Industry data shows that organizations implementing proven ${kw} methodologies see measurable improvements within the first 90 days.
+
+For those serious about ${kw}, the path forward involves mastering the fundamentals while staying current with ${lsi[2]||kw+' trends 2025'}. The most successful practitioners combine technical knowledge with strategic thinking, adapting their approach as the field continues to evolve.`;
+}
+
+/* ── SMART UPLOAD PAGE SCANNER ── */
+// Detects PDF upload pages on document-sharing sites using pattern matching
+const UPLOAD_FINGERPRINTS = [
+  // Input patterns
+  { type:'input', pattern:/input[^>]+type=["']file["'][^>]*/i, weight:20 },
+  { type:'input', pattern:/accept=["'][^"']*\.pdf[^"']*["']/i, weight:30 },
+  { type:'input', pattern:/accept=["'][^"']*application\/pdf[^"']*["']/i, weight:30 },
+  // Form patterns
+  { type:'form',  pattern:/action=["'][^"']*(upload|submit|publish|post)[^"']*["']/i, weight:15 },
+  { type:'form',  pattern:/enctype=["']multipart\/form-data["']/i, weight:25 },
+  // URL patterns that indicate upload capability
+  { type:'url',   pattern:/(\/upload|\/publish|\/submit|\/post|\/share|\/add)[/?\s"']/i, weight:20 },
+  // Button/link patterns
+  { type:'button',pattern:/(upload|publish|submit|share your|add document|post pdf)/i, weight:15 },
+  // API endpoint patterns
+  { type:'api',   pattern:/(upload|document|file|pdf)[^"']*["']\s*:\s*["'][^"']+["']/i, weight:15 },
+];
+
+const UPLOAD_URL_PATTERNS = [
+  '/upload', '/publish', '/submit', '/upload-document', '/documents/new',
+  '/papers/upload', '/upload_document', '/share', '/add', '/create',
+  '/documents/upload', '/files/upload', '/content/upload', '/post',
+  '/wp-admin/upload.php', '/media/new', '/assets/new'
+];
+
+async function scanSiteForUploadPage(baseUrl, proxyBase, onLog){
+  const log = m => { if(onLog) onLog(m); };
+  const domain = new URL(baseUrl).origin;
+  const results = { uploadUrls:[], formEndpoints:[], apiEndpoints:[], confidence:0, method:'unknown' };
+
+  log('🔍 Scanning: '+domain);
+
+  // 1. Try known patterns directly
+  for(const path of UPLOAD_URL_PATTERNS){
+    const testUrl = domain+path;
+    try{
+      const r = await proxyFetch(testUrl, proxyBase);
+      if(r && r.status_code && r.status_code < 400 && r.body){
+        const score = scoreHtmlForUpload(r.body);
+        if(score.total > 30){
+          results.uploadUrls.push({url:testUrl, score:score.total, signals:score.signals, status:r.status_code});
+          log('  ✅ Upload page found: '+testUrl+' (score: '+score.total+')');
+        }
+      }
+    }catch(e){}
+    await sleep(100);
+  }
+
+  // 2. Scrape the homepage for upload links
+  try{
+    log('  📄 Fetching homepage...');
+    const home = await proxyFetch(baseUrl, proxyBase);
+    if(home && home.body){
+      const uploadLinks = extractUploadLinks(home.body, domain);
+      for(const link of uploadLinks.slice(0,10)){
+        if(results.uploadUrls.find(u=>u.url===link)) continue;
+        try{
+          const r2 = await proxyFetch(link, proxyBase);
+          if(r2 && r2.body){
+            const score = scoreHtmlForUpload(r2.body);
+            if(score.total>20){
+              results.uploadUrls.push({url:link, score:score.total, signals:score.signals, status:r2.status_code});
+              log('  ✅ Upload page found via link: '+link+' (score: '+score.total+')');
+            }
+          }
+        }catch(e){}
+        await sleep(150);
+      }
+      // Also extract API endpoints
+      const apis = extractApiEndpoints(home.body, domain);
+      results.apiEndpoints.push(...apis);
+      if(apis.length) log('  🔌 API endpoints detected: '+apis.slice(0,3).join(', '));
+    }
+  }catch(e){ log('  ⚠ Homepage fetch failed: '+e.message); }
+
+  // 3. Check robots.txt and sitemap for upload paths
+  try{
+    const robots = await proxyFetch(domain+'/robots.txt', proxyBase);
+    if(robots && robots.body){
+      const uploadPaths = [...robots.body.matchAll(/(?:Allow|Disallow):\s*(\/[^\s]*(?:upload|publish|submit)[^\s]*)/gi)].map(m=>m[1]);
+      for(const p of uploadPaths.slice(0,5)){
+        const u = domain+p;
+        if(!results.uploadUrls.find(x=>x.url===u)){
+          results.uploadUrls.push({url:u, score:40, signals:['robots.txt hint'], status:'?'});
+          log('  📋 robots.txt hint: '+u);
+        }
+      }
+    }
+  }catch(e){}
+
+  // Score overall
+  results.confidence = results.uploadUrls.reduce((s,u)=>s+u.score,0);
+  results.uploadUrls.sort((a,b)=>b.score-a.score);
+  if(results.uploadUrls.length){
+    results.method = detectUploadMethod(results.uploadUrls[0]);
+  }
+  log('✔ Scan complete — '+results.uploadUrls.length+' upload page(s) found');
+  return results;
+}
+
+function scoreHtmlForUpload(html){
+  let total = 0; const signals = [];
+  UPLOAD_FINGERPRINTS.forEach(fp=>{
+    if(fp.pattern.test(html)){
+      total+=fp.weight;
+      signals.push(fp.type+':'+fp.weight);
+    }
+  });
+  if(/upload/i.test(html)) total+=5;
+  if(/\.pdf/i.test(html)) total+=10;
+  if(/drag.*drop|drop.*file/i.test(html)) total+=15;
+  return {total, signals};
+}
+
+function extractUploadLinks(html, domain){
+  const links = new Set();
+  const hrefRe = /href=["']([^"']+)["']/gi;
+  let m;
+  while((m=hrefRe.exec(html))!==null){
+    const href = m[1];
+    if(/upload|publish|submit|share|add-doc|new-doc|post/i.test(href)){
+      const full = href.startsWith('http') ? href : (href.startsWith('/') ? domain+href : domain+'/'+href);
+      links.add(full.split('?')[0]);
+    }
+  }
+  return [...links];
+}
+
+function extractApiEndpoints(html, domain){
+  const apis = new Set();
+  // Find JS fetch/axios/XHR calls
+  const apiRe = /(?:fetch|axios\.post|XMLHttpRequest)[^"']*["']([^"']*(?:upload|document|file|pdf)[^"']{2,60})["']/gi;
+  let m;
+  while((m=apiRe.exec(html))!==null){
+    const ep = m[1];
+    const full = ep.startsWith('http') ? ep : (ep.startsWith('/') ? domain+ep : null);
+    if(full) apis.add(full);
+  }
+  return [...apis].slice(0,8);
+}
+
+function detectUploadMethod(uploadPage){
+  if(!uploadPage) return 'unknown';
+  if(uploadPage.signals.includes('api:15')) return 'API';
+  if(uploadPage.signals.some(s=>s.includes('input'))) return 'Form POST';
+  return 'Form POST';
+}
+
+async function proxyFetch(url, proxyBase){
+  if(!proxyBase) throw new Error('No proxy base URL configured');
+  const res = await fetch(proxyBase+'/api/proxy',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({url, method:'GET', timeout:12000})
+  });
+  if(!res.ok) throw new Error('Proxy error '+res.status);
+  return res.json();
+}
+
+/* ── MULTI-PLATFORM BLAST ENGINE ── */
+async function pdfBlastPlatforms(pdfBytes, job, selectedPlatformIds, credentials, vercelBase, onUpdate){
+  const results = [];
+  for(const pid of selectedPlatformIds){
+    const plat = PDF_PLATFORMS.find(p=>p.id===pid);
+    if(!plat) continue;
+    onUpdate({pid, name:plat.name, status:'uploading', url:null});
+    let result = {pid, name:plat.name, icon:plat.icon, da:plat.da, status:'manual', url:null, note:''};
+    try{
+      if(pid==='archive'){
+        const creds = credentials.archive||{};
+        if(creds.accessKey && creds.secretKey){
+          const r = await archiveUploadPDF(pdfBytes, job.title, job.keyword, creds.accessKey, creds.secretKey, (pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg}));
+          result.status='live'; result.url=r.url; result.note='Archive.org S3 API — fully automated';
+        } else {
+          result.note='Add Archive.org S3 keys for auto-upload'; result.status='manual';
+        }
+      } else {
+        // For other platforms: use Vercel proxy to attempt upload, fallback to guided manual
+        if(vercelBase){
+          result = await attemptProxiedUpload(pdfBytes, job, plat, credentials[pid]||{}, vercelBase);
+        } else {
+          result.status='manual';
+          result.note='Configure Vercel backend for auto-upload';
+        }
+      }
+    }catch(e){
+      result.status='error'; result.note=e.message.substring(0,80);
+    }
+    results.push(result);
+    onUpdate({pid, name:plat.name, ...result});
+    await sleep(800);
+  }
+  return results;
+}
+
+async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
+  // Convert PDF bytes to base64 for proxy transmission
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(pdfBytes)));
+  try{
+    const res = await fetch(vercelBase+'/api/proxy',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        url: plat.uploadUrl,
+        method:'POST',
+        uploadBase64: b64,
+        filename: slug(job.title)+'.pdf',
+        fields:{ title:job.title, description:'Guide on '+job.keyword, tags:job.keyword },
+        cookie: creds.cookie||'',
+        timeout:30000
+      })
+    });
+    const d = await res.json();
+    if(d.ok && d.body){
+      const urlMatch = d.body.match(/https?:\/\/[^\s"'<>]+(?:pdf|document|doc|file)[^\s"'<>]{5,80}/i)
+        || d.body.match(/"(?:url|permalink|view_url|link)":\s*"(https?:\/\/[^"]+)"/i);
+      if(urlMatch){
+        return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:urlMatch[1]||urlMatch[0], note:'Auto-uploaded via proxy'};
+      }
+    }
+  }catch(e){}
+  // Fallback: open platform + download PDF simultaneously
+  return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'manual', url:plat.uploadUrl, note:'CORS — manual upload required (PDF downloaded)'};
+}
+
+/* ── MAIN PDF JOB ADD ── */
+async function pdfAddJob(){
+  const kw     = (document.getElementById('pdf-kw')||{value:''}).value.trim();
+  const title  = (document.getElementById('pdf-title-input')||{value:''}).value.trim() || 'The Complete Guide to '+kw+' (2025)';
+  const tpl    = (document.getElementById('pdf-template')||{value:'guide'}).value;
+  const dens   = (document.getElementById('pdf-density')||{value:'rich'}).value;
+  const bls    = (document.getElementById('pdf-backlinks')||{value:''}).value.trim();
+  const color  = (document.getElementById('pdf-color')||{value:'#0057ff'}).value;
+  const groqKey= PDF_STATE.groqKey;
+
+  if(!kw){ pdfToast('Enter a target keyword first','warn'); return; }
+
+  const job = {
+    id:uid(), keyword:kw, title, template:tpl, density:dens, backlinks:bls, color,
+    status:'building', log:[], ts:new Date().toLocaleTimeString(),
+    sections:[], wordCount:0, pdfBytes:null, uploadedTo:[],
+    lsiUsed:0, hasSchema:true, hasTOC:true, titleOptimized:kw.toLowerCase().split(' ').some(w=>title.toLowerCase().includes(w)),
+    aiGenerated:!!groqKey
+  };
+  PDF_STATE.jobs.unshift(job);
+  pdfRenderQueue();
+  pdfSetJobStatus(job.id,'building','⏳ Generating AI content...');
+
+  // Step 1: Generate sections
+  pdfLog(job.id,'Generating content with Groq AI...','info');
+  try{
+    job.sections = await groqBuildSections(kw, title, tpl, dens, groqKey, (done,total)=>{
+      pdfSetJobStatus(job.id,'building','✍ Writing section '+done+'/'+total+'...');
+    });
+    job.wordCount = job.sections.reduce((s,sec)=>s+(sec.content||'').split(/\s+/).filter(Boolean).length,0);
+    job.lsiUsed = nlpExpandKeyword(kw).lsi.length;
+    pdfLog(job.id,'Content ready — '+job.wordCount+' words','success');
+  }catch(e){
+    pdfLog(job.id,'Groq error: '+e.message+'. Using template content.','warn');
+    const nlp = nlpExpandKeyword(kw);
+    job.sections = templateHeadings(tpl,kw).map((h,i)=>({heading:h,content:templateFallback(kw,h,nlp,i),insight:'The key to mastering '+kw+' lies in consistent, expert-guided application.'}));
+    job.wordCount = job.sections.reduce((s,sec)=>s+sec.content.split(/\s+/).length,0);
+    job.lsiUsed = nlp.lsi.length;
+    job.aiGenerated = false;
+  }
+
+  // Step 2: Build PDF
+  pdfSetJobStatus(job.id,'building','📄 Building PDF...');
+  pdfLog(job.id,'Building jsPDF document...','info');
+  try{
+    job.pdfBytes = await buildRealPDF(job);
+    pdfLog(job.id,'✅ PDF built — '+(job.pdfBytes.byteLength/1024).toFixed(1)+' KB','success');
+  }catch(e){
+    pdfLog(job.id,'PDF build error: '+e.message,'error');
+    job.status='error'; pdfRenderQueue(); return;
+  }
+
+  job.status='ready';
+  const score = pdfSEOScore(job);
+  job.seoScore = score;
+  pdfLog(job.id,'SEO Score: '+score.score+'/100','success');
+  pdfSetJobStatus(job.id,'ready','✅ Ready — SEO: '+score.score+'/100');
+  pdfRenderQueue();
+  pdfUpdateStats();
+  pdfToast('PDF built! SEO Score: '+score.score+'/100 — ready to blast','success');
+}
+
+/* ── BULK ADD ── */
+async function pdfBulkAdd(){
+  const raw   = (document.getElementById('pdf-bulk-kws')||{value:''}).value.trim();
+  const tpl   = (document.getElementById('pdf-bulk-tpl')||{value:'guide'}).value;
+  const dens  = (document.getElementById('pdf-bulk-density')||{value:'rich'}).value;
+  const bls   = (document.getElementById('pdf-bulk-bls')||{value:''}).value.trim();
+  const color = (document.getElementById('pdf-bulk-color')||{value:'#0057ff'}).value;
+  if(!raw){ pdfToast('Add keywords first','warn'); return; }
+  const kws = raw.split('\n').map(l=>l.trim()).filter(Boolean).slice(0,30);
+  const btn = document.getElementById('pdf-bulk-btn');
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Building '+kws.length+' PDFs...'; }
+  for(const kw of kws){
+    document.getElementById('pdf-kw').value = kw;
+    document.getElementById('pdf-title-input').value = '';
+    document.getElementById('pdf-template').value = tpl;
+    document.getElementById('pdf-density').value = dens;
+    document.getElementById('pdf-backlinks').value = bls;
+    document.getElementById('pdf-color').value = color;
+    await pdfAddJob();
+    await sleep(500);
+  }
+  if(btn){ btn.disabled=false; btn.innerHTML='⚡ Bulk Build'; }
+}
+
+/* ── BLAST UI ── */
+async function pdfBlastJob(jobId){
+  const job = PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(!job||!job.pdfBytes){ pdfToast('Build the PDF first','warn'); return; }
+
+  const sel = [...document.querySelectorAll('.pdf-plat-chip.on')].map(c=>c.dataset.pid);
+  if(!sel.length){ pdfToast('Select at least one platform','warn'); return; }
+
+  // Collect credentials
+  const creds = {};
+  creds.archive = {
+    accessKey:(document.getElementById('cred-archive-access')||{value:''}).value.trim(),
+    secretKey:(document.getElementById('cred-archive-secret')||{value:''}).value.trim()
+  };
+  PDF_PLATFORMS.forEach(p=>{
+    const cookieEl = document.getElementById('cred-'+p.id+'-cookie');
+    if(cookieEl) creds[p.id] = {cookie:cookieEl.value.trim()};
+  });
+
+  const vercelBase = PDF_STATE.vercelBase;
+
+  // Show blast modal
+  showBlastModal(job, sel);
+
+  const results = await pdfBlastPlatforms(
+    job.pdfBytes, job, sel, creds, vercelBase,
+    ({pid,name,status,url,pct,msg})=>{
+      updateBlastRow(pid,status,url,pct,msg);
+    }
+  );
+
+  job.uploadedTo = results;
+  job.status = results.some(r=>r.status==='live') ? 'live' : 'manual';
+  pdfRenderQueue();
+  pdfUpdateStats();
+  const liveCount = results.filter(r=>r.status==='live').length;
+  pdfLog(jobId,'Blast done — '+liveCount+'/'+results.length+' live uploads','success');
+}
+
+function showBlastModal(job, platformIds){
+  const plats = PDF_PLATFORMS.filter(p=>platformIds.includes(p.id));
+  const existing = document.getElementById('pdf-blast-modal');
+  if(existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.className='modal-overlay'; modal.id='pdf-blast-modal';
+  modal.innerHTML=`<div class="modal-box" style="min-width:600px;max-width:95vw">
+    <div class="modal-title">🚀 Blasting "${esc(job.title)}" to ${plats.length} platforms
+      <button class="btn btn-ghost btn-xs" onclick="document.getElementById('pdf-blast-modal').remove()">✕</button>
+    </div>
+    <div id="pdf-blast-rows">
+      ${plats.map(p=>`<div class="blast-row" id="blast-row-${p.id}" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:16px">${p.icon}</span>
+        <div style="flex:1"><strong>${p.name}</strong> <span class="badge ${p.da>=90?'badge-g':'badge-b'}">DA${p.da}</span></div>
+        <div id="blast-status-${p.id}" class="badge badge-y"><span class="spinner"></span> Queued</div>
+        <div id="blast-url-${p.id}" style="font-size:10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted2)"></div>
+      </div>`).join('')}
+    </div>
+    <div style="margin-top:12px;text-align:right">
+      <button class="btn btn-ghost" onclick="document.getElementById('pdf-blast-modal').remove()">Close</button>
+      <button class="btn btn-primary" onclick="pdfExportBlastResults('${job.id}')">📥 Export URLs</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+function updateBlastRow(pid,status,url,pct,msg){
+  const statusEl = document.getElementById('blast-status-'+pid);
+  const urlEl = document.getElementById('blast-url-'+pid);
+  if(!statusEl) return;
+  const map={live:'<span class="badge badge-g">✅ Live</span>',uploading:'<span class="badge badge-b"><span class="spinner"></span> Uploading</span>',manual:'<span class="badge badge-y">📋 Manual</span>',error:'<span class="badge badge-r">❌ Error</span>'};
+  statusEl.innerHTML=map[status]||statusEl.innerHTML;
+  if(urlEl && url){
+    urlEl.innerHTML=status==='live'?`<a href="${esc(url)}" target="_blank" style="color:var(--accent)">🔗 ${esc(url).substring(0,50)}</a>`:esc(url).substring(0,50);
+  }
+  if(urlEl && msg && !url) urlEl.textContent=msg||'';
+}
+
+/* ── DOWNLOAD PDF ── */
+function pdfDownloadJob(jobId){
+  const job = PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(!job){ pdfToast('Job not found','warn'); return; }
+  if(!job.pdfBytes){ pdfToast('PDF not built yet','warn'); return; }
+  const blob = new Blob([job.pdfBytes],{type:'application/pdf'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = slug(job.title || job.keyword) + '-parasite.html';
+  a.download = slug(job.title)+'.pdf';
   a.click();
 }
 
-/* ── Add log line to job ── */
-function pdfLog(jobId, msg, type='info'){
+function pdfExportBlastResults(jobId){
   const job = PDF_STATE.jobs.find(j=>j.id===jobId);
-  if(!job) return;
-  job.log = job.log || [];
-  job.log.push({ts:ts(), msg, type});
-  pdfRefreshJobRow(jobId);
-  const termEl = document.getElementById('pdf-terminal');
-  if(termEl){
-    const typeClass = type==='error'?'t-error':type==='warn'?'t-warn':type==='success'?'t-info':'t-accent';
-    termEl.innerHTML += `<div class="tline"><span class="ttime">${ts()}</span><span class="${typeClass}">${esc(msg)}</span></div>`;
-    termEl.scrollTop = termEl.scrollHeight;
-  }
+  if(!job||!job.uploadedTo||!job.uploadedTo.length){ pdfToast('No blast results yet','warn'); return; }
+  const csv=['Platform,DA,Status,URL,Note']
+    .concat(job.uploadedTo.map(r=>`"${r.name}","${r.da}","${r.status}","${r.url||''}","${r.note||''}"`)).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download='blast-results-'+slug(job.keyword)+'.csv';
+  a.click();
 }
 
-/* ── Refresh a single job row in table ── */
-function pdfRefreshJobRow(jobId){
+function pdfPreviewJob(jobId){
   const job = PDF_STATE.jobs.find(j=>j.id===jobId);
-  if(!job) return;
-  const row = document.getElementById(`pdf-job-${jobId}`);
-  if(!row) return;
-  const statusMap = {queued:'<span class="badge badge-y">⏳ Queued</span>',building:'<span class="badge badge-b">🔨 Building</span>',ready:'<span class="badge badge-g">✅ Ready</span>',uploading:'<span class="badge badge-b"><span class="spinner"></span> Uploading</span>',live:'<span class="badge badge-g">🔴 Live</span>',error:'<span class="badge badge-r">❌ Error</span>'};
-  row.innerHTML = `
-    <td class="mono xs tm">${esc(job.ts)}</td>
-    <td><div style="font-weight:700;font-size:12px">${esc(job.keyword)}</div><div class="xs tm">${esc(job.title)}</div></td>
-    <td><span class="badge badge-p">${esc(job.platform)}</span></td>
-    <td>${esc(job.template||'guide')}</td>
-    <td>${statusMap[job.status]||job.status}</td>
-    <td>
-      ${job.status==='ready'||job.status==='live' ? `<button class="btn btn-primary btn-xs" onclick="pdfLaunchUpload('${job.id}')">📤 Upload</button>` : ''}
-      <button class="btn btn-ghost btn-xs" onclick="pdfDownloadJob('${job.id}')">⬇ HTML</button>
-      ${job.uploadUrl ? `<a href="${esc(job.uploadUrl)}" target="_blank" class="btn btn-blue btn-xs">🔗 URL</a>` : ''}
-      <button class="btn btn-danger btn-xs" onclick="pdfRemoveJob('${job.id}')">✕</button>
-    </td>`;
-}
-
-/* ── Build / queue a new job ── */
-async function pdfAddJob(){
-  const kw      = (document.getElementById('pdf-keyword')||{value:''}).value.trim();
-  const title   = (document.getElementById('pdf-title')||{value:''}).value.trim() || `The Complete Guide to ${kw}`;
-  const tpl     = (document.getElementById('pdf-template')||{value:'guide'}).value;
-  const plat    = (document.getElementById('pdf-platform')||{value:'scribd'}).value;
-  const bls     = (document.getElementById('pdf-backlinks')||{value:''}).value.trim();
-  const density = (document.getElementById('pdf-density')||{value:'rich'}).value;
-
-  if(!kw){ alert('Enter a target keyword first.'); return; }
-
-  const job = { id:uid(), keyword:kw, title, template:tpl, platform:plat, backlinks:bls, density, status:'queued', log:[], ts:new Date().toLocaleTimeString(), uploadUrl:null };
-  PDF_STATE.jobs.unshift(job);
-  pdfRenderTable();
-  pdfLog(job.id, `Job created for "${kw}" → ${plat}`, 'info');
-
-  // Auto-build
-  await pdfBuildJob(job.id);
-}
-
-async function pdfBuildJob(jobId){
-  const job = PDF_STATE.jobs.find(j=>j.id===jobId);
-  if(!job) return;
-  job.status = 'building';
-  pdfLog(jobId, `Building HTML document for "${job.keyword}"...`, 'info');
-  pdfRefreshJobRow(jobId);
-  await sleep(400);
-
-  // Generate HTML
-  job.html = pdfBuildHTML(job.keyword, job.title, job.template, job.backlinks, job.density);
-  job.charCount = job.html.length;
-  job.wordCount = job.html.replace(/<[^>]+>/g,'').split(/\s+/).filter(Boolean).length;
-
-  job.status = 'ready';
-  pdfLog(jobId, `✅ Document ready — ${job.wordCount} words, ${job.charCount} chars`, 'success');
-  pdfRefreshJobRow(jobId);
-  pdfUpdateStats();
-}
-
-/* ── Launch upload (opens platform + downloads HTML) ── */
-function pdfLaunchUpload(jobId){
-  const job = PDF_STATE.jobs.find(j=>j.id===jobId);
-  if(!job) return;
-  const plat = PDF_PLATFORMS.find(p=>p.id===job.platform);
-  if(!plat){ alert('Platform not found.'); return; }
-
-  job.status = 'uploading';
-  pdfLog(jobId, `Opening ${plat.name} upload page...`, 'warn');
-  pdfRefreshJobRow(jobId);
-
-  // Download the HTML file
-  pdfDownloadHTML(job);
-
-  // Open platform upload page
-  setTimeout(()=>{ window.open(plat.uploadUrl,'_blank'); }, 600);
-
-  // Mark as live after delay (manual confirmation)
-  setTimeout(()=>{
-    job.status = 'live';
-    job.uploadUrl = plat.uploadUrl;
-    pdfLog(jobId, `✅ File downloaded + ${plat.name} upload page opened. Paste the HTML content there.`, 'success');
-    pdfRefreshJobRow(jobId);
-    pdfUpdateStats();
-  }, 2000);
-}
-
-/* ── Remove job ── */
-function pdfRemoveJob(jobId){
-  PDF_STATE.jobs = PDF_STATE.jobs.filter(j=>j.id!==jobId);
-  pdfRenderTable();
-  pdfUpdateStats();
-}
-
-/* ── Download job HTML ── */
-function pdfDownloadJob(jobId){
-  const job = PDF_STATE.jobs.find(j=>j.id===jobId);
-  if(!job){ alert('Job not found.'); return; }
-  if(!job.html) job.html = pdfBuildHTML(job.keyword, job.title, job.template, job.backlinks, job.density);
-  pdfDownloadHTML(job);
-}
-
-/* ── Bulk add from keyword list ── */
-async function pdfBulkAdd(){
-  const raw = (document.getElementById('pdf-bulk-kws')||{value:''}).value.trim();
-  const tpl = (document.getElementById('pdf-bulk-tpl')||{value:'guide'}).value;
-  const plat = (document.getElementById('pdf-bulk-platform')||{value:'scribd'}).value;
-  const bls = (document.getElementById('pdf-bulk-backlinks')||{value:''}).value.trim();
-  const density = (document.getElementById('pdf-bulk-density')||{value:'rich'}).value;
-  if(!raw){ alert('Add at least one keyword.'); return; }
-
-  const kws = raw.split('\n').map(l=>l.trim()).filter(Boolean).slice(0,50);
-  const btn = document.getElementById('pdf-bulk-btn');
-  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spinner"></span> Building...'; }
-
-  for(const kw of kws){
-    const title = `The Complete Guide to ${kw} (2025)`;
-    const job = { id:uid(), keyword:kw, title, template:tpl, platform:plat, backlinks:bls, density, status:'queued', log:[], ts:new Date().toLocaleTimeString(), uploadUrl:null };
-    PDF_STATE.jobs.unshift(job);
-    pdfRenderTable();
-    await pdfBuildJob(job.id);
-    await sleep(200);
-  }
-
-  if(btn){ btn.disabled=false; btn.innerHTML='⚡ Build All PDFs'; }
-  pdfUpdateStats();
-}
-
-/* ── Stats ── */
-function pdfUpdateStats(){
-  const total   = PDF_STATE.jobs.length;
-  const ready   = PDF_STATE.jobs.filter(j=>j.status==='ready'||j.status==='live').length;
-  const live    = PDF_STATE.jobs.filter(j=>j.status==='live').length;
-  const words   = PDF_STATE.jobs.reduce((s,j)=>s+(j.wordCount||0),0);
-  const el = id => document.getElementById(id);
-  if(el('pdf-stat-total')) el('pdf-stat-total').textContent = total;
-  if(el('pdf-stat-ready')) el('pdf-stat-ready').textContent = ready;
-  if(el('pdf-stat-live'))  el('pdf-stat-live').textContent  = live;
-  if(el('pdf-stat-words')) el('pdf-stat-words').textContent = words.toLocaleString();
-}
-
-/* ── Render jobs table ── */
-function pdfRenderTable(){
-  const wrap = document.getElementById('pdf-jobs-tbody');
-  if(!wrap) return;
-  if(!PDF_STATE.jobs.length){
-    wrap.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted2);padding:28px;font-family:var(--mono);font-size:11px">No PDF jobs yet — build your first document above.</td></tr>`;
-    return;
-  }
-  wrap.innerHTML = PDF_STATE.jobs.map(job=>`<tr id="pdf-job-${job.id}"></tr>`).join('');
-  PDF_STATE.jobs.forEach(job=>pdfRefreshJobRow(job.id));
-}
-
-/* ── Preview HTML in modal ── */
-function pdfPreview(){
-  const kw    = (document.getElementById('pdf-keyword')||{value:''}).value.trim() || 'example keyword';
-  const title = (document.getElementById('pdf-title')||{value:''}).value.trim()   || `The Complete Guide to ${kw}`;
-  const tpl   = (document.getElementById('pdf-template')||{value:'guide'}).value;
-  const bls   = (document.getElementById('pdf-backlinks')||{value:''}).value.trim();
-  const dens  = (document.getElementById('pdf-density')||{value:'rich'}).value;
-  const html  = pdfBuildHTML(kw, title, tpl, bls, dens);
-
-  const overlay = document.createElement('div');
-  overlay.className='modal-overlay';
-  overlay.onclick = e=>{ if(e.target===overlay) overlay.remove(); };
-  overlay.innerHTML = `<div class="modal-box" style="min-width:80vw;max-width:95vw;max-height:90vh;overflow-y:auto">
-    <div class="modal-title">👁 PDF Document Preview — ${esc(kw)}
+  if(!job||!job.pdfBytes){ pdfToast('PDF not built yet','warn'); return; }
+  const blob = new Blob([job.pdfBytes],{type:'application/pdf'});
+  const url = URL.createObjectURL(blob);
+  const overlay=document.createElement('div'); overlay.className='modal-overlay';
+  overlay.onclick=e=>{if(e.target===overlay){overlay.remove();URL.revokeObjectURL(url);}};
+  overlay.innerHTML=`<div class="modal-box" style="min-width:85vw;max-width:95vw;height:90vh;display:flex;flex-direction:column">
+    <div class="modal-title">👁 PDF Preview — ${esc(job.title)}
       <button class="btn btn-ghost btn-xs" onclick="this.closest('.modal-overlay').remove()">✕ Close</button>
     </div>
-    <iframe srcdoc="${html.replace(/"/g,'&quot;')}" style="width:100%;height:65vh;border:1px solid var(--border);border-radius:8px"></iframe>
-    <div class="row mt8">
-      <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">Close</button>
-    </div>
+    <iframe src="${url}" style="flex:1;width:100%;border:1px solid var(--border);border-radius:4px"></iframe>
   </div>`;
   document.body.appendChild(overlay);
 }
 
-/* ── Export all live jobs as CSV ── */
-function pdfExportCSV(){
-  const rows = PDF_STATE.jobs.filter(j=>j.status==='live'||j.status==='ready');
-  if(!rows.length){ alert('No ready/live jobs to export.'); return; }
-  const csv = ['Keyword,Title,Platform,Template,Status,Words,Upload URL']
-    .concat(rows.map(j=>`"${j.keyword}","${j.title}","${j.platform}","${j.template}","${j.status}","${j.wordCount||0}","${j.uploadUrl||''}"`))
-    .join('\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  a.download = 'pdf-parasite-jobs.csv';
-  a.click();
+function pdfRemoveJob(jobId){
+  PDF_STATE.jobs=PDF_STATE.jobs.filter(j=>j.id!==jobId);
+  pdfRenderQueue(); pdfUpdateStats();
 }
 
-/* ── RENDER PAGE ── */
-function renderPDFParasitePage(el){
-  el = el || document.getElementById('page-pdf_parasite');
-  if(!el) return;
+/* ── SCANNER STATE & FUNCTIONS ── */
+const SCANNER_STATE = { results:[], running:false };
 
-  const platOptions = PDF_PLATFORMS.map(p=>`<option value="${p.id}">${p.icon} ${p.name} (DA ${p.da})</option>`).join('');
-  const tplOptions  = Object.entries(PDF_TEMPLATES).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('');
-  const densOptions = `<option value="thin">Thin (~80 w/section)</option><option value="rich" selected>Rich (~180 w/section)</option><option value="ultra">Ultra (~320 w/section)</option>`;
+async function runUploadScanner(){
+  if(SCANNER_STATE.running) return;
+  const url=(document.getElementById('scanner-url')||{value:''}).value.trim();
+  const proxyBase=(document.getElementById('scanner-proxy-base')||{value:''}).value.trim()||PDF_STATE.vercelBase;
+  if(!url){ pdfToast('Enter a site URL to scan','warn'); return; }
+  if(!proxyBase){ pdfToast('Enter your Vercel backend URL for scanning','warn'); return; }
 
-  el.innerHTML = `
-  <div class="page-title">📄 PDF Parasite Uploader</div>
-  <div class="page-sub">Build keyword-optimised PDF/HTML documents & upload to high-DA document platforms for Google rankings</div>
+  SCANNER_STATE.running=true;
+  SCANNER_STATE.results=[];
+  const logEl=document.getElementById('scanner-log');
+  const resultsEl=document.getElementById('scanner-results');
+  if(logEl) logEl.innerHTML='';
+  if(resultsEl) resultsEl.innerHTML='<div style="color:var(--muted2);padding:20px;text-align:center;font-family:var(--mono);font-size:11px"><span class="spinner"></span> Scanning...</div>';
 
-  <!-- HOW IT WORKS NOTICE -->
-  <div class="notice notice-info" style="margin-bottom:16px">
-    <strong>How PDF Parasite SEO Works:</strong> High-authority platforms like Scribd (DA 96), SlideShare (DA 95), and Academia.edu (DA 93) allow free document uploads. Google crawls and <strong>indexes these pages</strong>, and because of the platform's DA, well-optimised PDFs can <strong>rank for competitive keywords</strong> within days. This module builds a complete, LSI-rich HTML document, then opens the upload page so you can paste it directly.
-  </div>
-
-  <!-- STATS ROW -->
-  <div class="grid4" style="margin-bottom:18px">
-    <div class="stat b"><div class="stat-v" id="pdf-stat-total">0</div><div class="stat-l">Total Jobs</div></div>
-    <div class="stat g"><div class="stat-v" id="pdf-stat-ready">0</div><div class="stat-l">Ready / Built</div></div>
-    <div class="stat r"><div class="stat-v" id="pdf-stat-live">0</div><div class="stat-l">Uploaded Live</div></div>
-    <div class="stat p"><div class="stat-v" id="pdf-stat-words">0</div><div class="stat-l">Total Words</div></div>
-  </div>
-
-  <div class="grid2" style="gap:18px">
-    <!-- LEFT: SINGLE BUILD -->
-    <div>
-      <div class="card">
-        <div class="card-title">🔨 Single Document Builder</div>
-        <div class="fg"><label class="lbl">Target Keyword <span style="color:var(--accent2)">*</span></label>
-          <input type="text" id="pdf-keyword" placeholder="e.g. best SEO tools 2025"></div>
-        <div class="fg"><label class="lbl">Document Title</label>
-          <input type="text" id="pdf-title" placeholder="Auto-generated if blank"></div>
-        <div class="grid2">
-          <div class="fg"><label class="lbl">Content Template</label><select id="pdf-template">${tplOptions}</select></div>
-          <div class="fg"><label class="lbl">Content Density</label><select id="pdf-density">${densOptions}</select></div>
-        </div>
-        <div class="fg"><label class="lbl">Upload Platform</label><select id="pdf-platform">${platOptions}</select></div>
-        <div class="fg"><label class="lbl">Backlink URL (optional)</label>
-          <input type="url" id="pdf-backlinks" placeholder="https://yoursite.com/target-page"></div>
-        <div class="row mt8">
-          <button class="btn btn-primary" onclick="pdfAddJob()">⚡ Build Document</button>
-          <button class="btn btn-ghost" onclick="pdfPreview()">👁 Preview</button>
-        </div>
-      </div>
-
-      <!-- PLATFORM GUIDE -->
-      <div class="card">
-        <div class="card-title">📊 Platform Ranking Power</div>
-        <div class="tw"><table>
-          <thead><tr><th>Platform</th><th>DA</th><th>Free</th><th>Indexed</th><th>Method</th></tr></thead>
-          <tbody>
-            ${PDF_PLATFORMS.map(p=>`<tr>
-              <td><span style="font-size:14px">${p.icon}</span> <strong>${p.name}</strong></td>
-              <td><span class="badge ${p.da>=90?'badge-g':p.da>=80?'badge-b':'badge-y'}">${p.da}</span></td>
-              <td>${p.freeUpload?'<span class="badge badge-g">✓ Free</span>':'<span class="badge badge-r">Paid</span>'}</td>
-              <td>${p.indexed?'<span class="badge badge-g">✓ Yes</span>':'<span class="badge badge-y">Partial</span>'}</td>
-              <td><span class="badge badge-p">${p.method}</span></td>
-            </tr>`).join('')}
-          </tbody>
-        </table></div>
-      </div>
-    </div>
-
-    <!-- RIGHT: BULK + TERMINAL -->
-    <div>
-      <div class="card">
-        <div class="card-title">⚡ Bulk PDF Builder</div>
-        <div class="notice notice-warn" style="margin-bottom:10px">Enter one keyword per line. Builds a full document for each. Limit 50 per run.</div>
-        <div class="fg"><label class="lbl">Keywords (one per line)</label>
-          <textarea id="pdf-bulk-kws" rows="7" placeholder="best SEO tools 2025&#10;affordable web hosting&#10;how to rank on Google&#10;local SEO tips&#10;..."></textarea></div>
-        <div class="grid2">
-          <div class="fg"><label class="lbl">Template</label><select id="pdf-bulk-tpl">${tplOptions}</select></div>
-          <div class="fg"><label class="lbl">Density</label><select id="pdf-bulk-density">${densOptions}</select></div>
-        </div>
-        <div class="fg"><label class="lbl">Platform</label><select id="pdf-bulk-platform">${platOptions}</select></div>
-        <div class="fg"><label class="lbl">Backlink URL (applied to all)</label>
-          <input type="url" id="pdf-bulk-backlinks" placeholder="https://yoursite.com/"></div>
-        <button id="pdf-bulk-btn" class="btn btn-primary" style="width:100%;margin-top:8px" onclick="pdfBulkAdd()">⚡ Build All PDFs</button>
-      </div>
-
-      <!-- STRATEGY BOX -->
-      <div class="card">
-        <div class="card-title">🧠 PDF Parasite Strategy Guide</div>
-        <div style="font-family:var(--mono);font-size:11px;line-height:1.9;color:var(--muted2)">
-          <div style="margin-bottom:8px"><span class="badge badge-g">STEP 1</span> <strong style="color:var(--text)">Keyword Research</strong> — target informational & commercial keywords with DA &lt; 50 sites on page 1. PDFs rank fastest for "<em>best X</em>", "<em>guide to X</em>", "<em>how to X</em>" queries.</div>
-          <div style="margin-bottom:8px"><span class="badge badge-b">STEP 2</span> <strong style="color:var(--text)">Build Rich Content</strong> — use <em>Ultra density</em> for competitive KWs. Include LSI keywords naturally. Add a table of contents (Google uses it for featured snippets).</div>
-          <div style="margin-bottom:8px"><span class="badge badge-p">STEP 3</span> <strong style="color:var(--text)">Upload to Top Platforms</strong> — Scribd → SlideShare → Academia in that order. Each upload = a new indexed URL. Duplicate content is fine across platforms for parasite SEO.</div>
-          <div style="margin-bottom:8px"><span class="badge badge-y">STEP 4</span> <strong style="color:var(--text)">Optimise Metadata</strong> — on each platform, use your exact keyword in the title, description (first 150 chars), and tags. Most platforms allow 10–15 keyword tags.</div>
-          <div style="margin-bottom:8px"><span class="badge badge-r">STEP 5</span> <strong style="color:var(--text)">Build Tier-2 Links</strong> — point cheap backlinks (Web 2.0s, forum profiles, social bookmarks) to your uploaded PDF URLs, not your main site. This pushes the parasite pages to rank.</div>
-          <div><span class="badge badge-g">STEP 6</span> <strong style="color:var(--text)">Monitor & Scale</strong> — once a PDF ranks, embed your target URL inside it (the backlink field above). Traffic flows from the PDF to your site. Build 3–5 PDFs per keyword cluster.</div>
-        </div>
-      </div>
-
-      <!-- TERMINAL -->
-      <div class="card">
-        <div class="card-title">🖥 Build Log</div>
-        <div class="terminal" id="pdf-terminal">
-          <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">PDF Parasite Uploader v1.0 ready. Build your first document above.</span></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- JOBS TABLE -->
-  <div class="card" style="margin-top:0">
-    <div class="card-title">📋 Document Jobs Queue
-      <button class="btn btn-ghost btn-xs" style="margin-left:auto" onclick="pdfExportCSV()">📥 Export CSV</button>
-    </div>
-    <div class="tw"><table>
-      <thead><tr><th>Time</th><th>Keyword / Title</th><th>Platform</th><th>Template</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody id="pdf-jobs-tbody">
-        <tr><td colspan="6" style="text-align:center;color:var(--muted2);padding:28px;font-family:var(--mono);font-size:11px">No PDF jobs yet.</td></tr>
-      </tbody>
-    </table></div>
-  </div>`;
-
-  pdfUpdateStats();
-}
-
-// ═══════════════════════════════════════════════════════════════
-// PROXY MANAGER MODULE
-// ═══════════════════════════════════════════════════════════════
-
-const PROXY_STATE = {
-  proxies: (()=>{ try{ return JSON.parse(localStorage.getItem('pm_proxies')||'[]'); }catch(e){ return []; } })(),
-  scanning: false,
-  testing: false,
-  activeProxy: null,
-  scanLog: [],
-};
-
-const PROXY_SOURCES = [
-  // ══════════════════════════════════════════════════════════════
-  // TIER 1 — PREMIUM FREEMIUM APIs (dedicated, always-updated, structured)
-  // These are the most reliable: purpose-built APIs, updated every few minutes
-  // ══════════════════════════════════════════════════════════════
-  {
-    name:'ProxyScrape v3 HTTP Elite (Tier1)',
-    url:'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&proxy_format=protocolipport&format=text&timeout=3000&anonymity=Elite&country=US,GB,CA,DE,FR,NL,AU,SE,NO,CH,AT,BE,DK,FI,IE,IT,NZ',
-    format:'plain-protocol', tier:1
-  },
-  {
-    name:'ProxyScrape v3 HTTPS Elite (Tier1)',
-    url:'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=https&proxy_format=protocolipport&format=text&timeout=3000&anonymity=Elite&country=US,GB,CA,DE,FR,NL,AU,SE,NO,CH,AT,BE,DK,FI,IE,IT,NZ',
-    format:'plain-protocol', tier:1
-  },
-  {
-    name:'ProxyScrape v3 SOCKS5 (Tier1)',
-    url:'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks5&proxy_format=protocolipport&format=text&timeout=3000&country=US,GB,CA,DE,FR,NL,AU,SE,NO,CH,AT,BE,DK,FI',
-    format:'plain-protocol', tier:1
-  },
-  {
-    name:'GeoNode Elite HTTP p1 (Tier1)',
-    url:'https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=speed&sort_type=asc&protocols=http,https&anonymityLevel=elite',
-    format:'geonode', tier:1
-  },
-  {
-    name:'GeoNode Elite HTTP p2 (Tier1)',
-    url:'https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=speed&sort_type=asc&protocols=http,https&anonymityLevel=elite',
-    format:'geonode', tier:1
-  },
-  {
-    name:'GeoNode Anonymous p1 (Tier1)',
-    url:'https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=speed&sort_type=asc&protocols=http,https&anonymityLevel=anonymous',
-    format:'geonode', tier:1
-  },
-  {
-    name:'GeoNode SOCKS5 (Tier1)',
-    url:'https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=speed&sort_type=asc&protocols=socks5&anonymityLevel=elite,anonymous',
-    format:'geonode', tier:1
-  },
-  // ══════════════════════════════════════════════════════════════
-  // TIER 2 — PREMIUM GITHUB LISTS (actively maintained, updated hourly/daily)
-  // These repos have CI/CD pipelines fetching & validating proxies continuously
-  // ══════════════════════════════════════════════════════════════
-  {
-    name:'TheSpeedX HTTP (active, 50k+)',
-    url:'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'TheSpeedX SOCKS5 (active)',
-    url:'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'TheSpeedX SOCKS4 (active)',
-    url:'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'hookzof SOCKS5 (elite, curated)',
-    url:'https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'ShiftyTR HTTP (fast-refresh)',
-    url:'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'ShiftyTR HTTPS (fast-refresh)',
-    url:'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'ShiftyTR SOCKS5 (fast-refresh)',
-    url:'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'jetkai SOCKS5 (CI validated)',
-    url:'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'jetkai HTTP (CI validated)',
-    url:'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'jetkai HTTPS (CI validated)',
-    url:'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'monosans HTTP (high quality)',
-    url:'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'monosans SOCKS5 (high quality)',
-    url:'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'proxifly HTTP (country-tagged)',
-    url:'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'proxifly SOCKS5 (country-tagged)',
-    url:'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'Anonym0usWork HTTP (hourly)',
-    url:'https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'Anonym0usWork SOCKS5 (hourly)',
-    url:'https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks5_proxies.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'MuRongPIG HTTP (auto-verified)',
-    url:'https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http_checked.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'roosterkid HTTPS (openproxylist)',
-    url:'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'roosterkid SOCKS5 (openproxylist)',
-    url:'https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'B4RC0D3 HTTP (scored list)',
-    url:'https://raw.githubusercontent.com/B4RC0D3/TorProxy/main/http.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-  {
-    name:'sunny9577 HTTP (live-checked)',
-    url:'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt',
-    format:'plain', tier:2, geoFilter:true
-  },
-];
-
-const WESTERN_CC = ['US','GB','CA','DE','FR','NL','AU','SE','NO','CH','AT','BE','DK','FI','IE','IT','NZ','PT','ES'];
-const CORS_PROXIES_LIST = ['https://corsproxy.io/?','https://api.allorigins.win/raw?url=','https://proxy.cors.sh/'];
-let _cpIdx=0;
-function pmCorsUrl(u){ return CORS_PROXIES_LIST[_cpIdx%CORS_PROXIES_LIST.length]+encodeURIComponent(u); }
-function pmNextCors(){ _cpIdx++; }
-function pmSave(){ try{localStorage.setItem('pm_proxies',JSON.stringify(PROXY_STATE.proxies));}catch(e){} }
-
-function pmLog(msg,type='info'){
-  const t=new Date().toLocaleTimeString('en-US',{hour12:false});
-  const el=document.getElementById('pm-terminal');
-  if(el){
-    const cls=type==='error'?'t-error':type==='warn'?'t-warn':type==='success'?'t-info':'t-accent';
-    el.innerHTML=`<div class="tline"><span class="ttime">${t}</span><span class="${cls}">${msg.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span></div>`+el.innerHTML;
-  }
-  const b=document.getElementById('proxy-badge');
-  if(b) b.textContent=PROXY_STATE.proxies.filter(p=>p.status==='alive').length||PROXY_STATE.proxies.length||0;
-}
-
-// ── Country code → emoji flag ──────────────────────────────────────
-function pmFlag(cc){ try{ return cc?String.fromCodePoint(...[...cc.toUpperCase()].map(c=>0x1F1E0+c.charCodeAt(0)-65)):'' }catch(e){return '';} }
-
-// ── ip-api.com batch geo-lookup (100 IPs per call, 15 req/min free) ──
-async function pmGeoFilter(proxies){
-  if(!proxies.length) return [];
-  const out = [];
-  const BATCH = 100;
-  for(let i=0; i<proxies.length; i+=BATCH){
-    const batch = proxies.slice(i, i+BATCH);
-    try{
-      const body = JSON.stringify(batch.map(p=>({query:p.ip, fields:'status,countryCode'})));
-      const r = await fetch('https://corsproxy.io/?'+encodeURIComponent('http://ip-api.com/batch?fields=status,countryCode'),
-        {method:'POST',headers:{'Content-Type':'application/json'},body,signal:AbortSignal.timeout(10000)});
-      if(r.ok){
-        const data = await r.json();
-        data.forEach((d,idx)=>{
-          const cc = (d.status==='success'&&d.countryCode)||'';
-          if(!cc||WESTERN_CC.includes(cc)){
-            batch[idx].country = cc;
-            batch[idx].flag = pmFlag(cc);
-            out.push(batch[idx]);
-          }
-        });
-      } else { out.push(...batch); } // fallback: keep all if API fails
-    }catch(e){ out.push(...batch); }
-    await sleep(200); // respect 15 req/min
-  }
-  return out;
-}
-
-function pmParse(text,format,src){
-  const out=[];
-  if(format==='plain'){
-    text.split(/[\r\n]+/).forEach(l=>{
-      l=l.trim();
-      if(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$/.test(l)){
-        const[ip,port]=l.split(':');
-        out.push({id:uid(),ip,port:+port,protocol:'http',country:'',flag:'',anonymity:'',status:'untested',speed:null,source:src,added:Date.now(),lastTest:null,failCount:0});
-      }
-    });
-  } else if(format==='plain-protocol'){
-    // ProxyScrape v3 format: "http://1.2.3.4:8080" or "socks5://1.2.3.4:1080"
-    text.split(/[\r\n]+/).forEach(l=>{
-      l=l.trim();
-      const m=l.match(/^(https?|socks[45]):\/\/(\d{1,3}(?:\.\d{1,3}){3}):(\d+)/i);
-      if(m){
-        out.push({id:uid(),ip:m[2],port:+m[3],protocol:m[1].toLowerCase(),country:'',flag:'',anonymity:'',status:'untested',speed:null,source:src,added:Date.now(),lastTest:null,failCount:0});
-      }
-    });
-  } else if(format==='geonode'){
-    try{
-      const j=JSON.parse(text);
-      (j.data||[]).forEach(p=>{
-        const cc = p.country||'';
-        if(!cc||WESTERN_CC.includes(cc)){
-          const anon = (p.anonymityLevel||'').toLowerCase(); // elite, anonymous, transparent
-          out.push({id:uid(),ip:p.ip,port:+p.port,protocol:(p.protocols||['http'])[0],country:cc,flag:pmFlag(cc),anonymity:anon,speed:p.speed?+p.speed:null,status:'untested',source:src,added:Date.now(),lastTest:null,failCount:0});
-        }
-      });
-    }catch(e){}
-  } else if(format==='html-table'){
-    // free-proxy-list.net / sslproxies.org: IP, Port, Code, Country, Anonymity, Google, HTTPS, Last Checked
-    (text.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi)||[]).forEach(row=>{
-      const cells=(row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi)||[]).map(c=>c.replace(/<[^>]+>/g,'').trim());
-      if(cells.length>=2&&/^\d+\.\d+\.\d+\.\d+$/.test(cells[0])&&/^\d+$/.test(cells[1])){
-        const cc=(cells[2]||'').slice(0,2).toUpperCase();
-        if(!cc||WESTERN_CC.includes(cc)){
-          const anon=(cells[4]||'').toLowerCase().includes('elite')?'elite':(cells[4]||'').toLowerCase().includes('anonymous')?'anonymous':'transparent';
-          out.push({id:uid(),ip:cells[0],port:+cells[1],protocol:(cells[6]||'').toUpperCase()==='YES'?'https':'http',country:cc,flag:pmFlag(cc),anonymity:anon,status:'untested',speed:null,source:src,added:Date.now(),lastTest:null,failCount:0});
-        }
-      }
-    });
-  }
-  return out;
-}
-
-function pmDedupe(arr){
-  const seen=new Set(PROXY_STATE.proxies.map(p=>p.ip+':'+p.port));
-  return arr.filter(p=>!seen.has(p.ip+':'+p.port));
-}
-
-async function pmFetchSrc(src){
-  pmLog('Fetching '+src.name+'...');
-  const urls = src.url.startsWith('http')?[src.url]:[src.url];
-  const tryUrls = [src.url, pmCorsUrl(src.url)];
-  for(const url of tryUrls){
-    try{
-      const r=await smartFetch(url,{method:'GET',sfTimeout:15000});
-      if(!r.ok) continue;
-      const text=await r.text();
-      let proxies=pmParse(text,src.format,src.name);
-      if(!proxies.length) continue;
-      // For GitHub/global lists tagged with geoFilter, batch-lookup and filter to western CCs
-      if(src.geoFilter && proxies.length){
-        pmLog('  → Geo-filtering '+proxies.length+' entries via ip-api.com batch...');
-        proxies = await pmGeoFilter(proxies);
-        pmLog('  → '+proxies.length+' western proxies retained after geo-filter');
-      }
-      if(proxies.length){pmLog('✔ '+src.name+': '+proxies.length+' found','success');return proxies;}
-    }catch(e){pmNextCors();}
-  }
-  pmLog('FAIL '+src.name,'warn');
-  return[];
-}
-
-async function pmScanAll(){
-  if(PROXY_STATE.scanning){pmLog('Already scanning...','warn');return;}
-  PROXY_STATE.scanning=true;
-  pmUpdateScanBtn(true);
-  pmLog('Starting scan across '+PROXY_SOURCES.length+' sources...');
-  let total=0;
-  for(const src of PROXY_SOURCES){
-    if(!PROXY_STATE.scanning) break;
-    const proxies=await pmFetchSrc(src);
-    const fresh=pmDedupe(proxies);
-    PROXY_STATE.proxies.push(...fresh);
-    total+=fresh.length;
-    pmSave();pmRenderTable();pmUpdateStats();
-    await sleep(300);
-  }
-  PROXY_STATE.scanning=false;
-  pmUpdateScanBtn(false);
-  pmLog('Scan done. '+total+' new proxies. Total: '+PROXY_STATE.proxies.length,'success');
-  pmRenderTable();
-}
-function pmStopScan(){PROXY_STATE.scanning=false;pmUpdateScanBtn(false);pmLog('Scan stopped.','warn');}
-
-async function pmTestProxy(p){
-  const start = Date.now();
-  // ── Real proxy validation strategy ─────────────────────────────────────────
-  // Browser JS cannot route requests *through* a raw HTTP proxy (no CONNECT
-  // tunnel support from fetch). Instead we use a backend-relay approach:
-  // We ask our CORS proxy to fetch a target URL *via* the proxy under test.
-  // If that succeeds AND the returned IP differs from our real IP → alive.
-  // If no backend is available we fall back to a lightweight reachability ping.
-
-  const proxyStr = `${p.protocol}://${p.ip}:${p.port}`;
-
-  // Strategy A: Use Vercel backend relay if configured (most accurate)
-  const vercelUrl = (typeof settingGet === 'function') ? settingGet('vercel_url') : null;
-  const vercelSecret = (typeof settingGet === 'function') ? settingGet('vercel_secret') : null;
-  if(vercelUrl && vercelSecret){
-    try{
-      const r = await fetch(`${vercelUrl}/api/proxy-test`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json','x-secret':vercelSecret},
-        body: JSON.stringify({ proxy: proxyStr, url:'https://api.ipify.org?format=json' }),
-        signal: AbortSignal.timeout(12000)
-      });
-      if(r.ok){
-        const d = await r.json();
-        if(d && d.ok){
-          const ms = Date.now() - start;
-          p.speed = ms; p.status = 'alive';
-          p.speedLabel = ms < 800 ? 'fast' : ms < 2000 ? 'medium' : 'slow';
-          p.lastTest = Date.now(); p.failCount = 0;
-          p.testedVia = 'vercel-relay';
-          return true;
-        }
-      }
-    }catch(e){}
-  }
-
-  // Strategy B: corsproxy.io with proxy-url header (some CORS proxies support
-  // forwarding via X-Proxy-URL header — best-effort, not all support it)
-  const corsRelays = [
-    `https://corsproxy.io/?${encodeURIComponent('https://api.ipify.org?format=json')}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent('https://api.ipify.org?format=json')}`,
-    `https://corsproxy.io/?${encodeURIComponent('https://checkip.amazonaws.com/')}`,
-  ];
-
-  // Strategy C: Reachability test — can we open a TCP connection to the proxy port?
-  // We do this by fetching the proxy IP:port directly and checking for any response
-  // (even a 407 Proxy Auth Required means the proxy is alive!)
-  const reachUrls = [
-    `http://${p.ip}:${p.port}/`,
-    `https://${p.ip}:${p.port}/`,
-  ];
-
-  // Try reachability: a real proxy returns 400/407/200 — anything is "alive"
-  for(const url of reachUrls){
-    try{
-      const ctrl = new AbortController();
-      const tid = setTimeout(()=>ctrl.abort(), 5000);
-      const r = await fetch(url, {
-        method:'GET',
-        mode:'no-cors',  // bypass CORS — we just need to know it's reachable
-        signal: ctrl.signal,
-        cache:'no-store'
-      });
-      clearTimeout(tid);
-      // mode:no-cors returns opaque response (type='opaque') if reachable
-      // or throws if truly unreachable/timed out
-      const ms = Date.now() - start;
-      p.speed = ms; p.status = 'alive';
-      p.speedLabel = ms < 800 ? 'fast' : ms < 2000 ? 'medium' : 'slow';
-      p.lastTest = Date.now(); p.failCount = 0;
-      p.testedVia = 'direct-reach';
-      return true;
-    }catch(e){
-      // opaque fetch still resolves for reachable hosts in some browsers
-      // TypeError = truly unreachable, continue
-    }
-  }
-
-  // Strategy D: Use a CORS proxy to check if the proxy IP itself responds on its port
-  // We probe via a known checker that accepts a target param
-  const probeUrls = [
-    `https://corsproxy.io/?${encodeURIComponent(`http://${p.ip}:${p.port}`)}`,
-  ];
-  for(const url of probeUrls){
-    try{
-      const r = await fetch(url, {signal: AbortSignal.timeout(6000)});
-      // Any response (200, 400, 403, 407) means the proxy port is open & alive
-      if(r.status < 600){
-        const ms = Date.now() - start;
-        p.speed = ms; p.status = 'alive';
-        p.speedLabel = ms < 800 ? 'fast' : ms < 2000 ? 'medium' : 'slow';
-        p.lastTest = Date.now(); p.failCount = 0;
-        p.testedVia = 'cors-probe';
-        return true;
-      }
-    }catch(e){}
-  }
-
-  // All strategies failed → dead
-  p.speed = null; p.status = 'dead'; p.speedLabel = '';
-  p.lastTest = Date.now(); p.failCount = (p.failCount||0) + 1;
-  p.testedVia = 'none';
-  return false;
-}
-
-async function pmTestAll(){
-  if(PROXY_STATE.testing){pmLog('Already testing...','warn');return;}
-  const list=PROXY_STATE.proxies.filter(p=>p.status==='untested'||p.status==='dead');
-  if(!list.length){pmLog('No proxies to test.','warn');return;}
-  PROXY_STATE.testing=true;
-  const btn=document.getElementById('pm-test-btn');
-  if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Testing...';}
-  pmLog('Testing '+list.length+' proxies (10 concurrent)...');
-  let done=0,alive=0,dead=0;
-  for(let i=0;i<list.length;i+=10){
-    if(!PROXY_STATE.testing) break;
-    await Promise.all(list.slice(i,i+10).map(async p=>{
-      const ok=await pmTestProxy(p);
-      done++;if(ok)alive++;else dead++;
-    }));
-    pmSave();pmRenderTable();pmUpdateStats();
-    const prog=document.getElementById('pm-test-prog');
-    if(prog) prog.style.width=Math.round(done/list.length*100)+'%';
-    pmLog('Progress '+done+'/'+list.length+' — '+alive+' alive, '+dead+' dead');
-    await sleep(100);
-  }
-  PROXY_STATE.testing=false;
-  if(btn){btn.disabled=false;btn.innerHTML='🧪 Test All';}
-  pmLog('Testing done: '+alive+' alive, '+dead+' dead','success');
-  pmUpdateStats();
-}
-function pmStopTest(){PROXY_STATE.testing=false;pmLog('Testing stopped.','warn');}
-
-async function pmTestSingle(id){
-  const p=PROXY_STATE.proxies.find(x=>x.id===id);if(!p)return;
-  p.status='testing';pmRefreshRow(id);
-  await pmTestProxy(p);pmSave();pmRefreshRow(id);pmUpdateStats();
-  pmLog(p.ip+':'+p.port+' → '+p.status+(p.speed?' ('+p.speed+'ms)':''),p.status==='alive'?'success':'warn');
-}
-
-function pmSetActive(id){
-  PROXY_STATE.activeProxy=id==='none'?null:PROXY_STATE.proxies.find(p=>p.id===id)||null;
-  pmUpdateActiveDisplay();
-  pmRenderTable();
-  pmLog(PROXY_STATE.activeProxy?'Active proxy: '+PROXY_STATE.activeProxy.ip+':'+PROXY_STATE.activeProxy.port:'Active proxy cleared.','success');
-}
-function pmGetActiveProxy(){return PROXY_STATE.activeProxy;}
-
-function pmRemove(id){
-  PROXY_STATE.proxies=PROXY_STATE.proxies.filter(p=>p.id!==id);
-  if(PROXY_STATE.activeProxy&&PROXY_STATE.activeProxy.id===id) PROXY_STATE.activeProxy=null;
-  pmSave();pmRenderTable();pmUpdateStats();
-}
-function pmClearDead(){
-  const b=PROXY_STATE.proxies.length;
-  PROXY_STATE.proxies=PROXY_STATE.proxies.filter(p=>p.status!=='dead');
-  pmSave();pmRenderTable();pmUpdateStats();
-  pmLog('Removed '+(b-PROXY_STATE.proxies.length)+' dead proxies.','warn');
-}
-function pmClearAll(){
-  if(!confirm('Clear ALL proxies?')) return;
-  PROXY_STATE.proxies=[];PROXY_STATE.activeProxy=null;
-  pmSave();pmRenderTable();pmUpdateStats();pmLog('All proxies cleared.','warn');
-}
-function pmAddManual(){
-  const raw=(document.getElementById('pm-manual-input')||{value:''}).value.trim();
-  const proto=(document.getElementById('pm-manual-proto')||{value:'http'}).value;
-  if(!raw){alert('Enter IP:PORT');return;}
-  let added=0;
-  raw.split(/[\r\n,]+/).forEach(line=>{
-    const m=line.trim().match(/^(\d+\.\d+\.\d+\.\d+):(\d+)$/);
-    if(!m) return;
-    if(PROXY_STATE.proxies.find(p=>p.ip===m[1]&&p.port===+m[2])) return;
-    PROXY_STATE.proxies.push({id:uid(),ip:m[1],port:+m[2],protocol:proto,country:'',status:'untested',speed:null,source:'Manual',added:Date.now(),lastTest:null,failCount:0});
-    added++;
-  });
-  pmSave();pmRenderTable();pmUpdateStats();pmLog('Added '+added+' manual proxies.','success');
-  const inp=document.getElementById('pm-manual-input');if(inp)inp.value='';
-}
-function pmExportAlive(){
-  const alive=PROXY_STATE.proxies.filter(p=>p.status==='alive');
-  if(!alive.length){alert('No alive proxies.');return;}
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([alive.map(p=>p.protocol+'://'+p.ip+':'+p.port).join('\n')],{type:'text/plain'}));
-  a.download='alive-proxies.txt';a.click();
-}
-function pmUpdateStats(){
-  const t=PROXY_STATE.proxies.length;
-  const a=PROXY_STATE.proxies.filter(p=>p.status==='alive').length;
-  const d=PROXY_STATE.proxies.filter(p=>p.status==='dead').length;
-  const u=PROXY_STATE.proxies.filter(p=>p.status==='untested').length;
-  const sp=PROXY_STATE.proxies.filter(p=>p.speed).map(p=>p.speed);
-  const avg=sp.length?Math.round(sp.reduce((a,b)=>a+b,0)/sp.length):0;
-  const s=id=>document.getElementById(id);
-  if(s('pm-stat-total')) s('pm-stat-total').textContent=t;
-  if(s('pm-stat-alive')) s('pm-stat-alive').textContent=a;
-  if(s('pm-stat-dead'))  s('pm-stat-dead').textContent=d;
-  if(s('pm-stat-unt'))   s('pm-stat-unt').textContent=u;
-  if(s('pm-stat-speed')) s('pm-stat-speed').textContent=avg?avg+'ms':'—';
-  const b=document.getElementById('proxy-badge');
-  if(b) b.textContent=a||t||0;
-}
-function pmUpdateActiveDisplay(){
-  const el=document.getElementById('pm-active-display');if(!el) return;
-  const p=PROXY_STATE.activeProxy;
-  el.innerHTML=p
-    ?`<span class="badge badge-g">🟢 ACTIVE</span> <strong>${p.protocol.toUpperCase()}://${p.ip}:${p.port}</strong> ${p.country?`<span class="badge badge-b">${p.country}</span>`:''} ${p.speed?`<span class="badge badge-y">${p.speed}ms</span>`:''}`
-    :`<span class="badge badge-r">No Active Proxy</span> <span class="xs tm">— requests use direct connection</span>`;
-}
-function pmUpdateScanBtn(sc){
-  const b=document.getElementById('pm-scan-btn');
-  const s=document.getElementById('pm-stop-btn');
-  if(b){b.disabled=sc;b.innerHTML=sc?'<span class="spinner"></span> Scanning...':'🔍 Scan All Sources';}
-  if(s) s.style.display=sc?'':'none';
-}
-function pmRefreshRow(id){
-  const p=PROXY_STATE.proxies.find(x=>x.id===id);if(!p)return;
-  const row=document.getElementById('pm-row-'+id);if(!row)return;
-  const isActive=PROXY_STATE.activeProxy&&PROXY_STATE.activeProxy.id===id;
-  const sb={alive:'<span class="badge badge-g">✅ Alive</span>',dead:'<span class="badge badge-r">❌ Dead</span>',untested:'<span class="badge badge-y">⏳ Untested</span>',testing:'<span class="badge badge-b"><span class="spinner"></span> Testing</span>'}[p.status]||p.status;
-  const anonBadge=p.anonymity==='elite'?'<span class="badge badge-g" style="font-size:8px">ELITE</span>':p.anonymity==='anonymous'?'<span class="badge badge-b" style="font-size:8px">ANON</span>':p.anonymity?'<span class="badge" style="font-size:8px;background:#555;color:#fff">TRANSP</span>':'';
-  const speedBadge=p.speed?(p.speedLabel==='fast'?'<span class="badge badge-g">🟢 '+p.speed+'ms</span>':p.speedLabel==='medium'?'<span class="badge badge-y">🟡 '+p.speed+'ms</span>':'<span class="badge badge-r">🔴 '+p.speed+'ms</span>'):'-';
-  row.innerHTML=`<td>${isActive?'<span class="badge badge-g">★</span>':''}</td>
-    <td class="mono" style="font-weight:700">${p.ip}:${p.port}</td>
-    <td><span class="badge badge-p">${p.protocol.toUpperCase()}</span></td>
-    <td>${p.flag||''} ${p.country?`<span class="badge badge-b">${p.country}</span>`:'-'}</td>
-    <td>${anonBadge||'-'}</td>
-    <td>${sb}</td>
-    <td>${speedBadge}</td>
-    <td class="xs tm">${p.source||''}</td>
-    <td>
-      <button class="btn btn-primary btn-xs" onclick="pmSetActive('${p.id}')">★ Use</button>
-      <button class="btn btn-ghost btn-xs" onclick="pmTestSingle('${p.id}')">🧪</button>
-      <button class="btn btn-danger btn-xs" onclick="pmRemove('${p.id}')">✕</button>
-    </td>`;
-}
-function pmRenderTable(){
-  const tbody=document.getElementById('pm-tbody');if(!tbody)return;
-  const filter=(document.getElementById('pm-filter')||{value:'all'}).value;
-  const search=((document.getElementById('pm-search')||{value:''}).value||'').toLowerCase();
-  let list=[...PROXY_STATE.proxies];
-  if(filter==='alive') list=list.filter(p=>p.status==='alive');
-  if(filter==='dead')  list=list.filter(p=>p.status==='dead');
-  if(filter==='untested') list=list.filter(p=>p.status==='untested');
-  if(filter==='elite') list=list.filter(p=>p.anonymity==='elite');
-  if(search) list=list.filter(p=>(p.ip+':'+p.port+' '+p.country+' '+p.source+' '+p.anonymity).toLowerCase().includes(search));
-  // Sort: alive first → elite anon first → fastest speed
-  list.sort((a,b)=>{
-    const ss=p=>p.status==='alive'?0:p.status==='untested'?1:2;
-    if(ss(a)!==ss(b)) return ss(a)-ss(b);
-    const as=p=>p.anonymity==='elite'?0:p.anonymity==='anonymous'?1:2;
-    if(as(a)!==as(b)) return as(a)-as(b);
-    return (a.speed||9999)-(b.speed||9999);
-  });
-  if(!list.length){tbody.innerHTML=`<tr><td colspan="9" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No proxies found. Click Scan All Sources.</td></tr>`;return;}
-  tbody.innerHTML=list.slice(0,500).map(p=>`<tr id="pm-row-${p.id}"></tr>`).join('');
-  list.slice(0,500).forEach(p=>pmRefreshRow(p.id));
-}
-function renderProxyManagerPage(el){
-  el = el || document.getElementById('page-proxy_manager'); if(!el) return;
-  el.innerHTML=`
-  <div class="page-title">🛡 Proxy Manager v3 — Premium Freemium Sources</div>
-  <div class="page-sub">${PROXY_SOURCES.length} top-tier sources · Geo-batch filtering via ip-api.com · Elite &amp; Anonymous priority · Multi-strategy port testing · Auto-dedup</div>
-  <div class="notice notice-info" style="margin-bottom:16px"><strong>How it works:</strong> Scans ${PROXY_SOURCES.length} curated premium/freemium sources. <strong>Tier 1</strong> = dedicated proxy APIs (ProxyScrape v3, GeoNode) — country-filtered at source, updated every few minutes. <strong>Tier 2</strong> = top GitHub repos with CI/CD auto-validation pipelines (TheSpeedX SOCKS-List, hookzof, ShiftyTR, jetkai, monosans, proxifly) — geo-batch checked via ip-api.com batch API. Testing: multi-strategy port reachability (direct TCP probe → CORS relay probe → Vercel backend relay if configured). Speed: 🟢 Fast &lt;800ms · 🟡 Medium &lt;2s · 🔴 Slow. Only US/UK/CA/DE/FR/NL/AU/SE/NO/CH/AT/BE/DK/FI/IE/IT/NZ/ES retained.</div>
-  <div class="card" style="margin-bottom:14px;padding:14px 20px"><div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-    <span style="font-family:var(--mono);font-size:10px;color:var(--muted2);font-weight:700;text-transform:uppercase;letter-spacing:.08em">Active Proxy:</span>
-    <span id="pm-active-display"></span>
-    <button class="btn btn-ghost btn-xs" onclick="pmSetActive('none')" style="margin-left:auto">✕ Clear Active</button>
-  </div></div>
-  <div class="grid5" style="margin-bottom:16px">
-    <div class="stat b"><div class="stat-v" id="pm-stat-total">0</div><div class="stat-l">Total</div></div>
-    <div class="stat g"><div class="stat-v" id="pm-stat-alive">0</div><div class="stat-l">Alive</div></div>
-    <div class="stat r"><div class="stat-v" id="pm-stat-dead">0</div><div class="stat-l">Dead</div></div>
-    <div class="stat y"><div class="stat-v" id="pm-stat-unt">0</div><div class="stat-l">Untested</div></div>
-    <div class="stat p"><div class="stat-v" id="pm-stat-speed">—</div><div class="stat-l">Avg Speed</div></div>
-  </div>
-  <div class="grid2" style="gap:16px">
-    <div>
-      <div class="card">
-        <div class="card-title">🔍 Scanner Controls</div>
-        <div class="notice notice-warn" style="margin-bottom:12px">${PROXY_SOURCES.length} sources · Western countries only · ip-api.com geo-batch filter · Elite proxy priority</div>
-        <div class="row" style="flex-wrap:wrap;gap:8px">
-          <button id="pm-scan-btn" class="btn btn-primary" onclick="pmScanAll()">🔍 Scan All Sources</button>
-          <button id="pm-stop-btn" class="btn btn-danger" onclick="pmStopScan()" style="display:none">⏹ Stop Scan</button>
-          <button id="pm-test-btn" class="btn btn-blue" onclick="pmTestAll()">🧪 Test All</button>
-          <button class="btn btn-ghost" onclick="pmClearDead()">🗑 Remove Dead</button>
-          <button class="btn btn-ghost" onclick="pmExportAlive()">📥 Export Alive</button>
-          <button class="btn btn-danger btn-sm" onclick="pmClearAll()">⚠ Clear All</button>
-        </div>
-        <div class="prog-wrap mt8"><div class="prog-fill" id="pm-test-prog"></div></div>
-      </div>
-      <div class="card">
-        <div class="card-title">➕ Add Manual Proxies</div>
-        <div class="fg"><label class="lbl">IP:Port (one per line)</label>
-          <textarea id="pm-manual-input" rows="4" placeholder="192.168.1.1:8080&#10;10.0.0.1:3128"></textarea></div>
-        <div class="fg"><label class="lbl">Protocol</label>
-          <select id="pm-manual-proto"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks4">SOCKS4</option><option value="socks5">SOCKS5</option></select></div>
-        <button class="btn btn-primary btn-sm" onclick="pmAddManual()">➕ Add Proxies</button>
-      </div>
-      <div class="card">
-        <div class="card-title">📡 Scan Sources (${PROXY_SOURCES.length})</div>
-        <div style="max-height:320px;overflow-y:auto">
-        ${PROXY_SOURCES.map((s,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:10px">
-          <span style="color:var(--win-text-muted);min-width:20px">${i+1}.</span>
-          <span style="${s.tier===1?'color:var(--win-green);font-weight:700':''}">${s.name}</span>
-          <span class="badge" style="font-size:8px;${s.tier===1?'background:var(--win-green);color:#fff':'background:#555;color:#ddd'}">${s.tier===1?'T1-API':'T2-GH'}</span>
-          ${s.geoFilter?'<span class="badge badge-b" style="font-size:8px">GEO-FILTERED</span>':'<span class="badge badge-g" style="font-size:8px">COUNTRY-API</span>'}
-        </div>`).join('')}
-        </div>
-      </div>
-    </div>
-    <div>
-      <div class="card"><div class="card-title">🖥 Scan Log</div>
-        <div class="terminal" id="pm-terminal" style="height:200px">
-          <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">Proxy Manager v3 ready. ${PROXY_SOURCES.length} premium sources loaded. Click Scan All Sources to begin.</span></div>
-        </div>
-      </div>
-      <div class="card" style="padding:14px 18px"><div class="row" style="flex-wrap:wrap;gap:8px">
-        <div style="flex:1;min-width:140px"><label class="lbl">Filter</label>
-          <select id="pm-filter" onchange="pmRenderTable()">
-            <option value="all">All</option><option value="alive">Alive</option>
-            <option value="elite">Elite Only</option>
-            <option value="dead">Dead</option><option value="untested">Untested</option>
-          </select></div>
-        <div style="flex:2;min-width:160px"><label class="lbl">Search</label>
-          <input type="text" id="pm-search" placeholder="IP, country, source, elite..." oninput="pmRenderTable()"></div>
-      </div></div>
-      <div class="card" style="padding:0;overflow:hidden">
-        <div class="tw" style="max-height:440px;overflow-y:auto"><table>
-          <thead><tr><th></th><th>IP:Port</th><th>Proto</th><th>Country</th><th>Anon</th><th>Status</th><th>Speed</th><th>Source</th><th>Actions</th></tr></thead>
-          <tbody id="pm-tbody"><tr><td colspan="9" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No proxies yet. Click Scan All Sources.</td></tr></tbody>
-        </table></div>
-      </div>
-    </div>
-  </div>`;
-  pmUpdateStats();pmUpdateActiveDisplay();pmRenderTable();
-}
-
-// ═══════════════════════════════════════════════════════════════
-// SMART PDF UPLOADER MODULE
-// ═══════════════════════════════════════════════════════════════
-
-const UPLOADER_STATE={
-  jobs: (()=>{ try{ return JSON.parse(localStorage.getItem('pu_jobs')||'[]'); }catch(e){ return []; } })(),
-  siteCache: (()=>{ try{ return JSON.parse(localStorage.getItem('pu_sites')||'{}'); }catch(e){ return {}; } })(),
-};
-function puSave(){
-  try{localStorage.setItem('pu_jobs',JSON.stringify(UPLOADER_STATE.jobs));}catch(e){}
-  try{localStorage.setItem('pu_sites',JSON.stringify(UPLOADER_STATE.siteCache));}catch(e){}
-}
-
-const PU_KNOWN={
-  'scribd.com':       {name:'Scribd',         icon:'📚',da:96,uploadPage:'https://www.scribd.com/upload-document',        uploadUrl:'https://www.scribd.com/upload-document',       pdfSupport:true, freeAccount:true, notes:'DA 96 · Free · Auto-indexes on Google'},
-  'issuu.com':        {name:'Issuu',           icon:'📰',da:92,uploadPage:'https://issuu.com/home/publish',                uploadUrl:'https://issuu.com/home/publish',               pdfSupport:true, freeAccount:true, notes:'DA 92 · Free flipbook publisher'},
-  'slideshare.net':   {name:'SlideShare',      icon:'📊',da:95,uploadPage:'https://www.slideshare.net/upload',             uploadUrl:'https://www.slideshare.net/upload',            pdfSupport:true, freeAccount:true, notes:'DA 95 · LinkedIn owned'},
-  'academia.edu':     {name:'Academia.edu',    icon:'🎓',da:93,uploadPage:'https://www.academia.edu/upload',               uploadUrl:'https://www.academia.edu/upload',              pdfSupport:true, freeAccount:true, notes:'DA 93 · Academic papers'},
-  'researchgate.net': {name:'ResearchGate',    icon:'🔬',da:91,uploadPage:'https://www.researchgate.net/publication/upload',uploadUrl:'https://www.researchgate.net/publication/upload',pdfSupport:true,freeAccount:true, notes:'DA 91 · Research preprints'},
-  'archive.org':      {name:'Internet Archive',icon:'🏛️',da:94,uploadPage:'https://archive.org/upload/',                  uploadUrl:'https://s3.us.archive.org',                    pdfSupport:true, freeAccount:true, notes:'DA 94 · S3 API · Permanent URLs'},
-  'calameo.com':      {name:'Calameo',         icon:'📖',da:88,uploadPage:'https://en.calameo.com/publish/',               uploadUrl:'https://en.calameo.com/publish/',              pdfSupport:true, freeAccount:true, notes:'DA 88 · Flipbook publisher'},
-  'yumpu.com':        {name:'Yumpu',           icon:'📗',da:82,uploadPage:'https://www.yumpu.com/en/upload',               uploadUrl:'https://www.yumpu.com/en/upload',              pdfSupport:true, freeAccount:true, notes:'DA 82 · ePub platform'},
-  'edocr.com':        {name:'edocr',           icon:'📂',da:73,uploadPage:'https://www.edocr.com/upload',                  uploadUrl:'https://www.edocr.com/upload',                 pdfSupport:true, freeAccount:true, notes:'DA 73 · Document sharing'},
-  'slideserve.com':   {name:'SlideServe',      icon:'🎞',da:79,uploadPage:'https://www.slideserve.com/upload',             uploadUrl:'https://www.slideserve.com/upload',            pdfSupport:true, freeAccount:true, notes:'DA 79 · Slides + PDF'},
-  'box.com':          {name:'Box.com',         icon:'📦',da:90,uploadPage:'https://app.box.com/',                          uploadUrl:'https://upload.box.com/api/2.0/files/content', pdfSupport:true, freeAccount:true, notes:'DA 90 · Shared links indexed'},
-  'docdroid.net':     {name:'DocDroid',        icon:'🗄️',da:70,uploadPage:'https://www.docdroid.net/upload',              uploadUrl:'https://www.docdroid.net/upload',              pdfSupport:true, freeAccount:true, notes:'DA 70 · Anonymous upload ok'},
-};
-
-function puLogGlobal(msg,type='info'){
-  const el=document.getElementById('pu-terminal');if(!el)return;
-  const cls=type==='error'?'t-error':type==='warn'?'t-warn':type==='success'?'t-info':'t-accent';
-  el.innerHTML=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${msg.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span></div>`+el.innerHTML;
-}
-function puLog(jobId,msg,type='info'){
-  const job=UPLOADER_STATE.jobs.find(j=>j.id===jobId);
-  if(job){job.log=job.log||[];job.log.push({t:ts(),msg,type});}
-  puLogGlobal(msg,type);
-}
-
-async function puScanSite(rawUrl){
-  let url=rawUrl.trim();
-  if(!/^https?:\/\//i.test(url)) url='https://'+url;
-  url=url.replace(/\/+$/,'');
-  const domain=url.replace(/^https?:\/\//,'').split('/')[0].replace(/^www\./,'');
-  const known=PU_KNOWN[domain]||Object.entries(PU_KNOWN).find(([k])=>domain.endsWith(k))?.[1];
-  if(known) return{status:'known',domain,url,platform:known,pdfSupport:true,message:'Known platform: '+known.name+' (DA '+known.da+') — PDF upload supported'};
-  puLogGlobal('Scanning '+domain+' for PDF support...');
-  try{
-    const r=await fetch('https://corsproxy.io/?'+encodeURIComponent(url),{signal:AbortSignal.timeout(12000)});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const html=await r.text();
-    const fileInputs=(html.match(/<input[^>]+type=.file.[^>]*>/gi)||[]);
-    const pdfInputs=fileInputs.filter(i=>/accept[^>]*(pdf|application)/i.test(i));
-    const imgOnly=fileInputs.filter(i=>/accept[^>]*image/i.test(i)&&!/pdf/i.test(i));
-    const hasMPForm=/enctype=.multipart\/form-data./i.test(html);
-    const hasDropzone=/dropzone|FilePond|Uppy|upload-area|file-drop/i.test(html);
-    const hasLogin=/type=.password.|\/login|\/signin/i.test(html.substring(0,5000));
-    const endpoints=(html.match(/(?:action|fetch|post)\s*\(?['"](\/[^'"]*upload[^'"]*)['"]/gi)||[]).map(m=>{const x=m.match(/['"](\/.+?)['"]/);return x?x[1]:null;}).filter(Boolean);
-    if(pdfInputs.length>0||(fileInputs.length>0&&hasMPForm)) return{status:'supported',domain,url,pdfSupport:true,hasLogin,uploadEndpoints:endpoints,message:'PDF upload supported — '+pdfInputs.length+' PDF input(s) detected'+(hasLogin?' (login required)':'')};
-    if(imgOnly.length>0) return{status:'images_only',domain,url,pdfSupport:false,message:'Images only — this site does not accept PDF uploads'};
-    if(hasDropzone) return{status:'js_uploader',domain,url,pdfSupport:'likely',hasLogin,uploadEndpoints:endpoints,message:'JavaScript uploader detected — PDF support unconfirmed (manual recommended)'+(hasLogin?' (login required)':'')};
-    if(hasLogin&&!fileInputs.length) return{status:'login_wall',domain,url,pdfSupport:'unknown',message:'Login wall — add credentials and try after authenticating'};
-    return{status:'no_upload',domain,url,pdfSupport:false,message:'No upload mechanism found on this page'};
-  }catch(e){
-    return{status:'cors_blocked',domain,url,pdfSupport:'unknown',message:'Could not scan site (CORS/timeout) — try pasting the direct upload page URL'};
-  }
-}
-
-async function puCheckSiteInput(){
-  const inp=document.getElementById('pu-site-url');
-  const res=document.getElementById('pu-site-scan-result');
-  const btn=document.getElementById('pu-scan-site-btn');
-  if(!inp||!res) return;
-  const url=inp.value.trim();
-  if(!url){res.innerHTML='<span class="badge badge-y">Enter a URL first</span>';return;}
+  const btn=document.getElementById('scanner-run-btn');
   if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Scanning...';}
-  res.innerHTML='<span class="spinner"></span> Scanning site...';
-  const result=await puScanSite(url);
-  const domain=result.domain;
-  UPLOADER_STATE.siteCache[domain]=result;puSave();
-  const cc=result.pdfSupport===true?'notice-success':result.pdfSupport===false?'notice-err':'notice-warn';
-  res.innerHTML=`<div class="notice ${cc}" style="margin:0">${result.message}</div>
-    ${result.platform?`<div class="mt8"><span class="badge badge-b">DA ${result.platform.da}</span> <span class="badge badge-g">${result.platform.name}</span> <a href="${result.platform.uploadPage}" target="_blank" class="btn btn-ghost btn-xs">Open Upload Page ↗</a></div>`:''}
-    ${result.uploadEndpoints&&result.uploadEndpoints.length?`<div class="mt8 xs tm">Endpoints found: ${result.uploadEndpoints.map(e=>'<code>'+e+'</code>').join(', ')}</div>`:''}`;
-  const upEl=document.getElementById('pu-upload-url');
-  if(upEl&&result.platform) upEl.value=result.platform.uploadUrl;
-  if(btn){btn.disabled=false;btn.innerHTML='🔍 Scan Site';}
+
+  const scanLog=m=>{
+    if(logEl){
+      logEl.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="t-accent">${esc(m)}</span></div>`;
+      logEl.scrollTop=logEl.scrollHeight;
+    }
+  };
+
+  try{
+    const res=await scanSiteForUploadPage(url,proxyBase,scanLog);
+    SCANNER_STATE.results=res.uploadUrls;
+    renderScannerResults(res);
+  }catch(e){
+    scanLog('❌ Scan error: '+e.message);
+    if(resultsEl) resultsEl.innerHTML='<div style="color:var(--win-red);padding:20px;text-align:center">Scan failed: '+esc(e.message)+'</div>';
+  }
+
+  SCANNER_STATE.running=false;
+  if(btn){btn.disabled=false;btn.innerHTML='🔍 Scan for Upload Pages';}
 }
 
-function puExtractUrl(text,base){
+function renderScannerResults(res){
+  const el=document.getElementById('scanner-results');
+  if(!el) return;
+  if(!res.uploadUrls.length){
+    el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted2);font-family:var(--mono);font-size:11px">No upload pages detected. Try the known-platform patterns below.</div>';
+    return;
+  }
+  el.innerHTML=res.uploadUrls.map((u,i)=>`
+    <div class="card" style="margin-bottom:8px;padding:12px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="badge ${u.score>=60?'badge-g':u.score>=30?'badge-b':'badge-y'}">${u.score} pts</span>
+        <strong style="font-family:var(--mono);font-size:11px;flex:1;word-break:break-all">${esc(u.url)}</strong>
+        <span style="font-size:10px;color:var(--muted2)">${esc((u.signals||[]).join(', ').substring(0,50))}</span>
+        <a href="${esc(u.url)}" target="_blank" class="btn btn-blue btn-xs">🔗 Open</a>
+        <button class="btn btn-primary btn-xs" onclick="preFillUploadUrl('${esc(u.url)}')">📤 Use for Upload</button>
+      </div>
+    </div>`).join('');
+}
+
+function preFillUploadUrl(url){
+  const el=document.getElementById('manual-upload-url');
+  if(el){ el.value=url; pdfToast('Upload URL set: '+url,'success'); }
+  // Switch to manual upload tab
+  hubSwitch('pt','manual',['builder','bulk','blast','manual','scanner']);
+}
+
+/* ── MANUAL UPLOAD WITH URL CAPTURE ── */
+async function runManualUpload(){
+  const uploadUrl=(document.getElementById('manual-upload-url')||{value:''}).value.trim();
+  const fileEl=document.getElementById('manual-upload-file');
+  const title=(document.getElementById('manual-upload-title')||{value:''}).value.trim();
+  const desc=(document.getElementById('manual-upload-desc')||{value:''}).value.trim();
+  const tags=(document.getElementById('manual-upload-tags')||{value:''}).value.trim();
+  const cookie=(document.getElementById('manual-upload-cookie')||{value:''}).value.trim();
+  const proxyBase=PDF_STATE.vercelBase;
+
+  if(!uploadUrl){ pdfToast('Enter an upload URL','warn'); return; }
+  if(!fileEl||!fileEl.files.length){ pdfToast('Select a PDF file','warn'); return; }
+  if(!proxyBase){ pdfToast('Configure Vercel backend URL first','warn'); return; }
+
+  const file=fileEl.files[0];
+  const logEl=document.getElementById('manual-upload-log');
+  const mlog=m=>{if(logEl){logEl.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="t-accent">${esc(m)}</span></div>`;logEl.scrollTop=logEl.scrollHeight;}};
+
+  const btn=document.getElementById('manual-upload-btn');
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Uploading...';}
+
+  mlog('Reading file: '+file.name);
+  const arrayBuf=await file.arrayBuffer();
+  const b64=btoa(String.fromCharCode(...new Uint8Array(arrayBuf)));
+
+  mlog('Sending to proxy → '+uploadUrl);
   try{
-    const j=JSON.parse(text);
-    const cands=[j.url,j.link,j.permalink,j.public_url,j.publicUrl,j.html_url,(j.data||{}).url,(j.data||{}).link,(j.result||{}).url,(j.document||{}).url];
-    const f=cands.find(c=>c&&typeof c==='string'&&c.startsWith('http'));
-    if(f) return f;
+    const res=await fetch(proxyBase+'/api/proxy',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        url:uploadUrl, method:'POST',
+        uploadBase64:b64, filename:file.name,
+        fields:{title,description:desc,tags},
+        cookie, timeout:45000
+      })
+    });
+    const d=await res.json();
+    mlog('Response: HTTP '+d.status_code);
+
+    // Try to extract live URL from response
+    const liveUrl = extractLiveUrl(d.body, uploadUrl);
+    if(liveUrl){
+      mlog('✅ Live URL captured: '+liveUrl);
+      const resultsEl=document.getElementById('manual-upload-result');
+      if(resultsEl) resultsEl.innerHTML=`<div class="notice notice-success">✅ Upload successful! <a href="${esc(liveUrl)}" target="_blank">${esc(liveUrl)}</a> <button class="btn btn-ghost btn-xs" onclick="navigator.clipboard.writeText('${esc(liveUrl)}')">📋 Copy</button></div>`;
+      pdfToast('Upload live: '+liveUrl,'success');
+    } else if(d.ok){
+      mlog('⚠ Upload succeeded but no URL extracted — check the platform manually');
+      mlog('Response snippet: '+d.body.substring(0,300));
+      pdfToast('Upload sent (no URL captured — check manually)','warn');
+    } else {
+      mlog('❌ Upload failed: HTTP '+d.status_code);
+      pdfToast('Upload failed: HTTP '+d.status_code,'error');
+    }
+  }catch(e){
+    mlog('❌ Error: '+e.message);
+    pdfToast('Upload error: '+e.message,'error');
+  }
+
+  if(btn){btn.disabled=false;btn.innerHTML='🚀 Upload Now';}
+}
+
+function extractLiveUrl(body, uploadUrl){
+  if(!body) return null;
+  // Pattern 1: JSON url field
+  const jsonUrl = body.match(/"(?:url|permalink|view_url|viewUrl|link|document_url|public_url|fileUrl|file_url)":\s*"(https?:\/\/[^"]{10,200})"/i);
+  if(jsonUrl) return jsonUrl[1];
+  // Pattern 2: redirect URL
+  const redirectUrl = body.match(/"(?:redirect|location|redirect_url)":\s*"(https?:\/\/[^"]{10,200})"/i);
+  if(redirectUrl) return redirectUrl[1];
+  // Pattern 3: HTML anchor tag with view/document in href
+  const anchorUrl = body.match(/<a[^>]+href=["'](https?:\/\/[^"']*(?:document|view|file|pdf)[^"']{5,150})["']/i);
+  if(anchorUrl) return anchorUrl[1];
+  // Pattern 4: canonical/og:url meta
+  const metaUrl = body.match(/(?:og:url|canonical)[^>]+content=["'](https?:\/\/[^"']{10,150})["']/i);
+  if(metaUrl) return metaUrl[1];
+  // Pattern 5: same domain path that looks like a doc page
+  try{
+    const origin = new URL(uploadUrl).origin;
+    const pathMatch = body.match(new RegExp(origin.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'/[^"\'<>\\s]{10,150}'));
+    if(pathMatch) return pathMatch[0];
   }catch(e){}
-  const d=base.replace(/^https?:\/\//,'').split('/')[0];
-  const pats=[
-    new RegExp('https?://'+d.replace(/\./g,'\\.')+'[^\\s"\'<>]{5,}','i'),
-    /href=["'](https?:\/\/[^"']+\/(?:document|doc|pub|file|detail)[^"']*)['"]/i,
-    /"(?:url|permalink|link)":\s*"(https?:\/\/[^"]+)"/i,
-  ];
-  for(const re of pats){const m=text.match(re);if(m)return m[1]||m[0];}
   return null;
 }
 
-async function puVerifyUrl(url){
-  try{const r=await fetch('https://corsproxy.io/?'+encodeURIComponent(url),{signal:AbortSignal.timeout(8000)});return r.ok;}catch(e){return false;}
+/* ── QUEUE RENDER ── */
+function pdfSetJobStatus(jobId,status,msg){
+  const job=PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(job){job.status=status;job.statusMsg=msg;}
+  pdfRenderQueue();
 }
 
-async function puAttemptFormUpload(job,blob,file,siteUrl,endpoint,creds){
-  puLog(job.id,'Attempting form POST to '+endpoint+'...');
-  let csrfToken='';
-  try{
-    const pr=await fetch('https://corsproxy.io/?'+encodeURIComponent(siteUrl),{signal:AbortSignal.timeout(10000)});
-    const ph=await pr.text();
-    const cm=ph.match(/(?:csrf[_-]?token|authenticity_token|_token)['"]\s+(?:content|value)=['"]([\w\-+=/]+)['"]/i)||ph.match(/<meta\s+name=['"']csrf[^'"']+['"'][^>]*content=['"]([\w\-+=/]+)['"]/i);
-    if(cm) csrfToken=cm[1];
-    if(csrfToken) puLog(job.id,'CSRF token found');
-  }catch(e){}
-  const fd=new FormData();
-  fd.append('file',blob,file.name);
-  fd.append('title',creds.title||file.name);
-  if(creds.desc) fd.append('description',creds.desc);
-  if(creds.tags) fd.append('tags',creds.tags);
-  if(csrfToken) fd.append('authenticity_token',csrfToken);
-  if(creds.apiKey) fd.append('api_key',creds.apiKey);
-  const origin=new URL(siteUrl.startsWith('http')?siteUrl:'https://'+siteUrl).origin;
-  const hdrs={'Origin':origin,'Referer':siteUrl};
-  if(creds.apiKey) hdrs['Authorization']='Bearer '+creds.apiKey;
-  const endFull=endpoint.startsWith('http')?endpoint:origin+endpoint;
-  for(const url of [endFull,'https://corsproxy.io/?'+encodeURIComponent(endFull)]){
-    try{
-      const r=await smartFetch(url,{method:'POST',body:fd,headers:hdrs,sfTimeout:30000});
-      const text=await r.text();
-      const extracted=puExtractUrl(text,siteUrl);
-      if(extracted) return{success:true,url:extracted};
-      if(r.ok) return{success:true,url:r.url||siteUrl};
-    }catch(e){continue;}
+function pdfLog(jobId,msg,type='info'){
+  const job=PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(!job) return;
+  job.log=job.log||[];
+  job.log.push({ts:ts(),msg,type});
+  const termEl=document.getElementById('pdf-main-terminal');
+  if(termEl){
+    const cls=type==='error'?'t-error':type==='warn'?'t-warn':type==='success'?'t-info':'t-accent';
+    termEl.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${esc(msg)}</span></div>`;
+    termEl.scrollTop=termEl.scrollHeight;
   }
-  return{success:false,manual:true,message:'Form POST blocked — falling back to manual mode'};
 }
 
-async function puArchiveOrg(job,blob,file,creds){
-  if(!creds.apiKey&&!creds.user) return{success:false,manual:true,message:'Archive.org needs S3 keys (username=Access Key, API Key=Secret Key)'};
-  const id='parasite-'+slug(creds.title||file.name)+'-'+Date.now();
-  try{
-    const r=await smartFetch('https://s3.us.archive.org/'+id+'/'+encodeURIComponent(file.name),{
-      method:'PUT',body:blob,signal:AbortSignal.timeout(60000),
-      headers:{'Authorization':'LOW '+creds.user+':'+creds.apiKey,'x-archive-meta-title':creds.title||file.name,'x-archive-meta-mediatype':'texts','Content-Type':'application/pdf','x-amz-auto-make-bucket':'1'}
-    });
-    if(r.ok||r.status===200||r.status===204) return{success:true,url:'https://archive.org/details/'+id};
-    return{success:false,manual:true,message:'Archive.org returned HTTP '+r.status};
-  }catch(e){return{success:false,manual:true,message:'Archive.org failed: '+e.message};}
-}
-
-async function puRunUploadJob(){
-  const siteUrl=(document.getElementById('pu-site-url')||{value:''}).value.trim();
-  const fileInp=document.getElementById('pu-file-input');
-  const title=(document.getElementById('pu-doc-title')||{value:''}).value.trim();
-  const desc=(document.getElementById('pu-doc-desc')||{value:''}).value.trim();
-  const tags=(document.getElementById('pu-doc-tags')||{value:''}).value.trim();
-  const user=(document.getElementById('pu-username')||{value:''}).value.trim();
-  const pass=(document.getElementById('pu-password')||{value:''}).value.trim();
-  const apiKey=(document.getElementById('pu-apikey')||{value:''}).value.trim();
-  if(!siteUrl){alert('Enter target site URL.');return;}
-  if(!fileInp||!fileInp.files.length){alert('Select a PDF file.');return;}
-  const file=fileInp.files[0];
-  if(file.type!=='application/pdf'&&!file.name.endsWith('.pdf')){alert('File must be a PDF.');return;}
-  const job={id:uid(),siteUrl,title:title||file.name,desc,tags,user,apiKey,fileName:file.name,fileSize:file.size,status:'scanning',log:[],ts:new Date().toLocaleTimeString(),uploadedUrl:null,verified:false,platformInfo:null};
-  UPLOADER_STATE.jobs.unshift(job);puRenderTable();
-  puLog(job.id,'Job: '+file.name+' → '+siteUrl);
-  puUpdateJobStatus(job.id,'scanning');
-  const scan=await puScanSite(siteUrl);
-  job.scanResult=scan;
-  if(scan.pdfSupport===false){job.status='error';job.error=scan.message;puLog(job.id,scan.message,'error');puUpdateJobStatus(job.id,'error');puSave();puRenderTable();return;}
-  puLog(job.id,scan.message,scan.pdfSupport===true?'success':'warn');
-  job.platformInfo=scan.platform||null;
-  const fileData=await new Promise(res=>{const r=new FileReader();r.onload=e=>res(e.target.result);r.readAsArrayBuffer(file);});
-  const blob=new Blob([fileData],{type:'application/pdf'});
-  puLog(job.id,'File read: '+(file.size/1024).toFixed(1)+' KB');
-  puUpdateJobStatus(job.id,'uploading');
-  let result=null;
-  if(scan.status==='known'&&scan.platform){
-    if(scan.platform.name==='Internet Archive') result=await puArchiveOrg(job,blob,file,{user,apiKey,title:job.title,desc,tags});
-    else result=await puAttemptFormUpload(job,blob,file,scan.platform.uploadPage,scan.platform.uploadUrl,{user,pass,apiKey,title:job.title,desc,tags});
-  } else if(scan.status==='supported'&&scan.uploadEndpoints&&scan.uploadEndpoints.length){
-    result=await puAttemptFormUpload(job,blob,file,siteUrl,scan.uploadEndpoints[0],{user,pass,apiKey,title:job.title,desc,tags});
-  } else {
-    result={success:false,manual:true,message:'Auto-upload not possible — file downloaded, upload page opened.'};
+function pdfRenderQueue(){
+  const tbody=document.getElementById('pdf-queue-tbody');
+  if(!tbody) return;
+  if(!PDF_STATE.jobs.length){
+    tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet — build your first PDF above.</td></tr>';
+    return;
   }
-  if(result&&result.success&&result.url){
-    job.uploadedUrl=result.url;job.status='verifying';
-    puUpdateJobStatus(job.id,'verifying');
-    puLog(job.id,'Uploaded! URL: '+result.url,'success');
-    const ok=await puVerifyUrl(result.url);
-    job.verified=ok;job.status='complete';
-    puLog(job.id,ok?'URL verified live!':'URL returned but may still be processing',ok?'success':'warn');
-    puUpdateJobStatus(job.id,'complete');
-  } else if(result&&result.manual){
-    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=file.name;a.click();
-    setTimeout(()=>window.open(scan.platform?scan.platform.uploadPage:siteUrl,'_blank'),700);
-    job.status='manual';
-    puLog(job.id,'File downloaded. Upload page opened. Paste the URL you get back into the field below.','warn');
-    puUpdateJobStatus(job.id,'manual');
-  } else {
-    job.status='error';job.error=(result&&result.message)||'Upload failed';
-    puLog(job.id,job.error,'error');puUpdateJobStatus(job.id,'error');
-  }
-  puRenderTable();puSave();
+  tbody.innerHTML=PDF_STATE.jobs.map(job=>{
+    const statusMap={
+      building:'<span class="badge badge-b"><span class="spinner"></span> '+esc(job.statusMsg||'Building')+'</span>',
+      ready:'<span class="badge badge-g">✅ Ready</span>',
+      live:'<span class="badge badge-g">🔴 Live</span>',
+      manual:'<span class="badge badge-y">📋 Manual</span>',
+      error:'<span class="badge badge-r">❌ Error</span>',
+    };
+    const score=job.seoScore;
+    const scoreColor=score?score.score>=80?'badge-g':score.score>=60?'badge-b':'badge-y':'';
+    return `<tr>
+      <td class="mono xs">${esc(job.ts)}</td>
+      <td><div style="font-weight:700;font-size:12px">${esc(job.keyword)}</div><div class="xs tm" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(job.title)}</div></td>
+      <td>${statusMap[job.status]||esc(job.status)}</td>
+      <td class="mono xs">${job.wordCount||0}</td>
+      <td>${score?`<span class="badge ${scoreColor}">${score.score}/100</span>`:'—'}</td>
+      <td><span class="badge badge-p">${esc(job.template)}</span></td>
+      <td style="white-space:nowrap">
+        ${job.status==='ready'||job.status==='live'||job.status==='manual'?`<button class="btn btn-primary btn-xs" onclick="showBlastPicker('${job.id}')">🚀 Blast</button>`:'' }
+        ${job.pdfBytes?`<button class="btn btn-blue btn-xs" onclick="pdfPreviewJob('${job.id}')">👁</button>
+        <button class="btn btn-ghost btn-xs" onclick="pdfDownloadJob('${job.id}')">⬇</button>`:''}
+        ${job.uploadedTo&&job.uploadedTo.length?`<button class="btn btn-ghost btn-xs" onclick="pdfExportBlastResults('${job.id}')">📥</button>`:''}
+        <button class="btn btn-danger btn-xs" onclick="pdfRemoveJob('${job.id}')">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
 }
 
-function puUpdateJobStatus(id,status){
-  const job=UPLOADER_STATE.jobs.find(j=>j.id===id);
-  if(job) job.status=status;
-  puRefreshRow(id);
-}
-function puSetManualUrl(id){
-  const inp=document.getElementById('pu-manual-url-'+id);
-  if(!inp||!inp.value.trim()) return;
-  const job=UPLOADER_STATE.jobs.find(j=>j.id===id);if(!job)return;
-  job.uploadedUrl=inp.value.trim();job.status='complete';job.verified=false;
-  puSave();puRefreshRow(id);puLog(id,'Manual URL saved: '+job.uploadedUrl,'success');
-}
-function puRefreshRow(id){
-  const job=UPLOADER_STATE.jobs.find(j=>j.id===id);if(!job)return;
-  const row=document.getElementById('pu-row-'+id);if(!row)return;
-  const sm={
-    scanning:`<span class="badge badge-b"><span class="spinner"></span> Scanning</span>`,
-    uploading:`<span class="badge badge-b"><span class="spinner"></span> Uploading</span>`,
-    verifying:`<span class="badge badge-y">🔍 Verifying</span>`,
-    complete:job.verified?`<span class="badge badge-g">✅ Live</span>`:`<span class="badge badge-b">✅ Uploaded</span>`,
-    manual:`<span class="badge badge-y">⏳ Manual</span>`,
-    error:`<span class="badge badge-r">❌ Error</span>`,
-  };
-  row.innerHTML=`
-    <td class="mono xs tm">${job.ts}</td>
-    <td><div style="font-weight:700;font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.title}</div>
-      <div class="xs tm">${job.fileName} · ${(job.fileSize/1024).toFixed(0)}KB</div></td>
-    <td class="xs tm" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${job.siteUrl}</td>
-    <td>${sm[job.status]||job.status}</td>
-    <td>${job.uploadedUrl
-      ?`<a href="${job.uploadedUrl}" target="_blank" class="btn btn-primary btn-xs">🔗 Open</a> <button class="btn btn-ghost btn-xs" onclick="navigator.clipboard.writeText('${job.uploadedUrl}').then(()=>alert('Copied!'))">📋</button>`
-      :job.status==='manual'
-        ?`<div style="display:flex;gap:4px;align-items:center"><input type="text" id="pu-manual-url-${id}" placeholder="Paste URL here" style="width:180px;font-size:10px;padding:4px 8px"><button class="btn btn-primary btn-xs" onclick="puSetManualUrl('${id}')">Save</button></div>`
-        :`<span class="xs tm">${job.error||'—'}</span>`}
-    </td>
-    <td><button class="btn btn-danger btn-xs" onclick="puRemoveJob('${id}')">✕</button></td>`;
-}
-function puRemoveJob(id){UPLOADER_STATE.jobs=UPLOADER_STATE.jobs.filter(j=>j.id!==id);puSave();puRenderTable();}
-function puRenderTable(){
-  const tbody=document.getElementById('pu-tbody');if(!tbody)return;
-  if(!UPLOADER_STATE.jobs.length){tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No upload jobs yet.</td></tr>`;return;}
-  tbody.innerHTML=UPLOADER_STATE.jobs.map(j=>`<tr id="pu-row-${j.id}"></tr>`).join('');
-  UPLOADER_STATE.jobs.forEach(j=>puRefreshRow(j.id));
-}
-function puExportResults(){
-  const done=UPLOADER_STATE.jobs.filter(j=>j.uploadedUrl);
-  if(!done.length){alert('No completed uploads with URLs.');return;}
-  const csv=['Title,File,Site,Status,Uploaded URL'].concat(done.map(j=>`"${j.title}","${j.fileName}","${j.siteUrl}","${j.status}","${j.uploadedUrl||''}"`)).join('\n');
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
-  a.download='pdf-upload-results.csv';a.click();
-}
-// ─── PDF UPLOADER AUTOMATION ENGINE ─────────────────────────────
-const PU_AUTO_STATE = { running: false, queue: [], stopFlag: false };
-
-async function puAutoRunBlast(){
-  if(PU_AUTO_STATE.running){ puAutoLog('⚠ Already running — stop first','t-warn'); return; }
-  const fileInp = document.getElementById('pu-auto-file');
-  const kwInput = document.getElementById('pu-auto-kw')?.value?.trim()||'';
-  const title   = document.getElementById('pu-auto-title')?.value?.trim()||kwInput||'Document';
-  const desc    = document.getElementById('pu-auto-desc')?.value?.trim()||'';
-  const tags    = document.getElementById('pu-auto-tags')?.value?.trim()||'';
-  const user    = document.getElementById('pu-auto-user')?.value?.trim()||'';
-  const pass    = document.getElementById('pu-auto-pass')?.value?.trim()||'';
-  const apiKey  = document.getElementById('pu-auto-api')?.value?.trim()||'';
-  const delayMs = parseInt(document.getElementById('pu-auto-delay')?.value||'3')*1000;
-  const selectedPlatforms = [...document.querySelectorAll('.pu-platform-chip.on')].map(c=>c.dataset.dom);
-
-  if(!fileInp?.files?.length && !kwInput){ puAutoLog('⚠ Upload a PDF file or enter a keyword to auto-generate content','t-warn'); return; }
-  if(!selectedPlatforms.length){ puAutoLog('⚠ Select at least one platform','t-warn'); return; }
-
-  PU_AUTO_STATE.running=true; PU_AUTO_STATE.stopFlag=false;
-  const btn=document.getElementById('pu-auto-start-btn');
-  const stopBtn=document.getElementById('pu-auto-stop-btn');
-  if(btn){ btn.disabled=true; }
-  if(stopBtn){ stopBtn.disabled=false; }
-
-  puAutoLog(`🚀 Starting automated blast to ${selectedPlatforms.length} platform(s)…`,'t-accent');
-
-  let ok=0, fail=0, manual=0;
-
-  for(const domain of selectedPlatforms){
-    if(PU_AUTO_STATE.stopFlag){ puAutoLog('⛔ Stopped by user','t-warn'); break; }
-    const p = PU_KNOWN[domain]; if(!p) continue;
-    puAutoLog(`→ [${p.name}] DA${p.da} — uploading…`,'t-accent');
-
-    // Simulate/attempt upload
-    let blob=null, file=null;
-    if(fileInp?.files?.length){
-      file=fileInp.files[0];
-      const fileData=await new Promise(res=>{const r=new FileReader();r.onload=e=>res(e.target.result);r.readAsArrayBuffer(file);});
-      blob=new Blob([fileData],{type:'application/pdf'});
-    } else {
-      // No file — generate a minimal PDF-like blob from HTML content
-      const content=`<html><head><title>${title}</title></head><body><h1>${title}</h1><p>${desc||kwInput}</p></body></html>`;
-      blob=new Blob([content],{type:'application/pdf'});
-      file={ name: title.replace(/\s+/g,'-').toLowerCase()+'.pdf', size:content.length, type:'application/pdf' };
-    }
-
-    const job={id:uid(),siteUrl:p.uploadPage,title,desc,tags,user,apiKey,fileName:file.name,fileSize:file.size,status:'uploading',log:[],ts:ts(),uploadedUrl:null,verified:false,platformInfo:p};
-    UPLOADER_STATE.jobs.unshift(job);
-    puAutoRenderResultsTable();
-
-    let result=null;
-    try{
-      if(domain==='archive.org'){
-        result=await puArchiveOrg(job,blob,file,{user,apiKey,title,desc,tags});
-      } else {
-        result=await puAttemptFormUpload(job,blob,file,p.uploadPage,p.uploadUrl,{user,pass,apiKey,title,desc,tags});
-      }
-    } catch(e){ result={success:false,manual:false,message:'Exception: '+e.message}; }
-
-    if(result?.success && result?.url){
-      job.uploadedUrl=result.url; job.status='complete'; ok++;
-      puAutoLog(`  ✔ [${p.name}] Live → ${result.url}`,'t-info');
-    } else if(result?.manual){
-      job.status='manual'; manual++;
-      puAutoLog(`  ⚠ [${p.name}] CORS block — file queued for manual step`,'t-warn');
-    } else {
-      job.status='error'; job.error=result?.message||'Upload failed'; fail++;
-      puAutoLog(`  ✗ [${p.name}] ${job.error}`,'t-warn');
-    }
-    puSave(); puAutoRenderResultsTable();
-
-    if(delayMs>0 && domain !== selectedPlatforms[selectedPlatforms.length-1]){
-      puAutoLog(`  ⏱ Waiting ${delayMs/1000}s before next platform…`,'tm');
-      await sleep(delayMs);
-    }
-  }
-
-  puAutoLog(`✔ Blast complete — ${ok} uploaded · ${manual} manual · ${fail} failed`,'t-info');
-  PU_AUTO_STATE.running=false;
-  if(btn){ btn.disabled=false; }
-  if(stopBtn){ stopBtn.disabled=true; }
+function pdfUpdateStats(){
+  const t=PDF_STATE.jobs.length;
+  const r=PDF_STATE.jobs.filter(j=>j.status==='ready'||j.status==='live'||j.status==='manual').length;
+  const l=PDF_STATE.jobs.filter(j=>j.status==='live').length;
+  const w=PDF_STATE.jobs.reduce((s,j)=>s+(j.wordCount||0),0);
+  const el=id=>document.getElementById(id);
+  if(el('pdf-stat-total'))el('pdf-stat-total').textContent=t;
+  if(el('pdf-stat-ready'))el('pdf-stat-ready').textContent=r;
+  if(el('pdf-stat-live')) el('pdf-stat-live').textContent=l;
+  if(el('pdf-stat-words'))el('pdf-stat-words').textContent=w.toLocaleString();
 }
 
-function puAutoRenderResultsTable(){
-  const tbody=document.getElementById('pu-auto-tbody'); if(!tbody) return;
-  if(!UPLOADER_STATE.jobs.length){ tbody.innerHTML='<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--muted2);font-family:var(--mono);font-size:11px">No uploads yet.</td></tr>'; return; }
-  const sm={
-    scanning:`<span class="badge badge-b">SCANNING</span>`,
-    uploading:`<span class="badge badge-b">UPLOADING</span>`,
-    verifying:`<span class="badge badge-y">VERIFYING</span>`,
-    complete:`<span class="badge badge-g">✅ LIVE</span>`,
-    manual:`<span class="badge badge-y">⚠ MANUAL</span>`,
-    error:`<span class="badge badge-r">✗ ERROR</span>`,
-  };
-  tbody.innerHTML=UPLOADER_STATE.jobs.slice(0,200).map(j=>`<tr>
-    <td class="mono xs tm">${j.ts}</td>
-    <td class="mono xs">${j.platformInfo?j.platformInfo.name:j.siteUrl}</td>
-    ${j.platformInfo?`<td><span class="badge ${j.platformInfo.da>=90?'badge-g':j.platformInfo.da>=80?'badge-b':'badge-y'}">${j.platformInfo.da}</span></td>`:'<td class="tm">—</td>'}
-    <td class="mono xs ta" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.title)}</td>
-    <td>${sm[j.status]||j.status}${j.error?`<div class="xs tm" style="margin-top:2px">${esc(j.error)}</div>`:''}</td>
-    <td>${j.uploadedUrl
-      ?`<a href="${esc(j.uploadedUrl)}" target="_blank" class="ta" style="font-size:10px;font-family:var(--mono);text-decoration:none">${esc(j.uploadedUrl.substring(0,40))}…</a>`
-      :'<span class="tm">—</span>'}</td>
-  </tr>`).join('');
+function pdfToast(msg,type='info'){
+  const map={success:'var(--toast-success)',warn:'var(--toast-warn)',error:'var(--toast-error)',info:'var(--toast-info)'};
+  const t=document.createElement('div');
+  t.style.cssText='position:fixed;bottom:20px;right:20px;padding:10px 18px;border-radius:6px;font-size:12px;font-family:var(--mono);color:#fff;z-index:9999;max-width:360px;background:'+map[type]+';box-shadow:0 4px 12px rgba(0,0,0,.3)';
+  t.textContent=msg; document.body.appendChild(t);
+  setTimeout(()=>t.remove(),4000);
 }
 
-function puAutoExportCSV(){
-  const done=UPLOADER_STATE.jobs.filter(j=>j.uploadedUrl);
-  if(!done.length){ alert('No completed uploads with URLs yet.'); return; }
-  const h='Platform,DA,Title,Status,URL\n';
-  const rows=done.map(j=>`"${j.platformInfo?.name||j.siteUrl}","${j.platformInfo?.da||'—'}","${j.title}","${j.status}","${j.uploadedUrl}"`).join('\n');
-  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([h+rows],{type:'text/csv'})); a.download='pdf-upload-results.csv'; a.click();
-}
-
-function renderPDFUploaderPage(el){
-  el = el || document.getElementById('page-pdf_uploader'); if(!el) return;
-
-  const platformChips = Object.entries(PU_KNOWN).map(([d,p])=>`
-    <div class="chip pu-platform-chip on" data-dom="${d}" onclick="this.classList.toggle('on')" title="${p.notes} · ${p.uploadPage}">
-      ${p.icon} ${p.name} <span class="mono" style="font-size:8px;color:var(--muted)">DA${p.da}</span>
-    </div>`).join('');
-
-  const platformCards = Object.entries(PU_KNOWN).map(([d,p])=>`
-    <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
-      <span style="font-size:15px">${p.icon}</span>
-      <div style="flex:1">
-        <div style="font-weight:700;font-family:var(--mono);font-size:11px">${p.name}</div>
-        <div style="font-size:9px;color:var(--muted2);font-family:var(--mono)">${p.notes}</div>
+function showBlastPicker(jobId){
+  const job=PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(!job||!job.pdfBytes){pdfToast('Build PDF first','warn');return;}
+  const modal=document.createElement('div');
+  modal.className='modal-overlay';
+  modal.onclick=e=>{if(e.target===modal)modal.remove();};
+  const chips=PDF_PLATFORMS.map(p=>`<div class="chip pdf-blast-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on')" title="${p.note}">
+    ${p.icon} ${p.name} <span class="mono" style="font-size:8px">DA${p.da}</span>
+  </div>`).join('');
+  modal.innerHTML=`<div class="modal-box" style="min-width:580px">
+    <div class="modal-title">🚀 Blast "${esc(job.title)}"
+      <button class="btn btn-ghost btn-xs" onclick="this.closest('.modal-overlay').remove()">✕</button>
+    </div>
+    <div style="margin-bottom:10px;font-size:11px;color:var(--muted2)">Select platforms to upload to:</div>
+    <div style="display:flex;gap:6px;margin-bottom:8px">
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.add('on'))">All</button>
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.remove('on'))">None</button>
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.toggle('on',parseInt(c.title.match(/DA(\\d+)/)?.[1]||0)>=90))">DA90+</button>
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.toggle('on',${JSON.stringify(PDF_PLATFORMS.filter(p=>p.free).map(p=>p.id))}.includes(c.dataset.pid)))">Free Only</button>
+    </div>
+    <div class="chips" style="max-height:200px;overflow-y:auto">${chips}</div>
+    <div style="margin-top:12px">
+      <div style="font-size:11px;font-weight:700;margin-bottom:6px">🔑 Archive.org Keys (for full automation):</div>
+      <div class="grid2" style="gap:8px;margin-bottom:10px">
+        <div class="fg"><label class="lbl">Access Key</label><input type="text" id="cred-archive-access" placeholder="archive.org S3 access key"></div>
+        <div class="fg"><label class="lbl">Secret Key</label><input type="password" id="cred-archive-secret" placeholder="archive.org S3 secret key"></div>
       </div>
-      <span class="badge ${p.da>=90?'badge-g':p.da>=80?'badge-b':'badge-y'}">${p.da}</span>
-    </div>`).join('');
+    </div>
+    <div style="text-align:right;gap:8px;display:flex;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+      <button class="btn btn-primary" onclick="(() => { const sel=[...document.querySelectorAll('.pdf-blast-chip.on')].map(c=>c.dataset.pid); this.closest('.modal-overlay').remove(); pdfBlastJob('${jobId}',sel); })()">🚀 Blast Selected</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+// Override pdfBlastJob to accept sel param
+const _origBlastJob = pdfBlastJob;
+window.pdfBlastJob = async function(jobId, sel){
+  const job=PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(!job||!job.pdfBytes){pdfToast('Build PDF first','warn');return;}
+  if(!sel||!sel.length){pdfToast('No platforms selected','warn');return;}
+  const creds={};
+  const accessEl=document.getElementById('cred-archive-access');
+  const secretEl=document.getElementById('cred-archive-secret');
+  creds.archive={accessKey:accessEl?.value?.trim()||'',secretKey:secretEl?.value?.trim()||''};
+  showBlastModal(job,sel);
+  const vercelBase=PDF_STATE.vercelBase;
+  const results=await pdfBlastPlatforms(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{updateBlastRow(pid,status,url,pct,msg);});
+  job.uploadedTo=results; job.status=results.some(r=>r.status==='live')?'live':'manual';
+  pdfRenderQueue(); pdfUpdateStats();
+  const liveCount=results.filter(r=>r.status==='live').length;
+  pdfLog(jobId,'Blast done — '+liveCount+'/'+results.length+' live uploads','success');
+};
+
+/* ══════════════════════════════════════════════════════════════
+   RENDER FUNCTION — GOD-TIER PDF SEO PAGE
+══════════════════════════════════════════════════════════════ */
+function renderPDFTools(el){
+  el = el || document.getElementById('page-pdf_tools');
+  if(!el) return;
+
+  const platOptions=PDF_PLATFORMS.map(p=>`<option value="${p.id}">${p.icon} ${p.name} (DA ${p.da})</option>`).join('');
+  const tplOptions=`<option value="guide">Ultimate Guide</option><option value="review">Product Review</option><option value="checklist">Checklist / SOP</option><option value="report">Industry Report</option><option value="casestudy">Case Study</option><option value="listicle">Top-N Listicle</option>`;
+  const densOptions=`<option value="thin">Thin (~120 w/sec)</option><option value="rich" selected>Rich (~220 w/sec)</option><option value="ultra">Ultra (~380 w/sec)</option>`;
+  const platformChips=PDF_PLATFORMS.map(p=>`<div class="chip pdf-plat-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on')" title="${p.note}">
+    ${p.icon} ${p.name} <span class="mono" style="font-size:8px">DA${p.da}${p.free?'':' 💰'}</span>
+  </div>`).join('');
 
   el.innerHTML=`
-  <div class="page-title">🚀 Smart PDF Uploader</div>
-  <div class="page-sub">// Fully automated bulk upload to all ${Object.keys(PU_KNOWN).length} platforms · CSRF injection · S3 API · batch queue · live URL tracking</div>
-  <div class="notice notice-success"><strong>🤖 Automated Pipeline:</strong> Select platforms → upload your PDF (or enter keyword to auto-generate content) → hit Blast All. The engine cycles through every selected platform automatically: scans the upload endpoint, injects CSRF tokens, POSTs your file, verifies the returned URL, and logs results. Archive.org uses the S3 API for the highest success rate.</div>
+    <div class="page-title">📄 PDF SEO — God-Tier v3.0</div>
+    <div class="page-sub">// Groq AI content · jsPDF generation · Archive.org S3 · Multi-platform blast · Smart upload scanner</div>
 
-  <div class="grid2" style="gap:18px">
-    <div>
-      <div class="card">
-        <div class="card-title">📤 Automated Upload Configuration</div>
-
-        <div class="fg"><label class="lbl">PDF File <span style="color:var(--accent2)">*</span> <span class="xs tm">(or enter keyword below to auto-generate)</span></label>
-          <input type="file" id="pu-auto-file" accept=".pdf,application/pdf" style="padding:6px">
-          <div id="pu-auto-file-info" class="xs tm mt8"></div></div>
-
-        <div class="fg"><label class="lbl">Keyword / Topic <span class="xs tm">(used if no file uploaded)</span></label>
-          <input type="text" id="pu-auto-kw" placeholder="e.g. best creatine supplement 2025" /></div>
-
-        <div class="fg"><label class="lbl">Document Title</label>
-          <input type="text" id="pu-auto-title" placeholder="Best Creatine Supplement Guide 2025" /></div>
-
-        <div class="fg"><label class="lbl">Description</label>
-          <textarea id="pu-auto-desc" rows="2" placeholder="Keyword-rich description for all platforms…"></textarea></div>
-
-        <div class="fg"><label class="lbl">Tags <span class="xs tm">(comma separated)</span></label>
-          <input type="text" id="pu-auto-tags" placeholder="seo, keyword, backlinks, guide" /></div>
-
-        <div class="card-title" style="margin-top:4px">🔐 Authentication</div>
-        <div class="grid2">
-          <div class="fg"><label class="lbl">Username / Email</label>
-            <input type="text" id="pu-auto-user" placeholder="your@email.com" autocomplete="off"></div>
-          <div class="fg"><label class="lbl">Password</label>
-            <input type="password" id="pu-auto-pass" placeholder="••••••••" autocomplete="off"></div>
-        </div>
-        <div class="fg"><label class="lbl">API Key / Bearer Token <span class="xs tm">(Archive.org S3 secret key)</span></label>
-          <input type="text" id="pu-auto-api" placeholder="sk_live_… or Archive.org secret key" /></div>
-
-        <div class="fg"><label class="lbl">Delay Between Platforms (seconds)</label>
-          <input type="number" id="pu-auto-delay" value="3" min="0" max="60" /></div>
-
-        <div class="fg"><label class="lbl">Target Platforms <span class="xs tm">(click to toggle)</span></label>
-          <div style="display:flex;gap:6px;margin-bottom:8px">
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pu-platform-chip').forEach(c=>c.classList.add('on'))">All</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pu-platform-chip').forEach(c=>c.classList.remove('on'))">None</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pu-platform-chip').forEach(c=>{const da=parseInt(c.title.match(/DA(\d+)/)?.[1]||0);c.classList.toggle('on',da>=90)})">DA90+ Only</button>
-          </div>
-          <div class="chips">${platformChips}</div></div>
-
-        <div class="row mt8" style="gap:8px">
-          <button id="pu-auto-start-btn" class="btn btn-primary" style="flex:1" onclick="puAutoRunBlast()">🚀 Blast All Platforms</button>
-          <button id="pu-auto-stop-btn" class="btn btn-danger" disabled onclick="PU_AUTO_STATE.stopFlag=true;puAutoLog('⛔ Stop requested…','t-warn')">⛔ Stop</button>
-          <button class="btn btn-ghost" onclick="puAutoExportCSV()">📥 CSV</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">🔄 Automation Pipeline Stages</div>
-        <div style="font-family:var(--mono);font-size:10px;line-height:2.4;color:var(--muted2)">
-          <span class="badge badge-b">1. SELECT</span> Choose platforms + toggle DA filter<br>
-          <span class="badge badge-b">2. SCAN</span> Auto-detect upload endpoint + classify<br>
-          <span class="badge badge-b">3. AUTH</span> Session cookie injection or API key header<br>
-          <span class="badge badge-b">4. CSRF</span> Extract token from platform page<br>
-          <span class="badge badge-b">5. UPLOAD</span> FormData POST or S3 PUT (Archive.org)<br>
-          <span class="badge badge-y">6. VERIFY</span> HTTP check on returned URL<br>
-          <span class="badge badge-g">7. LOG</span> Live URL captured + exported to CSV<br>
-          <span class="badge badge-y">FALLBACK</span> CORS block → file downloaded for manual step
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">⚡ Manual Single Upload <span class="xs tm">(advanced / custom endpoints)</span></div>
-        <div class="fg"><label class="lbl">Custom Site URL</label>
-          <div class="row" style="gap:8px">
-            <input type="url" id="pu-site-url" placeholder="https://any-document-platform.com" style="flex:1" oninput="document.getElementById('pu-site-scan-result').innerHTML=''">
-            <button id="pu-scan-site-btn" class="btn btn-blue btn-sm" onclick="puCheckSiteInput()">🔍 Scan</button>
-          </div>
-          <div id="pu-site-scan-result" style="margin-top:8px"></div></div>
-        <div class="fg"><label class="lbl">Upload Endpoint <span class="xs tm">(auto-filled)</span></label>
-          <input type="url" id="pu-upload-url" placeholder="Auto-detected or enter manually"></div>
-        <div class="fg"><label class="lbl">PDF File</label>
-          <input type="file" id="pu-file-input" accept=".pdf,application/pdf" style="padding:6px">
-          <div id="pu-file-info" class="xs tm mt8"></div></div>
-        <div class="row mt8" style="gap:8px">
-          <button class="btn btn-primary" style="flex:1" onclick="puRunUploadJob()">🚀 Upload to This Site</button>
-          <button class="btn btn-ghost" onclick="puExportResults()">📥 Export URLs</button>
-        </div>
+    <!-- CONFIG BANNER -->
+    <div class="notice notice-info" style="margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <strong>⚙ Config:</strong>
+      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-groq-key" placeholder="Groq API Key (llama-3.3-70b)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.groqKey=this.value.trim()"></div>
+      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-vercel-base" placeholder="Vercel Backend URL (https://your.vercel.app)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.vercelBase=this.value.trim().replace(/\\/$/,'')"></div>
+      <div class="fg" style="min-width:120px;margin:0">
+        <select id="cfg-groq-model" onchange="_groqModel=this.value" style="font-size:11px">
+          ${GROQ_MODELS.map(m=>`<option value="${m}">${m}</option>`).join('')}
+        </select>
       </div>
     </div>
 
-    <div>
-      <div class="card">
-        <div class="card-title">📋 Platform Overview</div>
-        <div style="max-height:280px;overflow-y:auto;padding:0 4px">${platformCards}</div>
+    <!-- STATS ROW -->
+    <div class="grid4" style="margin-bottom:16px">
+      <div class="stat b"><div class="stat-v" id="pdf-stat-total">0</div><div class="stat-l">Total Jobs</div></div>
+      <div class="stat g"><div class="stat-v" id="pdf-stat-ready">0</div><div class="stat-l">Built / Ready</div></div>
+      <div class="stat r"><div class="stat-v" id="pdf-stat-live">0</div><div class="stat-l">Live Uploads</div></div>
+      <div class="stat p"><div class="stat-v" id="pdf-stat-words">0</div><div class="stat-l">Total Words</div></div>
+    </div>
+
+    <!-- TAB NAV -->
+    <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:2px solid var(--win-btn-sh);flex-wrap:wrap">
+      <div class="ptab active" id="pt-tab-builder"  onclick="hubSwitch('pt','builder', ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">🔨 AI Builder</div>
+      <div class="ptab"        id="pt-tab-bulk"     onclick="hubSwitch('pt','bulk',    ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">⚡ Bulk Build</div>
+      <div class="ptab"        id="pt-tab-blast"    onclick="hubSwitch('pt','blast',   ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">🚀 Blast Config</div>
+      <div class="ptab"        id="pt-tab-manual"   onclick="hubSwitch('pt','manual',  ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">📤 Manual Upload</div>
+      <div class="ptab"        id="pt-tab-scanner"  onclick="hubSwitch('pt','scanner', ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">🔍 Upload Scanner</div>
+    </div>
+
+    <!-- TAB: AI BUILDER -->
+    <div id="pt-panel-builder">
+      <div class="grid2" style="gap:18px">
+        <div>
+          <div class="card">
+            <div class="card-title">🔨 Single PDF Builder — AI-Powered</div>
+            <div class="fg"><label class="lbl">Target Keyword <span style="color:var(--accent2)">*</span></label>
+              <input type="text" id="pdf-kw" placeholder="e.g. best SEO tools 2025"></div>
+            <div class="fg"><label class="lbl">Document Title <span class="xs tm">(auto if blank)</span></label>
+              <input type="text" id="pdf-title-input" placeholder="The Complete Guide to [keyword]"></div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Template</label><select id="pdf-template">${tplOptions}</select></div>
+              <div class="fg"><label class="lbl">Content Density</label><select id="pdf-density">${densOptions}</select></div>
+            </div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">PDF Brand Color</label><input type="color" id="pdf-color" value="#0057ff" style="height:32px;padding:2px"></div>
+              <div class="fg"><label class="lbl">Backlink URL <span class="xs tm">(embedded)</span></label>
+                <input type="url" id="pdf-backlinks" placeholder="https://yoursite.com/page"></div>
+            </div>
+            <div class="row mt8">
+              <button class="btn btn-primary" onclick="pdfAddJob()" style="flex:1">⚡ Generate &amp; Build PDF</button>
+            </div>
+            <div class="notice notice-info" style="margin-top:8px;font-size:10px">
+              💡 With Groq API key: <strong>AI writes unique content per section</strong>. Without key: high-quality template content.
+            </div>
+          </div>
+
+          <!-- SEO STRATEGY -->
+          <div class="card">
+            <div class="card-title">🧠 PDF Parasite Strategy</div>
+            <div style="font-family:var(--mono);font-size:10px;line-height:2;color:var(--muted2)">
+              <div><span class="badge badge-g">1</span> Target <strong>informational keywords</strong> with DA &lt; 50 on page 1</div>
+              <div><span class="badge badge-b">2</span> Use <strong>Ultra density</strong> for competitive KWs (DA 50+)</div>
+              <div><span class="badge badge-p">3</span> Blast Scribd → SlideShare → Archive.org → Academia</div>
+              <div><span class="badge badge-y">4</span> Each upload = <strong>new indexed URL</strong> with your KW in title</div>
+              <div><span class="badge badge-r">5</span> Point Tier-2 links at your PDF URLs (not your main site)</div>
+              <div><span class="badge badge-g">6</span> Once ranking, backlink drives <strong>targeted traffic to you</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <!-- TERMINAL -->
+          <div class="card">
+            <div class="card-title">🖥 Build Log</div>
+            <div class="terminal" id="pdf-main-terminal" style="height:220px">
+              <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">PDF SEO God-Tier v3.0 ready. Configure Groq key + Vercel URL above, then build.</span></div>
+            </div>
+          </div>
+
+          <!-- PLATFORM GRID -->
+          <div class="card">
+            <div class="card-title">📊 Platform Arsenal — ${PDF_PLATFORMS.length} platforms</div>
+            <div style="max-height:260px;overflow-y:auto">
+              <table class="tw" style="font-size:10px"><thead><tr><th>Platform</th><th>DA</th><th>Free</th><th>Method</th><th>Note</th></tr></thead>
+              <tbody>${PDF_PLATFORMS.map(p=>`<tr>
+                <td><span style="font-size:13px">${p.icon}</span> <strong>${p.name}</strong></td>
+                <td><span class="badge ${p.da>=90?'badge-g':p.da>=80?'badge-b':'badge-y'}">${p.da}</span></td>
+                <td>${p.free?'<span class="badge badge-g">Free</span>':'<span class="badge badge-r">Paid</span>'}</td>
+                <td><span class="badge badge-p" style="font-size:8px">${p.method}</span></td>
+                <td style="font-size:9px;color:var(--muted2);max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.note)}">${esc(p.note.substring(0,60))}</td>
+              </tr>`).join('')}</tbody></table>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="card">
-        <div class="card-title">🖥 Automation Log</div>
-        <div class="terminal" id="pu-auto-terminal" style="height:200px">
-          <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">🚀 Smart PDF Uploader Automation Engine ready. Configure above and blast all platforms.</span></div>
+
+      <!-- JOB QUEUE -->
+      <div class="card" style="margin-top:0">
+        <div class="card-title">📋 Job Queue
+          <button class="btn btn-ghost btn-xs" style="margin-left:auto" onclick="pdfExportAllCSV()">📥 Export All CSV</button>
         </div>
-        <div class="terminal" id="pu-terminal" style="height:80px;margin-top:4px;border-top:1px solid var(--border)">
-          <div class="tline"><span class="ttime">--:--:--</span><span class="tm">Single upload log</span></div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-title">📋 Upload Results
-          <span style="margin-left:auto;font-size:10px;font-family:var(--mono)">
-            <span id="pu-auto-stat-ok" style="color:var(--accent3);font-weight:700">0</span> live ·
-            <span id="pu-auto-stat-manual" style="color:var(--accent5);font-weight:700">0</span> manual ·
-            <span id="pu-auto-stat-fail" style="color:var(--accent2);font-weight:700">0</span> failed
-          </span>
-        </div>
-        <div class="tw" style="max-height:440px;overflow-y:auto"><table>
-          <thead><tr><th>Time</th><th>Platform</th><th>DA</th><th>Title</th><th>Status</th><th>Live URL</th></tr></thead>
-          <tbody id="pu-auto-tbody"><tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No uploads yet. Select platforms and blast.</td></tr></tbody>
+        <div class="tw" style="overflow-x:auto"><table>
+          <thead><tr><th>Time</th><th>Keyword / Title</th><th>Status</th><th>Words</th><th>SEO Score</th><th>Template</th><th>Actions</th></tr></thead>
+          <tbody id="pdf-queue-tbody"><tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet.</td></tr></tbody>
         </table></div>
       </div>
     </div>
-  </div>`;
 
+    <!-- TAB: BULK BUILD -->
+    <div id="pt-panel-bulk" style="display:none">
+      <div class="grid2" style="gap:18px">
+        <div>
+          <div class="card">
+            <div class="card-title">⚡ Bulk PDF Builder — up to 30 PDFs</div>
+            <div class="notice notice-warn" style="margin-bottom:10px">One keyword per line. Groq AI generates unique content for each. Each PDF is fully built and queued for blast.</div>
+            <div class="fg"><label class="lbl">Keywords (one per line, max 30)</label>
+              <textarea id="pdf-bulk-kws" rows="10" placeholder="best seo tools 2025&#10;affordable web hosting&#10;how to rank on google&#10;local seo tips&#10;keyword research guide&#10;backlink building strategy&#10;technical seo audit&#10;content marketing tips&#10;..."></textarea></div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Template</label><select id="pdf-bulk-tpl">${tplOptions}</select></div>
+              <div class="fg"><label class="lbl">Density</label><select id="pdf-bulk-density">${densOptions}</select></div>
+            </div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Backlink (all PDFs)</label><input type="url" id="pdf-bulk-bls" placeholder="https://yoursite.com/"></div>
+              <div class="fg"><label class="lbl">Brand Color</label><input type="color" id="pdf-bulk-color" value="#0057ff" style="height:32px;padding:2px"></div>
+            </div>
+            <button id="pdf-bulk-btn" class="btn btn-primary" style="width:100%;margin-top:8px" onclick="pdfBulkAdd()">⚡ Bulk Build</button>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-title">📈 Bulk Strategy Guide</div>
+            <div style="font-family:var(--mono);font-size:10px;line-height:1.9;color:var(--muted2)">
+              <strong style="color:var(--text)">CLUSTER APPROACH:</strong> Build 5-10 PDFs around a single keyword cluster (e.g. "seo tools", "best seo tools", "free seo tools", "seo tools comparison"). Each PDF targets a different long-tail variant but links back to the same page. Google sees a cluster of authority documents all pointing to one URL.<br><br>
+              <strong style="color:var(--text)">VELOCITY STRATEGY:</strong> 3-5 PDFs per day across platforms = 15-25 indexed URLs per week. After 30 days you have 60-100+ parasite pages pushing DA to your target URL.<br><br>
+              <strong style="color:var(--text)">NICHE DOMINATION:</strong> Use Ultra density + Groq AI for competitive niches. The AI-written content passes spam filters because each section is genuinely unique.
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">🖥 Bulk Build Log</div>
+            <div class="terminal" id="pdf-main-terminal-bulk" style="height:180px">
+              <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">Bulk builder ready.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: BLAST CONFIG -->
+    <div id="pt-panel-blast" style="display:none">
+      <div class="grid2" style="gap:18px">
+        <div>
+          <div class="card">
+            <div class="card-title">🚀 Blast Configuration</div>
+            <div class="notice notice-success" style="margin-bottom:10px">
+              <strong>Archive.org is fully automated</strong> (S3 API — no CORS, returns live URL). Other platforms use your Vercel proxy for auto-upload with cookie auth. If CORS blocks, PDF is downloaded + upload page opens automatically.
+            </div>
+            <div class="card-title" style="margin-top:4px">🔑 Archive.org S3 (Full Automation)</div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">S3 Access Key</label><input type="text" id="blast-archive-access" placeholder="archive.org access key" oninput="document.getElementById('cred-archive-access')&&(document.getElementById('cred-archive-access').value=this.value)"></div>
+              <div class="fg"><label class="lbl">S3 Secret Key</label><input type="password" id="blast-archive-secret" placeholder="archive.org secret key" oninput="document.getElementById('cred-archive-secret')&&(document.getElementById('cred-archive-secret').value=this.value)"></div>
+            </div>
+            <div class="notice notice-info" style="margin:8px 0;font-size:10px">Get S3 keys free at: <a href="https://archive.org/account/s3.php" target="_blank">archive.org/account/s3.php</a></div>
+            <div class="card-title" style="margin-top:8px">🍪 Platform Session Cookies (for proxy upload)</div>
+            <div class="notice notice-warn" style="margin-bottom:8px;font-size:10px">Log into each platform, copy your session cookie from DevTools → Application → Cookies. Paste here for automated upload.</div>
+            <div style="max-height:300px;overflow-y:auto">
+              ${PDF_PLATFORMS.filter(p=>p.id!=='archive').map(p=>`
+              <div class="fg" style="margin-bottom:6px"><label class="lbl">${p.icon} ${p.name} Cookie <span class="xs tm">(${p.loginUrl?`<a href="${p.loginUrl}" target="_blank">Login here</a>`:'no login'})</span></label>
+                <input type="password" id="cred-${p.id}-cookie" placeholder="session cookie string" style="font-size:10px;font-family:var(--mono)"></div>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-title">🎯 Platform Selection</div>
+            <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-plat-chip').forEach(c=>c.classList.add('on'))">All ${PDF_PLATFORMS.length}</button>
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-plat-chip').forEach(c=>c.classList.remove('on'))">None</button>
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-plat-chip').forEach(c=>c.classList.toggle('on',parseInt(c.title.match(/DA(\\d+)/)?.[1]||0)>=90))">DA90+</button>
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-plat-chip').forEach(c=>c.classList.toggle('on',${JSON.stringify(PDF_PLATFORMS.filter(p=>p.free).map(p=>p.id))}.includes(c.dataset.pid)))">Free Only</button>
+            </div>
+            <div class="chips" style="max-height:300px;overflow-y:auto">${platformChips}</div>
+          </div>
+          <div class="card">
+            <div class="card-title">📋 Upload Method Legend</div>
+            <div style="font-family:var(--mono);font-size:10px;line-height:2;color:var(--muted2)">
+              <span class="badge badge-g">s3_api</span> Fully automated — live URL returned<br>
+              <span class="badge badge-b">api</span> REST API — token required<br>
+              <span class="badge badge-p">form_post</span> Form POST via proxy + cookie<br>
+              <span class="badge badge-y">MANUAL fallback</span> CORS blocked — file + page opens
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: MANUAL UPLOAD -->
+    <div id="pt-panel-manual" style="display:none">
+      <div class="grid2" style="gap:18px">
+        <div>
+          <div class="card">
+            <div class="card-title">📤 Manual Upload — Any Platform</div>
+            <div class="notice notice-info" style="margin-bottom:10px">Upload any PDF to any URL. The tool sends via your Vercel proxy (bypasses CORS), POSTs the file with your credentials, and <strong>captures the live URL</strong> from the response.</div>
+            <div class="fg"><label class="lbl">Upload Endpoint URL <span style="color:var(--accent2)">*</span> <span class="xs tm">(from scanner or known)</span></label>
+              <div class="row" style="gap:8px">
+                <input type="url" id="manual-upload-url" placeholder="https://platform.com/upload" style="flex:1">
+                <button class="btn btn-blue btn-xs" onclick="hubSwitch('pt','scanner',['builder','bulk','blast','manual','scanner'])">🔍 Scan First</button>
+              </div></div>
+            <div class="fg"><label class="lbl">PDF File <span style="color:var(--accent2)">*</span></label>
+              <input type="file" id="manual-upload-file" accept=".pdf,application/pdf" style="padding:6px"></div>
+            <div class="fg"><label class="lbl">Title</label><input type="text" id="manual-upload-title" placeholder="Document title for the platform"></div>
+            <div class="fg"><label class="lbl">Description</label><textarea id="manual-upload-desc" rows="2" placeholder="Keyword-rich description..."></textarea></div>
+            <div class="fg"><label class="lbl">Tags <span class="xs tm">(comma separated)</span></label>
+              <input type="text" id="manual-upload-tags" placeholder="seo, keyword, guide, tips"></div>
+            <div class="fg"><label class="lbl">Session Cookie <span class="xs tm">(optional — for authenticated platforms)</span></label>
+              <input type="password" id="manual-upload-cookie" placeholder="session=abc123; csrf_token=xyz" style="font-family:var(--mono);font-size:10px"></div>
+            <button id="manual-upload-btn" class="btn btn-primary" style="width:100%;margin-top:8px" onclick="runManualUpload()">🚀 Upload Now</button>
+            <div id="manual-upload-result" style="margin-top:8px"></div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-title">🖥 Upload Log</div>
+            <div class="terminal" id="manual-upload-log" style="height:220px">
+              <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">Manual uploader ready.</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">🔌 URL Capture Logic</div>
+            <div style="font-family:var(--mono);font-size:10px;line-height:1.9;color:var(--muted2)">
+              After upload, the tool auto-scans the response for:<br>
+              <span class="badge badge-g">JSON</span> url/permalink/view_url fields<br>
+              <span class="badge badge-b">HTML</span> anchor tags with document paths<br>
+              <span class="badge badge-p">META</span> og:url / canonical tags<br>
+              <span class="badge badge-y">PATTERN</span> same-domain document paths<br>
+              <span class="badge badge-r">REDIRECT</span> Location header URL<br>
+              If no URL found: snippet of response is shown for manual check.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: UPLOAD SCANNER -->
+    <div id="pt-panel-scanner" style="display:none">
+      <div class="grid2" style="gap:18px">
+        <div>
+          <div class="card">
+            <div class="card-title">🔍 Smart Upload Page Scanner</div>
+            <div class="notice notice-info" style="margin-bottom:10px">
+              Enter any document-sharing website. The scanner uses your Vercel proxy to crawl the site, detect PDF upload pages (even deeply nested), and return ranked upload endpoints with confidence scores. Works on any site where users publicly upload PDFs.
+            </div>
+            <div class="fg"><label class="lbl">Site URL to Scan <span style="color:var(--accent2)">*</span></label>
+              <input type="url" id="scanner-url" placeholder="https://any-document-sharing-site.com"></div>
+            <div class="fg"><label class="lbl">Vercel Proxy URL <span class="xs tm">(pre-filled from config above)</span></label>
+              <input type="url" id="scanner-proxy-base" placeholder="https://your-backend.vercel.app"></div>
+            <button id="scanner-run-btn" class="btn btn-primary" style="width:100%;margin-top:8px" onclick="runUploadScanner()">🔍 Scan for Upload Pages</button>
+
+            <div class="card-title" style="margin-top:12px">📋 Known Platform Quick Links</div>
+            <div style="max-height:280px;overflow-y:auto">
+              ${PDF_PLATFORMS.map(p=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+                <span style="font-size:14px">${p.icon}</span>
+                <div style="flex:1"><div style="font-weight:700;font-size:11px;font-family:var(--mono)">${p.name}</div>
+                <div style="font-size:9px;color:var(--muted2)">${p.uploadUrl}</div></div>
+                <span class="badge ${p.da>=90?'badge-g':'badge-b'}">${p.da}</span>
+                <button class="btn btn-primary btn-xs" onclick="preFillUploadUrl('${esc(p.uploadUrl)}')">Use</button>
+                <a href="${esc(p.uploadUrl)}" target="_blank" class="btn btn-ghost btn-xs">Open</a>
+              </div>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-title">📊 Scan Results</div>
+            <div id="scanner-results" style="min-height:80px">
+              <div style="color:var(--muted2);padding:20px;text-align:center;font-family:var(--mono);font-size:11px">Run a scan to see upload pages detected.</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">🖥 Scanner Log</div>
+            <div class="terminal" id="scanner-log" style="height:200px">
+              <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">Scanner ready. Enter a site URL and run.</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">🔬 Scanner Detection Methods</div>
+            <div style="font-family:var(--mono);font-size:10px;line-height:1.9;color:var(--muted2)">
+              <span class="badge badge-g">PATH PROBE</span> Tests 15 common upload paths directly<br>
+              <span class="badge badge-b">LINK SCAN</span> Crawls homepage for upload-related hrefs<br>
+              <span class="badge badge-p">ROBOTS.TXT</span> Mines Allow/Disallow hints for hidden paths<br>
+              <span class="badge badge-y">HTML SCORE</span> Scores pages by upload form fingerprints<br>
+              <span class="badge badge-r">API DETECT</span> Extracts JS fetch() API endpoint calls<br>
+              Results ranked by <strong>confidence score</strong>. Top result auto-fills Manual Upload tab.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Sync config fields
   setTimeout(()=>{
-    const fi=document.getElementById('pu-auto-file');
-    if(fi) fi.addEventListener('change',()=>{
-      const f=fi.files[0]; const info=document.getElementById('pu-auto-file-info');
-      if(f&&info) info.textContent='Selected: '+f.name+' · '+(f.size/1024).toFixed(1)+' KB';
-      const titleEl=document.getElementById('pu-auto-title');
-      if(titleEl&&!titleEl.value) titleEl.value=f.name.replace('.pdf','').replace(/[-_]/g,' ');
-    });
-    const fi2=document.getElementById('pu-file-input');
-    if(fi2) fi2.addEventListener('change',()=>{
-      const f=fi2.files[0]; const info=document.getElementById('pu-file-info');
-      if(f&&info) info.textContent='Selected: '+f.name+' · '+(f.size/1024).toFixed(1)+' KB';
-    });
-  },100);
-
-  puAutoRenderResultsTable();
+    const gk=document.getElementById('cfg-groq-key');
+    const vb=document.getElementById('cfg-vercel-base');
+    const sp=document.getElementById('scanner-proxy-base');
+    if(gk) gk.value=PDF_STATE.groqKey||'';
+    if(vb) vb.value=PDF_STATE.vercelBase||'';
+    if(sp && PDF_STATE.vercelBase) sp.value=PDF_STATE.vercelBase;
+    // Sync vercel to scanner field
+    if(vb) vb.addEventListener('input',()=>{ if(sp) sp.value=vb.value.trim(); });
+    pdfRenderQueue();
+    pdfUpdateStats();
+  },50);
 }
+
+/* ── EXPORT ALL CSV ── */
+function pdfExportAllCSV(){
+  if(!PDF_STATE.jobs.length){pdfToast('No jobs to export','warn');return;}
+  const h='Time,Keyword,Title,Template,Status,Words,SEO Score,Live URLs\n';
+  const rows=PDF_STATE.jobs.map(j=>{
+    const urls=j.uploadedTo?j.uploadedTo.filter(u=>u.url).map(u=>u.url).join(' | '):'';
+    return `"${j.ts}","${j.keyword}","${j.title}","${j.template}","${j.status}","${j.wordCount||0}","${j.seoScore?j.seoScore.score:0}","${urls}"`;
+  }).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([h+rows],{type:'text/csv'}));
+  a.download='pdf-seo-jobs-'+new Date().toISOString().split('T')[0]+'.csv';
+  a.click();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// END GOD-TIER PDF SEO MODULE v3.0
+// ═══════════════════════════════════════════════════════════════
+
 
 
 // ═══════════════════════════════════════════════════════════════
@@ -22864,25 +22820,7 @@ function renderCommentBlaster(el){
 }
 // cbSwitch replaced by universal hubSwitch
 
-// ═══════════════════════════════════════════════════════════════
-// MERGED: renderPDFTools (PDF Parasite + Smart PDF Upload)
-// ═══════════════════════════════════════════════════════════════
-function renderPDFTools(el){
-  el = el || document.getElementById('page-pdf_tools');
-  if(!el) return;
-  // PDF sub-pages render into their own hidden divs; extract and move into panels
-  el.innerHTML = `
-    <div class="page-title">📄 PDF SEO</div>
-    <div class="page-sub">// PDF Parasite + Smart PDF Upload — unified</div>
-    <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:2px solid var(--win-btn-sh)">
-      <div class="ptab active" id="pt-tab-parasite" onclick="hubSwitch('pt','parasite',['parasite','upload'])" style="font-size:11px">📄 PDF Parasite</div>
-      <div class="ptab" id="pt-tab-upload" onclick="hubSwitch('pt','upload',['parasite','upload'])" style="font-size:11px">🚀 Smart PDF Upload</div>
-    </div>
-    <div id="pt-panel-parasite"></div>
-    <div id="pt-panel-upload" style="display:none"></div>`;
-  renderPDFParasitePage(document.getElementById('pt-panel-parasite'));
-  renderPDFUploaderPage(document.getElementById('pt-panel-upload'));
-}
+// renderPDFTools is defined in the PDF SEO Module above
 
 // ═══════════════════════════════════════════════════════════════
 // MERGED: renderIndexingSuite (Link Indexer + Ping Submitter + Search Indexing)
@@ -23083,50 +23021,7 @@ try { BL.items = JSON.parse(localStorage.getItem('blacklist')||'[]'); } catch(e)
     console.warn('[Supabase] Auto-connect failed — localStorage only');
   }
 })();
-// Re-call updateHeader/PlatformBar now that DOM + all vars are ready, then render dashboard
-updatePlatformBar();
-updateHeader();
-switchPage('dashboard');
-
-// ─── COLLAPSIBLE SIDEBAR SECTIONS ────────────────────────────
-(function initCollapsibleNav(){
-  document.querySelectorAll('.nav-section-toggle').forEach(header => {
-    header.addEventListener('click', () => {
-      const id = header.dataset.section;
-      const group = document.getElementById('nav-group-' + id);
-      const chevron = header.querySelector('.nav-chevron');
-      if(!group) return;
-      const isCollapsed = group.classList.contains('nav-group-collapsed');
-      if(isCollapsed){
-        group.classList.remove('nav-group-collapsed');
-        header.classList.remove('nav-section-collapsed');
-        if(chevron) chevron.textContent = '▾';
-      } else {
-        group.classList.add('nav-group-collapsed');
-        header.classList.add('nav-section-collapsed');
-        if(chevron) chevron.textContent = '▸';
-      }
-    });
-  });
-})();
-
-// Auto-expand the section containing the active nav item when switchPage is called
-const _origSwitchPage = switchPage;
-switchPage = function(id){
-  _origSwitchPage(id);
-  // Find which group contains the active nav item and expand it
-  document.querySelectorAll('.nav-group').forEach(group => {
-    const activeItem = group.querySelector('.nav-item.active');
-    if(activeItem){
-      const sectionId = group.id.replace('nav-group-','');
-      const header = document.querySelector('.nav-section-toggle[data-section="'+sectionId+'"]');
-      const chevron = header && header.querySelector('.nav-chevron');
-      group.classList.remove('nav-group-collapsed');
-      if(header){ header.classList.remove('nav-section-collapsed'); }
-      if(chevron){ chevron.textContent = '▾'; }
-    }
-  });
-};
+// Init deferred — moved to end of script after all variables (BLP_SITES, BLP, etc.) are defined
 
 // ─── STATUS BAR SYNC ─────────────────────────────────────────
 const _origUpdateHeader = updateHeader;
@@ -26599,6 +26494,48 @@ function blpClearLog(){
   if(el&&el._tab===2) renderBacklinkPro(el);
   toast('Log cleared','s');
 }
+
+// ─── DEFERRED INIT — all vars (BLP_SITES, BLP, etc.) now defined ──────────────
+(function initCollapsibleNav(){
+  document.querySelectorAll('.nav-section-toggle').forEach(header => {
+    header.addEventListener('click', () => {
+      const id = header.dataset.section;
+      const group = document.getElementById('nav-group-' + id);
+      const chevron = header.querySelector('.nav-chevron');
+      if(!group) return;
+      const isCollapsed = group.classList.contains('nav-group-collapsed');
+      if(isCollapsed){
+        group.classList.remove('nav-group-collapsed');
+        header.classList.remove('nav-section-collapsed');
+        if(chevron) chevron.textContent = '▾';
+      } else {
+        group.classList.add('nav-group-collapsed');
+        header.classList.add('nav-section-collapsed');
+        if(chevron) chevron.textContent = '▸';
+      }
+    });
+  });
+})();
+
+const _origSwitchPage = switchPage;
+switchPage = function(id){
+  _origSwitchPage(id);
+  document.querySelectorAll('.nav-group').forEach(group => {
+    const activeItem = group.querySelector('.nav-item.active');
+    if(activeItem){
+      const sectionId = group.id.replace('nav-group-','');
+      const header = document.querySelector('.nav-section-toggle[data-section="'+sectionId+'"]');
+      const chevron = header && header.querySelector('.nav-chevron');
+      group.classList.remove('nav-group-collapsed');
+      if(header){ header.classList.remove('nav-section-collapsed'); }
+      if(chevron){ chevron.textContent = '▾'; }
+    }
+  });
+};
+
+updatePlatformBar();
+updateHeader();
+switchPage('dashboard');
 
 
 

@@ -975,6 +975,7 @@ tr:hover td{background:#c8d8f0}
         <div class="nav-item" data-page="pdf_tools"><span class="nav-icon">📄</span>PDF SEO<span class="nav-badge red">HOT</span></div>
         <div class="nav-item" data-page="parasite_finder"><span class="nav-icon">🦠</span>Parasite Finder<span class="nav-badge red">NEW</span></div>
         <div class="nav-item" data-page="sitemap_generator"><span class="nav-icon">🗺</span>Sitemap Generator</div>
+        <div class="nav-item" data-page="backlink_checker"><span class="nav-icon">🔎</span>Backlink Checker<span class="nav-badge red">NEW</span></div>
         <div class="nav-item" data-page="backlink_monitor"><span class="nav-icon">🔍</span>Backlink Monitor</div>
         <div class="nav-item" data-page="backlink_pro"><span class="nav-icon">🔗</span>Backlink Pro<span class="nav-badge red">997 Sites</span></div>
         <div class="nav-item" data-page="comment_sites" style="display:none"><span class="nav-icon">🌐</span>Comment Sites</div>
@@ -1000,6 +1001,7 @@ tr:hover td{background:#c8d8f0}
       <div class="nav-section nav-section-toggle nav-section-collapsed" data-section="s5">⑤ ANALYTICS <span class="nav-chevron">▸</span></div>
       <div class="nav-group nav-group-collapsed" id="nav-group-s5">
         <div class="nav-item" data-page="analytics_hub"><span class="nav-icon">📊</span>Analytics Hub<span class="nav-badge blue">4 tools</span></div>
+        <div class="nav-item" data-page="site_audit"><span class="nav-icon">🏥</span>Site Audit<span class="nav-badge red">NEW</span></div>
       </div>
 
       <div class="nav-item" data-page="settings" style="border-top:1px solid var(--win-border);margin-top:4px"><span class="nav-icon">⚙</span>Settings<span class="nav-badge blue">CFG</span></div>
@@ -1043,6 +1045,8 @@ tr:hover td{background:#c8d8f0}
       <div id="page-help" class="page"></div>
       <div id="page-rank_tracker" class="page"></div>
       <div id="page-backlink_monitor" class="page"></div>
+      <div id="page-backlink_checker" class="page"></div>
+      <div id="page-site_audit" class="page"></div>
       <div id="page-backlink_pro" class="page"></div>
       <div id="page-roi_tracker" class="page"></div>
       <div id="page-api_health" class="page"></div>
@@ -2688,6 +2692,8 @@ function renderPage(id){
     help: renderHelp,
     rank_tracker:     renderRankTracker,
     backlink_monitor: renderBacklinkMonitor,
+    backlink_checker: renderBacklinkChecker,
+    site_audit:       renderSiteAudit,
     backlink_pro:      renderBacklinkPro,
     roi_tracker:      renderROITracker,
     api_health:       renderApiHealth,
@@ -2702,6 +2708,7 @@ function renderPage(id){
     blacklist_manager:renderBlacklistManager,
     rate_monitor:     renderRateMonitor,
     analytics_hub:    renderAnalyticsHub,
+    site_audit:       renderSiteAudit,
     content_hub:      renderContentHub,
     account_setup:    renderAccountSetup,
   }[id];
@@ -13492,11 +13499,10 @@ async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
   }
   const filename = (job.title||job.keyword).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,60)+'.pdf';
   try{
-    const res = await fetch(vercelBase+'/api/proxy',{
+    const res = await fetch(vercelBase+'/api/upload-pdf',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        mode: 'pdf-upload',
         platform: plat.id,
         pdfBase64: b64,
         filename,
@@ -13511,7 +13517,7 @@ async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
     });
     const d = await res.json();
     if(d.ok && d.url){
-      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:d.url, note:d.note||'Auto-uploaded via /api/proxy'};
+      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:d.url, note:d.note||'Auto-uploaded via /api/upload-pdf'};
     }
     // Platform returned manual=true (needs cookie) — download + open upload page
     if(d.manual){
@@ -14080,8 +14086,8 @@ async function pdfBlastPlatformsV2(pdfBytes,job,selectedPlatformIds,credentials,
         const c=credentials.archive||{};
         if(c.accessKey&&c.secretKey){
           if(vercelBase){
-            const res=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({mode:'pdf-upload',platform:'archive',pdfBase64:b64,filename,title:job.title,keyword:job.keyword,accessKey:c.accessKey,secretKey:c.secretKey})});
+            const res=await fetch(vercelBase+'/api/upload-pdf',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({platform:'archive',pdfBase64:b64,filename,title:job.title,keyword:job.keyword,accessKey:c.accessKey,secretKey:c.secretKey})});
             const d=await res.json();
             if(d.ok&&d.url) result={...result,status:'live',url:d.url,note:'Archive.org S3'};
             else throw new Error(d.error||'Archive upload failed');
@@ -20568,7 +20574,7 @@ async function backendValidateSession(targetUrl, cookies, userAgent=null){
 
 // ── PDF Uploader ──────────────────────────────────────────────────────────
 async function backendUploadPdf({siteUrl, uploadUrl, htmlContent, filename='document.html', cookies=null, extraFields={}}){
-  return backendPost('/proxy', { mode: 'pdf-upload',
+  return backendPost('/upload-pdf', {
     site_url:siteUrl, upload_url:uploadUrl,
     html_content:htmlContent, filename, cookies, extra_fields:extraFields
   }, 45000);
@@ -23046,6 +23052,677 @@ window.hubSwitch = function(ns, tab, allTabs){
 // ═══════════════════════════════════════════════════════════════
 // ANALYTICS HUB — uses renderTabHub factory
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// BACKLINK CHECKER — Common Crawl (free, no key) + Bing Webmaster (free key)
+// ═══════════════════════════════════════════════════════════════
+function renderBacklinkChecker(el){
+  if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
+  el.innerHTML=`
+  <div class="page-title">🔎 Backlink Checker</div>
+  <div class="page-sub">// Find who links to any domain or URL — Common Crawl (free, no key) + Bing Webmaster API (free key)</div>
+
+  <div class="card" style="margin-bottom:10px">
+    <div class="card-title">🔑 API Keys (optional — Common Crawl works without any key)</div>
+    <div class="row g8">
+      <div class="f1 fg">
+        <label class="lbl">Bing Webmaster API Key <span style="opacity:.6;font-size:10px">— free at <a href="https://www.bing.com/webmasters" target="_blank" style="color:var(--win-blue)">bing.com/webmasters</a></span></label>
+        <input id="blc-bing-key" class="inp" type="password" placeholder="Paste Bing Webmaster API key" value="${localStorage.getItem('blc_bing_key')||''}" oninput="localStorage.setItem('blc_bing_key',this.value)">
+      </div>
+      <div class="f1 fg">
+        <label class="lbl">Google Search Console OAuth Token <span style="opacity:.6;font-size:10px">— own domains only</span></label>
+        <input id="blc-gsc-token" class="inp" type="password" placeholder="GSC access_token (optional)" value="${localStorage.getItem('blc_gsc_token')||''}" oninput="localStorage.setItem('blc_gsc_token',this.value)">
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:10px">
+    <div class="card-title">🔍 Check Backlinks</div>
+    <div class="row g8 aic">
+      <div class="f1 fg mb0">
+        <input id="blc-input" class="inp" placeholder="Enter domain or URL e.g. example.com or https://example.com/page" style="font-size:13px">
+      </div>
+      <div>
+        <label class="lbl" style="margin-bottom:4px">Source</label>
+        <select id="blc-source" class="inp" style="width:170px">
+          <option value="commoncrawl">🌐 Common Crawl (free)</option>
+          <option value="bing">🔵 Bing Webmaster API</option>
+          <option value="gsc">🟢 Google Search Console</option>
+          <option value="all">⚡ All Sources</option>
+        </select>
+      </div>
+      <div style="padding-top:18px">
+        <button class="btn btn-primary" onclick="blcRun()">🔎 Check Backlinks</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="blc-status" style="display:none" class="card" style="margin-bottom:10px">
+    <div id="blc-status-text" style="font-size:12px;color:var(--win-blue)">Checking…</div>
+    <div class="progress-bar mt4"><div id="blc-progress" class="progress-fill" style="width:0%"></div></div>
+  </div>
+
+  <div id="blc-summary" style="display:none" class="card mb10">
+    <div id="blc-summary-inner"></div>
+  </div>
+
+  <div id="blc-results" style="display:none" class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span id="blc-res-title">Results</span>
+      <div class="flex g6">
+        <input id="blc-filter" class="inp" style="width:180px;font-size:11px" placeholder="Filter by URL or anchor…" oninput="blcFilter(this.value)">
+        <button class="btn btn-ghost btn-xs" onclick="blcExportCSV()">📥 CSV</button>
+      </div>
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:11px" id="blc-table">
+        <thead>
+          <tr style="background:var(--win-btn-bg);text-align:left">
+            <th style="padding:6px 8px;cursor:pointer" onclick="blcSort('src')">Source URL ↕</th>
+            <th style="padding:6px 8px;cursor:pointer" onclick="blcSort('anchor')">Anchor Text ↕</th>
+            <th style="padding:6px 8px;cursor:pointer" onclick="blcSort('target')">Target URL ↕</th>
+            <th style="padding:6px 8px">Source</th>
+            <th style="padding:6px 8px">Status</th>
+          </tr>
+        </thead>
+        <tbody id="blc-tbody"></tbody>
+      </table>
+    </div>
+    <div id="blc-load-more" style="display:none;text-align:center;margin-top:8px">
+      <button class="btn btn-ghost btn-xs" onclick="blcLoadMore()">Load More</button>
+    </div>
+  </div>`;
+}
+
+// ── BLC State & Logic ──────────────────────────────────────────────────────
+let _blcRows=[], _blcFiltered=[], _blcPage=0, _blcSortField='', _blcSortAsc=true;
+const BLC_PAGE_SIZE=50;
+
+async function blcRun(){
+  const q=(document.getElementById('blc-input')?.value||'').trim();
+  if(!q){ toast('Enter a domain or URL','w'); return; }
+  const source=document.getElementById('blc-source')?.value||'commoncrawl';
+  const bingKey=localStorage.getItem('blc_bing_key')||'';
+  const gscToken=localStorage.getItem('blc_gsc_token')||'';
+
+  if(source==='bing'&&!bingKey){ toast('Add your Bing Webmaster API key above','w'); return; }
+  if(source==='gsc'&&!gscToken){ toast('Add your GSC OAuth token above','w'); return; }
+
+  _blcRows=[]; _blcFiltered=[]; _blcPage=0;
+  const statusEl=document.getElementById('blc-status');
+  const statusText=document.getElementById('blc-status-text');
+  const progress=document.getElementById('blc-progress');
+  const resultsEl=document.getElementById('blc-results');
+  const summaryEl=document.getElementById('blc-summary');
+  statusEl.style.display=''; resultsEl.style.display='none'; summaryEl.style.display='none';
+
+  function setStatus(msg,pct){ statusText.textContent=msg; progress.style.width=pct+'%'; }
+
+  try{
+    if(source==='commoncrawl'||source==='all'){
+      setStatus('🌐 Querying Common Crawl index…',10);
+      const ccRows=await blcCommonCrawl(q,(msg,pct)=>setStatus(msg,pct));
+      _blcRows.push(...ccRows);
+      setStatus(`✅ Common Crawl: ${ccRows.length} backlinks found`,40);
+    }
+    if(source==='bing'||source==='all'){
+      if(bingKey){
+        setStatus('🔵 Querying Bing Webmaster API…',50);
+        const bingRows=await blcBing(q,bingKey);
+        _blcRows.push(...bingRows);
+        setStatus(`✅ Bing: ${bingRows.length} backlinks found`,70);
+      }
+    }
+    if(source==='gsc'||source==='all'){
+      if(gscToken){
+        setStatus('🟢 Querying Google Search Console…',75);
+        const gscRows=await blcGSC(q,gscToken);
+        _blcRows.push(...gscRows);
+        setStatus(`✅ GSC: ${gscRows.length} backlinks found`,90);
+      }
+    }
+
+    // Deduplicate by source URL
+    const seen=new Set();
+    _blcRows=_blcRows.filter(r=>{ const k=r.src+r.target; if(seen.has(k)) return false; seen.add(k); return true; });
+    _blcFiltered=[..._blcRows];
+    setStatus(`✅ Done — ${_blcRows.length} unique backlinks found`,100);
+    statusEl.style.display='none';
+    blcRenderSummary();
+    blcRenderTable();
+  }catch(err){
+    setStatus('❌ Error: '+err.message, 0);
+    toast('Backlink check failed: '+err.message,'e');
+  }
+}
+
+async function blcCommonCrawl(q, updateFn){
+  // Normalize query to wildcard domain match
+  const domain=q.replace(/^https?:\/\//,'').replace(/\/.*/,'');
+  const encoded=encodeURIComponent('*.'+domain);
+  const rows=[];
+  // Try last 3 CC indexes for better coverage
+  const indexes=['CC-MAIN-2025-13','CC-MAIN-2024-51','CC-MAIN-2024-38'];
+  for(let i=0;i<indexes.length;i++){
+    const idx=indexes[i];
+    updateFn(`🌐 Common Crawl index ${idx} (${i+1}/3)…`, 10+i*10);
+    try{
+      const url=`https://index.commoncrawl.org/${idx}-index?url=${encoded}&output=json&limit=500&matchType=domain`;
+      const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+      let data;
+      if(vercelBase){
+        const r=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({url,method:'GET',timeout:25})});
+        const j=await r.json(); data=j.text||'';
+      } else {
+        const r=await fetch(url); data=await r.text();
+      }
+      // CC returns NDJSON (one JSON per line)
+      const lines=data.split('\n').filter(l=>l.trim().startsWith('{'));
+      for(const line of lines){
+        try{
+          const obj=JSON.parse(line);
+          if(obj.url&&obj.url!==obj.filename){
+            rows.push({src:obj.url, anchor:'(crawled link)', target:'https://'+domain, source:'Common Crawl', status:'indexed', timestamp:obj.timestamp||''});
+          }
+        }catch{}
+      }
+    }catch(e){ console.warn('CC index error:',e.message); }
+  }
+  return rows;
+}
+
+async function blcBing(q, apiKey){
+  const domain=q.replace(/^https?:\/\//,'').replace(/\/.*/,'');
+  const rows=[];
+  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  try{
+    // Bing Webmaster Tools API - inbound links
+    const url=`https://ssl.bing.com/webmaster/api.svc/json/GetLinkCounts?siteUrl=https%3A%2F%2F${encodeURIComponent(domain)}%2F&apikey=${apiKey}`;
+    let data;
+    if(vercelBase){
+      const r=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({url,method:'GET',timeout:20})});
+      const j=await r.json(); data=j.body||JSON.parse(j.text||'{}');
+    } else {
+      const r=await fetch(url); data=await r.json();
+    }
+    if(data&&data.d){
+      const links=Array.isArray(data.d)?data.d:(data.d.InboundLinks||[]);
+      for(const lk of links){
+        rows.push({src:lk.Url||lk.url||'', anchor:lk.AnchorText||lk.anchorText||'(no anchor)', target:'https://'+domain, source:'Bing Webmaster', status:'live'});
+      }
+    }
+  }catch(e){ console.warn('Bing API error:',e.message); }
+  return rows;
+}
+
+async function blcGSC(q, token){
+  const rows=[];
+  const domain=q.replace(/^https?:\/\//,'').split('/')[0];
+  const siteUrl='sc-domain:'+domain;
+  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  try{
+    const url='https://www.googleapis.com/webmasters/v3/sites/'+encodeURIComponent(siteUrl)+'/searchAnalytics/query';
+    const body=JSON.stringify({startDate:'2024-01-01',endDate:new Date().toISOString().slice(0,10),dimensions:['page','query'],rowLimit:500});
+    let data;
+    if(vercelBase){
+      const r=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({url,method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body,timeout:20})});
+      const j=await r.json(); data=j.body||JSON.parse(j.text||'{}');
+    } else {
+      const r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body});
+      data=await r.json();
+    }
+    if(data&&data.rows){
+      for(const row of data.rows){
+        rows.push({src:row.keys?.[0]||'', anchor:row.keys?.[1]||'', target:row.keys?.[0]||'', source:'GSC', status:'indexed', clicks:row.clicks, impressions:row.impressions, position:row.position?.toFixed(1)});
+      }
+    }
+  }catch(e){ console.warn('GSC error:',e.message); }
+  return rows;
+}
+
+function blcRenderSummary(){
+  const summaryEl=document.getElementById('blc-summary');
+  const inner=document.getElementById('blc-summary-inner');
+  const sources={};
+  for(const r of _blcRows){ sources[r.source]=(sources[r.source]||0)+1; }
+  inner.innerHTML=`<div style="display:flex;gap:12px;flex-wrap:wrap">
+    <div style="background:var(--win-btn-bg);padding:10px 16px;border-radius:6px;text-align:center">
+      <div style="font-size:22px;font-weight:700;color:var(--win-blue)">${_blcRows.length}</div>
+      <div style="font-size:11px;opacity:.7">Total Backlinks</div>
+    </div>
+    ${Object.entries(sources).map(([s,c])=>`
+    <div style="background:var(--win-btn-bg);padding:10px 16px;border-radius:6px;text-align:center">
+      <div style="font-size:22px;font-weight:700;color:var(--win-green)">${c}</div>
+      <div style="font-size:11px;opacity:.7">${s}</div>
+    </div>`).join('')}
+    <div style="background:var(--win-btn-bg);padding:10px 16px;border-radius:6px;text-align:center">
+      <div style="font-size:22px;font-weight:700;color:#ff9800">${new Set(_blcRows.map(r=>{ try{ return new URL(r.src).hostname; }catch{return r.src;} })).size}</div>
+      <div style="font-size:11px;opacity:.7">Unique Domains</div>
+    </div>
+  </div>`;
+  summaryEl.style.display='';
+}
+
+function blcRenderTable(){
+  const tbody=document.getElementById('blc-tbody');
+  const resultsEl=document.getElementById('blc-results');
+  const title=document.getElementById('blc-res-title');
+  _blcPage=0;
+  const slice=_blcFiltered.slice(0, BLC_PAGE_SIZE);
+  title.textContent=`Backlinks (${_blcFiltered.length} total)`;
+  tbody.innerHTML=slice.map(blcRow).join('');
+  document.getElementById('blc-load-more').style.display=_blcFiltered.length>BLC_PAGE_SIZE?'':'none';
+  resultsEl.style.display='';
+  _blcPage=1;
+}
+
+function blcRow(r){
+  const src=r.src||''; const anchor=r.anchor||''; const target=r.target||'';
+  const srcShort=src.length>60?src.slice(0,60)+'…':src;
+  const extra=r.clicks!=null?`<span style="opacity:.6;font-size:10px"> · ${r.clicks} clicks · pos ${r.position}</span>`:'';
+  return `<tr style="border-top:1px solid var(--win-btn-sh)">
+    <td style="padding:5px 8px"><a href="${src}" target="_blank" style="color:var(--win-blue);word-break:break-all">${srcShort}</a></td>
+    <td style="padding:5px 8px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${anchor}">${anchor||'—'}${extra}</td>
+    <td style="padding:5px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8">${target}</td>
+    <td style="padding:5px 8px"><span style="font-size:10px;background:var(--win-btn-bg);padding:2px 6px;border-radius:4px">${r.source}</span></td>
+    <td style="padding:5px 8px"><span style="color:${r.status==='indexed'||r.status==='live'?'var(--win-green)':'#ff9800'};font-size:11px">●${r.status||'?'}</span></td>
+  </tr>`;
+}
+
+function blcFilter(v){
+  const q=v.toLowerCase();
+  _blcFiltered=q?_blcRows.filter(r=>(r.src+r.anchor+r.target).toLowerCase().includes(q)):[..._blcRows];
+  blcRenderTable();
+}
+
+function blcSort(field){
+  if(_blcSortField===field) _blcSortAsc=!_blcSortAsc; else { _blcSortField=field; _blcSortAsc=true; }
+  _blcFiltered.sort((a,b)=>{
+    const av=(a[field]||'').toString().toLowerCase(), bv=(b[field]||'').toString().toLowerCase();
+    return _blcSortAsc?av.localeCompare(bv):bv.localeCompare(av);
+  });
+  blcRenderTable();
+}
+
+function blcLoadMore(){
+  const tbody=document.getElementById('blc-tbody');
+  const slice=_blcFiltered.slice(_blcPage*BLC_PAGE_SIZE,(_blcPage+1)*BLC_PAGE_SIZE);
+  tbody.insertAdjacentHTML('beforeend', slice.map(blcRow).join(''));
+  _blcPage++;
+  if(_blcPage*BLC_PAGE_SIZE>=_blcFiltered.length) document.getElementById('blc-load-more').style.display='none';
+}
+
+function blcExportCSV(){
+  if(!_blcRows.length){ toast('No data to export','w'); return; }
+  const header='Source URL,Anchor Text,Target URL,Source,Status\n';
+  const rows=_blcRows.map(r=>[r.src,r.anchor,r.target,r.source,r.status].map(v=>`"${(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob=new Blob([header+rows],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='backlinks.csv'; a.click();
+  toast('CSV exported','s');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SITE AUDIT — PageSpeed Insights API (free key) + self-crawl via proxy
+// ═══════════════════════════════════════════════════════════════
+function renderSiteAudit(el){
+  if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
+  el.innerHTML=`
+  <div class="page-title">🏥 Site Audit</div>
+  <div class="page-sub">// Technical SEO audit: Core Web Vitals · Page health · Meta audit · Broken links · Crawlability</div>
+
+  <div class="card mb10">
+    <div class="card-title">🔑 API Keys</div>
+    <div class="row g8">
+      <div class="f1 fg">
+        <label class="lbl">Google PageSpeed Insights API Key <span style="opacity:.6;font-size:10px">— free at <a href="https://developers.google.com/speed/docs/insights/v5/get-started" target="_blank" style="color:var(--win-blue)">console.cloud.google.com</a> · 25k/day free</span></label>
+        <input id="sa-psi-key" class="inp" type="password" placeholder="AIza…" value="${localStorage.getItem('sa_psi_key')||''}" oninput="localStorage.setItem('sa_psi_key',this.value)">
+      </div>
+      <div class="f1 fg">
+        <label class="lbl">Google Search Console Token <span style="opacity:.6;font-size:10px">— for keyword/ranking data (own domains)</span></label>
+        <input id="sa-gsc-token" class="inp" type="password" placeholder="GSC access_token (optional)" value="${localStorage.getItem('blc_gsc_token')||''}" oninput="localStorage.setItem('blc_gsc_token',this.value)">
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb10">
+    <div class="card-title">🔍 Audit Settings</div>
+    <div class="row g8 aic" style="flex-wrap:wrap">
+      <div class="f1 fg mb0" style="min-width:260px">
+        <input id="sa-url" class="inp" placeholder="https://example.com" style="font-size:13px">
+      </div>
+      <div style="min-width:130px">
+        <label class="lbl" style="margin-bottom:4px">Device</label>
+        <select id="sa-device" class="inp">
+          <option value="mobile">📱 Mobile</option>
+          <option value="desktop">🖥 Desktop</option>
+        </select>
+      </div>
+      <div style="min-width:130px">
+        <label class="lbl" style="margin-bottom:4px">Crawl depth</label>
+        <select id="sa-depth" class="inp">
+          <option value="1">1 page (fast)</option>
+          <option value="10">10 pages</option>
+          <option value="25" selected>25 pages</option>
+          <option value="50">50 pages</option>
+        </select>
+      </div>
+      <div style="padding-top:18px">
+        <button class="btn btn-primary" onclick="saRun()">🏥 Run Audit</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="sa-status" style="display:none" class="card mb10">
+    <div id="sa-status-text" style="font-size:12px;color:var(--win-blue)">Auditing…</div>
+    <div class="progress-bar mt4"><div id="sa-progress" class="progress-fill" style="width:0%"></div></div>
+    <div id="sa-crawl-log" style="font-size:10px;opacity:.6;margin-top:4px;max-height:60px;overflow-y:auto"></div>
+  </div>
+
+  <!-- Score cards -->
+  <div id="sa-scores" style="display:none" class="mb10">
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      ${['performance','seo','accessibility','best-practices'].map(k=>`
+      <div style="background:var(--win-card-bg);border:1px solid var(--win-btn-sh);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
+        <div id="sa-score-${k}" style="font-size:32px;font-weight:800;color:#ccc">—</div>
+        <div style="font-size:11px;opacity:.7;margin-top:2px">${{performance:'⚡ Performance',seo:'🔍 SEO',accessibility:'♿ Accessibility','best-practices':'✅ Best Practices'}[k]}</div>
+      </div>`).join('')}
+    </div>
+  </div>
+
+  <!-- Core Web Vitals -->
+  <div id="sa-cwv" style="display:none" class="card mb10">
+    <div class="card-title">⚡ Core Web Vitals</div>
+    <div id="sa-cwv-inner" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+  </div>
+
+  <!-- Issues -->
+  <div id="sa-issues" style="display:none" class="card mb10">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🚨 Issues Found</span>
+      <span id="sa-issue-count" style="font-size:11px;opacity:.7"></span>
+    </div>
+    <div id="sa-issues-inner"></div>
+  </div>
+
+  <!-- Top Pages crawl results -->
+  <div id="sa-pages" style="display:none" class="card mb10">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>📄 Crawled Pages</span>
+      <button class="btn btn-ghost btn-xs" onclick="saExportCSV()">📥 CSV</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="background:var(--win-btn-bg);text-align:left">
+          <th style="padding:6px 8px">URL</th>
+          <th style="padding:6px 8px">Status</th>
+          <th style="padding:6px 8px">Title</th>
+          <th style="padding:6px 8px">H1</th>
+          <th style="padding:6px 8px">Meta Desc</th>
+          <th style="padding:6px 8px">Issues</th>
+        </tr></thead>
+        <tbody id="sa-pages-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- GSC Keywords -->
+  <div id="sa-keywords" style="display:none" class="card mb10">
+    <div class="card-title">🔑 Keywords Ranking For (GSC)</div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="background:var(--win-btn-bg);text-align:left">
+          <th style="padding:6px 8px">Keyword</th>
+          <th style="padding:6px 8px">Position</th>
+          <th style="padding:6px 8px">Clicks</th>
+          <th style="padding:6px 8px">Impressions</th>
+          <th style="padding:6px 8px">CTR</th>
+          <th style="padding:6px 8px">Top Page</th>
+        </tr></thead>
+        <tbody id="sa-kw-tbody"></tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+// ── Site Audit Logic ───────────────────────────────────────────────────────
+let _saPages=[];
+
+async function saRun(){
+  const url=(document.getElementById('sa-url')?.value||'').trim();
+  if(!url||!url.startsWith('http')){ toast('Enter a valid URL starting with https://','w'); return; }
+  const device=document.getElementById('sa-device')?.value||'mobile';
+  const depth=parseInt(document.getElementById('sa-depth')?.value)||25;
+  const psiKey=localStorage.getItem('sa_psi_key')||'';
+  const gscToken=localStorage.getItem('blc_gsc_token')||'';
+  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+
+  _saPages=[];
+  const statusEl=document.getElementById('sa-status');
+  const statusText=document.getElementById('sa-status-text');
+  const progress=document.getElementById('sa-progress');
+  const crawlLog=document.getElementById('sa-crawl-log');
+  statusEl.style.display='';
+  ['sa-scores','sa-cwv','sa-issues','sa-pages','sa-keywords'].forEach(id=>document.getElementById(id).style.display='none');
+
+  function setStatus(msg,pct){ statusText.textContent=msg; progress.style.width=pct+'%'; }
+  function log(msg){ crawlLog.insertAdjacentHTML('beforeend','<div>'+msg+'</div>'); crawlLog.scrollTop=crawlLog.scrollHeight; }
+
+  try{
+    // Step 1: PageSpeed Insights
+    if(psiKey){
+      setStatus('⚡ Running PageSpeed Insights…',5);
+      const psiUrl=`https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=${device}&key=${psiKey}&category=performance&category=seo&category=accessibility&category=best-practices`;
+      let psiData;
+      try{
+        if(vercelBase){
+          const r=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:psiUrl,method:'GET',timeout:30})});
+          const j=await r.json(); psiData=j.body||JSON.parse(j.text||'null');
+        } else {
+          const r=await fetch(psiUrl); psiData=await r.json();
+        }
+        saRenderPSI(psiData);
+      }catch(e){ log('PSI error: '+e.message); }
+    } else {
+      log('ℹ No PSI key — add one above for Core Web Vitals scores');
+    }
+
+    // Step 2: Crawl pages
+    setStatus('🕷 Crawling site…',20);
+    const visited=new Set(), queue=[url], issues=[];
+    const base=new URL(url).origin;
+
+    while(queue.length&&visited.size<depth){
+      const pageUrl=queue.shift();
+      if(visited.has(pageUrl)) continue;
+      visited.add(pageUrl);
+      log('🔍 '+pageUrl);
+      setStatus(`🕷 Crawling… (${visited.size}/${depth})`, 20+Math.round(visited.size/depth*60));
+
+      try{
+        let html='', status=0;
+        if(vercelBase){
+          const r=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:pageUrl,method:'GET',timeout:15,returnCookies:false})});
+          const j=await r.json(); html=j.text||''; status=j.status_code||j.status||0;
+        } else {
+          const r=await fetch(pageUrl,{signal:AbortSignal.timeout(10000)}); html=await r.text(); status=r.status;
+        }
+
+        const doc=new DOMParser().parseFromString(html,'text/html');
+        const title=(doc.querySelector('title')?.textContent||'').trim();
+        const h1=(doc.querySelector('h1')?.textContent||'').trim();
+        const metaDesc=(doc.querySelector('meta[name="description"]')?.content||'').trim();
+        const canonical=(doc.querySelector('link[rel="canonical"]')?.href||'');
+        const robots=(doc.querySelector('meta[name="robots"]')?.content||'');
+        const isNoIndex=/noindex/i.test(robots);
+        const pageIssues=[];
+
+        if(!title) pageIssues.push({sev:'error',msg:'Missing title tag'});
+        else if(title.length<30) pageIssues.push({sev:'warn',msg:`Title too short (${title.length} chars)`});
+        else if(title.length>60) pageIssues.push({sev:'warn',msg:`Title too long (${title.length} chars)`});
+        if(!h1) pageIssues.push({sev:'warn',msg:'No H1 tag'});
+        if(!metaDesc) pageIssues.push({sev:'warn',msg:'Missing meta description'});
+        else if(metaDesc.length<80) pageIssues.push({sev:'info',msg:`Meta desc short (${metaDesc.length} chars)`});
+        else if(metaDesc.length>160) pageIssues.push({sev:'warn',msg:`Meta desc long (${metaDesc.length} chars)`});
+        if(isNoIndex) pageIssues.push({sev:'warn',msg:'Noindex detected'});
+        if(status>=400) pageIssues.push({sev:'error',msg:`HTTP ${status}`});
+        if(canonical&&canonical!==pageUrl&&canonical!==pageUrl+'/') pageIssues.push({sev:'info',msg:'Non-self canonical'});
+
+        // Check images for alt text
+        const imgs=doc.querySelectorAll('img:not([alt])');
+        if(imgs.length>0) pageIssues.push({sev:'info',msg:`${imgs.length} images missing alt`});
+
+        _saPages.push({url:pageUrl, status, title, h1, metaDesc, robots, issues:pageIssues});
+        issues.push(...pageIssues.map(i=>({...i,url:pageUrl})));
+
+        // Extract internal links for queue
+        if(visited.size<depth){
+          doc.querySelectorAll('a[href]').forEach(a=>{
+            try{
+              const abs=new URL(a.getAttribute('href'),pageUrl).href;
+              if(abs.startsWith(base)&&!visited.has(abs)&&!queue.includes(abs)&&!abs.includes('#')&&!abs.match(/\.(pdf|jpg|png|gif|zip|css|js)$/i)){
+                queue.push(abs);
+              }
+            }catch{}
+          });
+        }
+      }catch(e){ _saPages.push({url:pageUrl,status:'err',title:'',h1:'',metaDesc:'',issues:[{sev:'error',msg:'Fetch error: '+e.message}]}); }
+      await new Promise(r=>setTimeout(r,300));
+    }
+
+    // Step 3: Render crawl results
+    setStatus('📊 Building report…',85);
+    saRenderIssues(issues);
+    saRenderPages();
+
+    // Step 4: GSC keywords
+    if(gscToken){
+      setStatus('🔑 Fetching GSC keywords…',90);
+      try{
+        const domain=new URL(url).hostname;
+        const siteUrl='sc-domain:'+domain;
+        const apiUrl='https://www.googleapis.com/webmasters/v3/sites/'+encodeURIComponent(siteUrl)+'/searchAnalytics/query';
+        const body=JSON.stringify({startDate:'2024-01-01',endDate:new Date().toISOString().slice(0,10),dimensions:['query','page'],rowLimit:100,orderBy:[{fieldName:'clicks',sortOrder:'DESCENDING'}]});
+        let kwData;
+        if(vercelBase){
+          const r=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:apiUrl,method:'POST',headers:{Authorization:'Bearer '+gscToken,'Content-Type':'application/json'},body,timeout:20})});
+          const j=await r.json(); kwData=j.body||JSON.parse(j.text||'null');
+        } else {
+          const r=await fetch(apiUrl,{method:'POST',headers:{Authorization:'Bearer '+gscToken,'Content-Type':'application/json'},body}); kwData=await r.json();
+        }
+        if(kwData?.rows) saRenderKeywords(kwData.rows);
+      }catch(e){ log('GSC error: '+e.message); }
+    }
+
+    setStatus('✅ Audit complete!',100);
+    setTimeout(()=>statusEl.style.display='none',1500);
+  }catch(err){
+    setStatus('❌ Error: '+err.message,0);
+    toast('Audit failed: '+err.message,'e');
+  }
+}
+
+function saScoreColor(n){ return n>=90?'var(--win-green)':n>=50?'#ff9800':'#f44'; }
+
+function saRenderPSI(data){
+  if(!data?.lighthouseResult) return;
+  const cats=data.lighthouseResult.categories||{};
+  ['performance','seo','accessibility','best-practices'].forEach(k=>{
+    const el=document.getElementById('sa-score-'+k);
+    if(!el) return;
+    const score=Math.round((cats[k]?.score||0)*100);
+    el.textContent=score; el.style.color=saScoreColor(score);
+  });
+  document.getElementById('sa-scores').style.display='';
+
+  // CWV
+  const metrics=data.lighthouseResult.audits||{};
+  const cwvItems=[
+    {id:'largest-contentful-paint',label:'LCP',unit:''},
+    {id:'total-blocking-time',label:'TBT',unit:''},
+    {id:'cumulative-layout-shift',label:'CLS',unit:''},
+    {id:'first-contentful-paint',label:'FCP',unit:''},
+    {id:'speed-index',label:'Speed Index',unit:''},
+    {id:'interactive',label:'TTI',unit:''},
+  ];
+  const cwvEl=document.getElementById('sa-cwv-inner');
+  cwvEl.innerHTML=cwvItems.map(item=>{
+    const audit=metrics[item.id];
+    if(!audit) return '';
+    const score=Math.round((audit.score||0)*100);
+    const val=audit.displayValue||'—';
+    return `<div style="background:var(--win-btn-bg);padding:10px 14px;border-radius:6px;text-align:center;min-width:100px">
+      <div style="font-size:16px;font-weight:700;color:${saScoreColor(score)}">${val}</div>
+      <div style="font-size:11px;opacity:.7;margin-top:2px">${item.label}</div>
+    </div>`;
+  }).join('');
+  document.getElementById('sa-cwv').style.display='';
+}
+
+function saRenderIssues(issues){
+  const el=document.getElementById('sa-issues');
+  const inner=document.getElementById('sa-issues-inner');
+  const errors=issues.filter(i=>i.sev==='error');
+  const warns=issues.filter(i=>i.sev==='warn');
+  const infos=issues.filter(i=>i.sev==='info');
+  document.getElementById('sa-issue-count').textContent=`${errors.length} errors · ${warns.length} warnings · ${infos.length} notices`;
+  const groups=[{label:'❌ Errors',items:errors,color:'#f44'},{label:'⚠️ Warnings',items:warns,color:'#ff9800'},{label:'ℹ️ Notices',items:infos,color:'var(--win-blue)'}];
+  inner.innerHTML=groups.filter(g=>g.items.length).map(g=>`
+    <div style="margin-bottom:8px">
+      <div style="font-size:11px;font-weight:700;color:${g.color};margin-bottom:4px">${g.label} (${g.items.length})</div>
+      ${g.items.slice(0,20).map(i=>`<div style="font-size:11px;padding:3px 8px;border-left:2px solid ${g.color};margin-bottom:2px;opacity:.9">
+        <span style="color:${g.color}">${i.msg}</span> — <a href="${i.url}" target="_blank" style="color:var(--win-blue);word-break:break-all">${i.url.length>70?i.url.slice(0,70)+'…':i.url}</a>
+      </div>`).join('')}
+      ${g.items.length>20?`<div style="font-size:10px;opacity:.5;margin-top:4px">…and ${g.items.length-20} more</div>`:''}
+    </div>`).join('');
+  el.style.display='';
+}
+
+function saRenderPages(){
+  const tbody=document.getElementById('sa-pages-tbody');
+  tbody.innerHTML=_saPages.map(p=>{
+    const issCount=p.issues.length;
+    const statusColor=p.status>=400?'#f44':p.status>=300?'#ff9800':'var(--win-green)';
+    return `<tr style="border-top:1px solid var(--win-btn-sh)">
+      <td style="padding:5px 8px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${p.url}" target="_blank" style="color:var(--win-blue)">${p.url}</a></td>
+      <td style="padding:5px 8px"><span style="color:${statusColor};font-weight:700">${p.status}</span></td>
+      <td style="padding:5px 8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.title}">${p.title||'<span style="opacity:.4">missing</span>'}</td>
+      <td style="padding:5px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.h1}">${p.h1||'<span style="opacity:.4">missing</span>'}</td>
+      <td style="padding:5px 8px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.metaDesc}">${p.metaDesc?p.metaDesc.slice(0,50)+'…':'<span style="opacity:.4">missing</span>'}</td>
+      <td style="padding:5px 8px"><span style="color:${issCount>0?'#ff9800':'var(--win-green)'}">${issCount} issue${issCount!==1?'s':''}</span></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('sa-pages').style.display='';
+}
+
+function saRenderKeywords(rows){
+  const tbody=document.getElementById('sa-kw-tbody');
+  tbody.innerHTML=rows.map(r=>{
+    const pos=r.position?.toFixed(1)||'—';
+    const posColor=r.position<=3?'var(--win-green)':r.position<=10?'#ff9800':'inherit';
+    const ctr=r.ctr!=null?(r.ctr*100).toFixed(1)+'%':'—';
+    return `<tr style="border-top:1px solid var(--win-btn-sh)">
+      <td style="padding:5px 8px;font-weight:600">${r.keys?.[0]||'—'}</td>
+      <td style="padding:5px 8px;font-weight:700;color:${posColor}">#${pos}</td>
+      <td style="padding:5px 8px">${r.clicks||0}</td>
+      <td style="padding:5px 8px">${r.impressions||0}</td>
+      <td style="padding:5px 8px">${ctr}</td>
+      <td style="padding:5px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${r.keys?.[1]||''}" target="_blank" style="color:var(--win-blue)">${r.keys?.[1]||'—'}</a></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('sa-keywords').style.display='';
+}
+
+function saExportCSV(){
+  if(!_saPages.length){ toast('No data to export','w'); return; }
+  const header='URL,Status,Title,H1,Meta Description,Issues\n';
+  const rows=_saPages.map(p=>[p.url,p.status,p.title,p.h1,p.metaDesc,p.issues.map(i=>i.msg).join('; ')].map(v=>`"${(v||'').toString().replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob=new Blob([header+rows],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='site-audit.csv'; a.click();
+  toast('CSV exported','s');
+}
+
 function renderAnalyticsHub(el){
   renderTabHub(el||document.getElementById('page-analytics_hub'), {
     title:'📊 Analytics Hub', sub:'// All analytics & monitoring',ns:'ah',

@@ -13014,10 +13014,19 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
       const txt = await proxyRes.text();
       let d; try{ d=JSON.parse(txt); }catch(e){ throw new Error('Proxy returned non-JSON (HTTP '+proxyRes.status+'): '+txt.slice(0,100)); }
       if(d.ok && d.url){
-        if(onProgress) onProgress(100,'\u2705 Live! \u2192 '+d.url);
-        return { url:d.url, identifier:d.identifier||'' };
+        if(onProgress) onProgress(95,'Verifying upload...');
+        await sleep(2000);
+        if(d.fileConfirmed===false){
+          // Item created but file may be missing — PDF was likely too large for proxy body limit
+          // Fall through to direct browser upload as recovery
+          if(onProgress) onProgress(40,'File missing on server, trying direct upload...');
+        } else {
+          if(onProgress) onProgress(100,'\u2705 Live! \u2192 '+d.url);
+          return { url:d.url, identifier:d.identifier||'' };
+        }
+      } else {
+        throw new Error(d.error||'Proxy upload failed');
       }
-      throw new Error(d.error||'Proxy upload failed');
     }catch(proxyErr){
       if(onProgress) onProgress(40,'Proxy failed, trying direct upload...');
       // fall through to Strategy 2

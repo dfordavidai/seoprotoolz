@@ -2530,7 +2530,14 @@ function switchPage(id){
   });
   document.querySelectorAll('.page').forEach(el=>{ el.classList.remove('active'); });
   const el=document.getElementById('page-'+id);
-  if(el){ el.classList.add('active'); }
+  if(el){
+    el.classList.add('active');
+    // Clear rendered guard so page re-renders correctly on return navigation
+    delete el.dataset.rendered;
+  }
+  // Reset content scroll to top on page switch
+  const contentArea = document.querySelector('.content');
+  if(contentArea) contentArea.scrollTop = 0;
   renderPage(id);
 }
 function switchPlatform(id){
@@ -12861,6 +12868,51 @@ const PDF_STATE = {
   settings:{ density:'rich', font:'helvetica', color:'#0057ff', includeLinks:true, includeSchema:true, addTOC:true }
 };
 
+/* ── PDF PERSISTENCE ── */
+function pdfSaveJobs(){
+  try{
+    // Store metadata only (no pdfBytes — too large for localStorage)
+    const saveable = PDF_STATE.jobs.map(j=>({
+      id:j.id, keyword:j.keyword, title:j.title, template:j.template,
+      density:j.density, backlinks:j.backlinks, color:j.color,
+      status:j.status, statusMsg:j.statusMsg, ts:j.ts,
+      wordCount:j.wordCount, lsiUsed:j.lsiUsed, hasSchema:j.hasSchema,
+      hasTOC:j.hasTOC, titleOptimized:j.titleOptimized, aiGenerated:j.aiGenerated,
+      seoScore:j.seoScore, uploadedTo:j.uploadedTo||[], log:j.log||[],
+      imgLink:j.imgLink||'',
+      // Store pdfBytes as base64 if small enough (<2MB)
+      pdfB64: (j.pdfBytes && j.pdfBytes.byteLength < 2097152)
+        ? (()=>{ try{ const b=new Uint8Array(j.pdfBytes); let s=''; const c=8192; for(let i=0;i<b.length;i+=c) s+=btoa(String.fromCharCode(...b.subarray(i,i+c))); return s; }catch(e){ return null; } })()
+        : null
+    }));
+    localStorage.setItem('pdf_state_jobs_v2', JSON.stringify(saveable));
+  }catch(e){ console.warn('pdfSaveJobs:', e.message); }
+}
+
+function pdfLoadJobs(){
+  try{
+    const raw = localStorage.getItem('pdf_state_jobs_v2');
+    if(!raw) return;
+    const saved = JSON.parse(raw);
+    PDF_STATE.jobs = saved.map(j=>{
+      // Restore pdfBytes from base64 if present
+      let pdfBytes = null;
+      if(j.pdfB64){
+        try{
+          const bin = atob(j.pdfB64);
+          const buf = new Uint8Array(bin.length);
+          for(let i=0;i<bin.length;i++) buf[i]=bin.charCodeAt(i);
+          pdfBytes = buf.buffer;
+        }catch(e){}
+      }
+      return { ...j, pdfBytes, sections:[] };
+    });
+  }catch(e){ console.warn('pdfLoadJobs:', e.message); }
+}
+
+// Load persisted jobs immediately
+pdfLoadJobs();
+
 /* ── PLATFORM REGISTRY — 20 platforms with real upload intel ── */
 const PDF_PLATFORMS = [
   { id:'archive',     name:'Internet Archive', icon:'🏛️', da:94, free:true,  indexed:true,  method:'s3_api',
@@ -12941,13 +12993,35 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
     'x-archive-auto-make-bucket':'1',
   };
   if(onProgress) onProgress(10,'Connecting to Archive.org S3...');
-  const url = 'https://s3.us.archive.org/'+identifier+'/'+filename;
-  const res = await fetch(url,{method:'PUT',headers,body:pdfBytes});
-  if(!res.ok) throw new Error('Archive.org upload failed: HTTP '+res.status);
+  const uploadUrl = 'https://s3.us.archive.org/'+identifier+'/'+filename;
+  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  let res;
+  if(vercelBase){
+    // Route through Vercel proxy to bypass CORS
+    if(onProgress) onProgress(20,'Uploading via proxy...');
+    const proxyRes = await fetch(vercelBase+'/api/proxy',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        url:uploadUrl,
+        method:'PUT',
+        headers,
+        bodyBase64: (()=>{ const b=new Uint8Array(pdfBytes); let s=''; const c=8192; for(let i=0;i<b.length;i+=c) s+=btoa(String.fromCharCode(...b.subarray(i,i+c))); return s; })(),
+        timeout:60
+      })
+    });
+    const proxyData = await proxyRes.json();
+    if(proxyData.status&&proxyData.status>=400) throw new Error('Archive.org upload failed: HTTP '+proxyData.status);
+  } else {
+    // Direct browser upload (may fail with CORS on some browsers)
+    if(onProgress) onProgress(20,'Uploading directly (set Vercel URL in Settings to avoid CORS issues)...');
+    res = await fetch(uploadUrl,{method:'PUT',headers,body:pdfBytes});
+    if(!res.ok) throw new Error('Archive.org upload failed: HTTP '+res.status+' — Set Vercel URL in Settings to bypass CORS');
+  }
   if(onProgress) onProgress(80,'Upload complete, waiting for processing...');
   await sleep(3000);
   const liveUrl = 'https://archive.org/details/'+identifier;
-  if(onProgress) onProgress(100,'Live!');
+  if(onProgress) onProgress(100,'Live! → '+liveUrl);
   return { url:liveUrl, identifier };
 }
 
@@ -13567,6 +13641,7 @@ async function pdfAddJob(){
     aiGenerated:!!groqKey
   };
   PDF_STATE.jobs.unshift(job);
+  pdfSaveJobs();
   pdfRenderQueue();
   pdfSetJobStatus(job.id,'building','⏳ Generating AI content...');
 
@@ -13596,7 +13671,7 @@ async function pdfAddJob(){
     pdfLog(job.id,'✅ PDF built — '+(job.pdfBytes.byteLength/1024).toFixed(1)+' KB','success');
   }catch(e){
     pdfLog(job.id,'PDF build error: '+e.message,'error');
-    job.status='error'; pdfRenderQueue(); return;
+    job.status='error'; pdfSaveJobs(); pdfRenderQueue(); return;
   }
 
   job.status='ready';
@@ -13604,6 +13679,7 @@ async function pdfAddJob(){
   job.seoScore = score;
   pdfLog(job.id,'SEO Score: '+score.score+'/100','success');
   pdfSetJobStatus(job.id,'ready','✅ Ready — SEO: '+score.score+'/100');
+  pdfSaveJobs();
   pdfRenderQueue();
   pdfUpdateStats();
   pdfToast('PDF built! SEO Score: '+score.score+'/100 — ready to blast','success');
@@ -13666,10 +13742,31 @@ async function pdfBlastJob(jobId){
 
   job.uploadedTo = results;
   job.status = results.some(r=>r.status==='live') ? 'live' : 'manual';
+  pdfSaveJobs();
   pdfRenderQueue();
   pdfUpdateStats();
   const liveCount = results.filter(r=>r.status==='live').length;
   pdfLog(jobId,'Blast done — '+liveCount+'/'+results.length+' live uploads','success');
+  // Auto-show results modal if there are live uploads
+  if(liveCount > 0){
+    setTimeout(()=>{
+      const blastModal=document.getElementById('pdf-blast-modal');
+      if(blastModal){
+        // Add a prominent Results button to blast modal
+        const footer = blastModal.querySelector('.modal-box > div:last-child');
+        if(footer && !footer.querySelector('.btn-results-added')){
+          const rb=document.createElement('button');
+          rb.className='btn btn-primary btn-results-added';
+          rb.style.background='var(--win-green)';
+          rb.textContent='🔗 View '+liveCount+' Live URL'+(liveCount>1?'s':'');
+          rb.onclick=()=>{ blastModal.remove(); pdfShowBlastResults(jobId); };
+          footer.prepend(rb);
+        }
+      } else {
+        pdfShowBlastResults(jobId);
+      }
+    }, 500);
+  }
 }
 
 function showBlastModal(job, platformIds){
@@ -13733,6 +13830,67 @@ function pdfExportBlastResults(jobId){
   a.click();
 }
 
+/* ── BLAST RESULTS PANEL — shows live URLs after upload ── */
+function pdfShowBlastResults(jobId){
+  const job=PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(!job||!job.uploadedTo||!job.uploadedTo.length) return;
+  const existing=document.getElementById('pdf-blast-results-modal');
+  if(existing) existing.remove();
+  const liveResults=job.uploadedTo.filter(r=>r.status==='live'&&r.url);
+  const manualResults=job.uploadedTo.filter(r=>r.status==='manual');
+  const errorResults=job.uploadedTo.filter(r=>r.status==='error');
+  const modal=document.createElement('div');
+  modal.className='modal-overlay'; modal.id='pdf-blast-results-modal';
+  modal.onclick=e=>{if(e.target===modal)modal.remove();};
+  modal.innerHTML=`<div class="modal-box" style="min-width:640px;max-width:96vw;max-height:90vh;overflow-y:auto">
+    <div class="modal-title">📊 Blast Results — "${esc(job.title)}"
+      <button class="btn btn-ghost btn-xs" onclick="document.getElementById('pdf-blast-results-modal')?.remove()">✕</button>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="background:var(--win-btn-bg);padding:10px 18px;border-radius:6px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:var(--win-green)">${liveResults.length}</div>
+        <div style="font-size:11px;opacity:.7">Live Uploads</div>
+      </div>
+      <div style="background:var(--win-btn-bg);padding:10px 18px;border-radius:6px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:var(--win-yellow)">${manualResults.length}</div>
+        <div style="font-size:11px;opacity:.7">Manual Required</div>
+      </div>
+      <div style="background:var(--win-btn-bg);padding:10px 18px;border-radius:6px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:var(--win-red)">${errorResults.length}</div>
+        <div style="font-size:11px;opacity:.7">Errors</div>
+      </div>
+    </div>
+    ${liveResults.length ? `
+    <div style="font-size:11px;font-weight:700;padding:5px 8px;background:var(--win-green);color:#fff;margin-bottom:6px">✅ LIVE UPLOAD URLs — Copy &amp; Use for SEO</div>
+    ${liveResults.map(r=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:8px;margin-bottom:4px;background:var(--surface);border:1px solid var(--border);border-radius:6px">
+      <span style="font-size:15px">${r.icon||'📄'}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:11px">${esc(r.name)} <span class="badge badge-g">DA${r.da}</span></div>
+        <a href="${esc(r.url)}" target="_blank" style="color:var(--accent);font-family:var(--mono);font-size:10px;word-break:break-all">${esc(r.url)}</a>
+      </div>
+      <button class="btn btn-ghost btn-xs" onclick="navigator.clipboard.writeText('${esc(r.url)}');pdfToast('Copied!','success')">📋 Copy</button>
+      <a href="${esc(r.url)}" target="_blank" class="btn btn-primary btn-xs">🔗 Open</a>
+    </div>`).join('')}` : ''}
+    ${manualResults.length ? `
+    <div style="font-size:11px;font-weight:700;padding:5px 8px;background:var(--win-yellow);color:#000;margin-top:8px;margin-bottom:6px">📋 Manual Upload Required (Cookie Needed)</div>
+    ${manualResults.map(r=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:8px;margin-bottom:4px;background:var(--surface);border:1px solid var(--border);border-radius:6px;opacity:.85">
+      <span style="font-size:15px">${r.icon||'📄'}</span>
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:11px">${esc(r.name)} <span class="badge badge-y">Manual</span></div>
+        <div style="font-size:10px;color:var(--muted2)">${esc(r.note||'Login and upload PDF manually')}</div>
+      </div>
+      ${r.url ? `<a href="${esc(r.url)}" target="_blank" class="btn btn-ghost btn-xs">Open Upload</a>` : ''}
+    </div>`).join('')}` : ''}
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="pdfExportBlastResults('${jobId}')">📥 Export CSV</button>
+      <button class="btn btn-primary" onclick="document.getElementById('pdf-blast-results-modal')?.remove()">Close</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
 function pdfPreviewJob(jobId){
   const job = PDF_STATE.jobs.find(j=>j.id===jobId);
   if(!job||!job.pdfBytes){ pdfToast('PDF not built yet','warn'); return; }
@@ -13751,6 +13909,7 @@ function pdfPreviewJob(jobId){
 
 function pdfRemoveJob(jobId){
   PDF_STATE.jobs=PDF_STATE.jobs.filter(j=>j.id!==jobId);
+  pdfSaveJobs();
   pdfRenderQueue(); pdfUpdateStats();
 }
 
@@ -13954,7 +14113,7 @@ function pdfRenderQueue(){
         ${job.status==='ready'||job.status==='live'||job.status==='manual'?`<button class="btn btn-primary btn-xs" onclick="showBlastPicker('${job.id}')">🚀 Blast</button>`:'' }
         ${job.pdfBytes?`<button class="btn btn-blue btn-xs" onclick="pdfPreviewJob('${job.id}')">👁</button>
         <button class="btn btn-ghost btn-xs" onclick="pdfDownloadJob('${job.id}')">⬇</button>`:''}
-        ${job.uploadedTo&&job.uploadedTo.length?`<button class="btn btn-ghost btn-xs" onclick="pdfExportBlastResults('${job.id}')">📥</button>`:''}
+        ${job.uploadedTo&&job.uploadedTo.length?`<button class="btn btn-primary btn-xs" style="background:var(--win-green)" onclick="pdfShowBlastResults('${job.id}')">🔗 Results</button><button class="btn btn-ghost btn-xs" onclick="pdfExportBlastResults('${job.id}')">📥</button>`:''}
         <button class="btn btn-danger btn-xs" onclick="pdfRemoveJob('${job.id}')">✕</button>
       </td>
     </tr>`;
@@ -14065,8 +14224,10 @@ async function pdfBlastPickerGo(jobId){
   const vercelBase=PDF_STATE.vercelBase;
   const results=await pdfBlastPlatformsV2(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{updateBlastRow(pid,status,url,pct,msg);});
   job.uploadedTo=results; job.status=results.some(r=>r.status==='live')?'live':'manual';
+  pdfSaveJobs();
   pdfRenderQueue(); pdfUpdateStats();
   pdfLog(jobId,'Blast done — '+results.filter(r=>r.status==='live').length+'/'+results.length+' live uploads','success');
+  pdfShowBlastResults(jobId);
 }
 
 /* ── BLAST ENGINE v2 ── */
@@ -14127,8 +14288,10 @@ window.pdfBlastJob = async function(jobId, sel){
   const vercelBase=PDF_STATE.vercelBase;
   const results=await pdfBlastPlatformsV2(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{updateBlastRow(pid,status,url,pct,msg);});
   job.uploadedTo=results; job.status=results.some(r=>r.status==='live')?'live':'manual';
+  pdfSaveJobs();
   pdfRenderQueue(); pdfUpdateStats();
   pdfLog(jobId,'Blast done — '+results.filter(r=>r.status==='live').length+'/'+results.length+' live uploads','success');
+  pdfShowBlastResults(jobId);
 };
 
 /* ══════════════════════════════════════════════════════════════
@@ -23057,9 +23220,16 @@ window.hubSwitch = function(ns, tab, allTabs){
 // ═══════════════════════════════════════════════════════════════
 function renderBacklinkChecker(el){
   if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
+  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
   el.innerHTML=`
   <div class="page-title">🔎 Backlink Checker</div>
   <div class="page-sub">// Find who links to any domain or URL — Common Crawl (free, no key) + Bing Webmaster API (free key)</div>
+
+  <div id="blc-cors-warn" class="notice notice-warn" style="margin-bottom:10px;font-size:11px;display:${vercelBase?'none':''}">
+    ⚠️ <strong>CORS Warning:</strong> Common Crawl direct requests are blocked by the browser without a proxy.
+    <strong>Set your Vercel URL in <a href="#" onclick="switchPage('settings');return false;" style="color:inherit;text-decoration:underline">Settings</a></strong> to route requests through your backend and get real results.
+    Without it, Common Crawl may return 0 results.
+  </div>
 
   <div class="card" style="margin-bottom:10px">
     <div class="card-title">🔑 API Keys (optional — Common Crawl works without any key)</div>
@@ -23099,6 +23269,11 @@ function renderBacklinkChecker(el){
   <div id="blc-status" style="display:none" class="card" style="margin-bottom:10px">
     <div id="blc-status-text" style="font-size:12px;color:var(--win-blue)">Checking…</div>
     <div class="progress-bar mt4"><div id="blc-progress" class="progress-fill" style="width:0%"></div></div>
+  </div>
+
+  <div id="blc-no-results-hint" class="notice notice-warn" style="display:none;margin-bottom:10px;font-size:11px">
+    ⚠️ 0 results returned. This is likely a <strong>CORS block</strong> — Common Crawl's API cannot be called directly from the browser.
+    <strong>Go to <a href="#" onclick="switchPage('settings');return false;" style="color:inherit;text-decoration:underline">Settings</a> → set your Vercel URL</strong> (e.g. https://seoprotoolz.vercel.app) to route requests through your backend proxy.
   </div>
 
   <div id="blc-summary" style="display:none" class="card mb10">
@@ -23143,9 +23318,14 @@ async function blcRun(){
   const source=document.getElementById('blc-source')?.value||'commoncrawl';
   const bingKey=localStorage.getItem('blc_bing_key')||'';
   const gscToken=localStorage.getItem('blc_gsc_token')||'';
+  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
 
   if(source==='bing'&&!bingKey){ toast('Add your Bing Webmaster API key above','w'); return; }
   if(source==='gsc'&&!gscToken){ toast('Add your GSC OAuth token above','w'); return; }
+
+  // Show CORS warning if no Vercel URL is configured
+  const corsWarn = document.getElementById('blc-cors-warn');
+  if(corsWarn) corsWarn.style.display = vercelBase ? 'none' : '';
 
   _blcRows=[]; _blcFiltered=[]; _blcPage=0;
   const statusEl=document.getElementById('blc-status');
@@ -23187,6 +23367,10 @@ async function blcRun(){
     _blcFiltered=[..._blcRows];
     setStatus(`✅ Done — ${_blcRows.length} unique backlinks found`,100);
     statusEl.style.display='none';
+    if(_blcRows.length===0 && !vercelBase){
+      const noResultsEl=document.getElementById('blc-no-results-hint');
+      if(noResultsEl) noResultsEl.style.display='';
+    }
     blcRenderSummary();
     blcRenderTable();
   }catch(err){
@@ -27380,9 +27564,6 @@ switchPage = function(id){
 updatePlatformBar();
 updateHeader();
 switchPage('dashboard');
-
-
-
 </script>
 </body>
 </html>

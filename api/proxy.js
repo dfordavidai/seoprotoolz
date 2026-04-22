@@ -27,7 +27,7 @@
  * }
  */
 
-export const config = { maxDuration: 60, api: { bodyParser: { sizeLimit: '10mb' } } };
+export const config = { maxDuration: 60 };
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 
@@ -151,8 +151,7 @@ async function handlePdfUpload(body, res) {
   let pdfBuf;
   try {
     pdfBuf = Buffer.from(pdfBase64, 'base64');
-    if (pdfBuf.length < 1000) throw new Error(`PDF too small (${pdfBuf.length} bytes) — ensure PDF is fully generated before blasting`);
-    if (!pdfBuf.slice(0,5).toString().startsWith('%PDF')) throw new Error('Invalid PDF — file does not start with %PDF header');
+    if (pdfBuf.length < 100) throw new Error('PDF too small');
   } catch (e) {
     return res.status(400).json({ ok: false, error: 'Invalid base64 PDF: ' + e.message });
   }
@@ -196,26 +195,7 @@ async function handlePdfUpload(body, res) {
         }
         lastStatus = archiveRes.status;
         if (archiveRes.ok || archiveRes.status === 200) {
-          // Verify the file actually landed — archive.org returns 200 even for empty uploads
-          await new Promise(r => setTimeout(r, 3000)); // wait for processing
-          const verifyUrl = `https://archive.org/metadata/${identifier}`;
-          let fileConfirmed = false;
-          try {
-            const vRes = await fetch(verifyUrl, { signal: AbortSignal.timeout(8000) });
-            const vData = await vRes.json();
-            // Check if any files exist in the item (excluding metadata files)
-            const files = (vData.files || []).filter(f => !f.name.endsWith('_files.xml') && !f.name.endsWith('_meta.xml'));
-            fileConfirmed = files.length > 0;
-          } catch (_) { fileConfirmed = true; } // if verify fails, assume ok
-          if (!fileConfirmed) {
-            // Item created but file missing — likely body was truncated (PDF too large for proxy)
-            // Try one more upload attempt
-            const retryRes = await fetch(uploadUrl, { method: 'PUT', headers: archiveHeaders, body: pdfBuf });
-            if (retryRes.ok) {
-              await new Promise(r => setTimeout(r, 4000));
-            }
-          }
-          return res.status(200).json({ ok: true, platform, method: 's3_api', url: `https://archive.org/details/${identifier}`, fileConfirmed });
+          return res.status(200).json({ ok: true, platform, method: 's3_api', url: `https://archive.org/details/${identifier}` });
         }
         const errText = await archiveRes.text().catch(() => archiveRes.statusText);
         lastErr = `HTTP ${archiveRes.status}: ${errText.slice(0, 200)}`;

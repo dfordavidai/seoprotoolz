@@ -162,30 +162,47 @@ async function handlePdfUpload(body, res) {
       if (!accessKey || !secretKey)
         return res.status(400).json({ ok: false, error: 'Archive.org requires accessKey + secretKey', platform });
 
-      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
-      const identifier = slug + '-' + Date.now().toString(36);
+      const slugId = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
+      const identifier = slugId + '-' + Date.now().toString(36);
       const uploadUrl  = `https://s3.us.archive.org/${identifier}/${encodeURIComponent(filename)}`;
 
-      const archiveRes = await fetch(uploadUrl, {
-        method: 'PUT',
-        headers: {
-          Authorization: `LOW ${accessKey}:${secretKey}`,
-          'Content-Type': 'application/pdf',
-          'x-archive-meta-title': title,
-          'x-archive-meta-subject': keyword || title,
-          'x-archive-meta-mediatype': 'texts',
-          'x-archive-meta-language': 'en',
-          'x-archive-auto-make-bucket': '1',
-          'Content-Length': String(pdfBuf.length),
-        },
-        body: pdfBuf,
-      });
+      const archiveHeaders = {
+        Authorization: `LOW ${accessKey}:${secretKey}`,
+        'Content-Type': 'application/pdf',
+        'Content-Length': String(pdfBuf.length),
+        'x-archive-meta-title': title,
+        'x-archive-meta-subject': keyword || title,
+        'x-archive-meta-description': `Comprehensive guide on ${keyword || title}. SEO-optimized resource.`,
+        'x-archive-meta-mediatype': 'texts',
+        'x-archive-meta-language': 'en',
+        'x-archive-meta-collection': 'opensource',
+        'x-archive-auto-make-bucket': '1',
+      };
 
-      if (archiveRes.ok || archiveRes.status === 200) {
-        return res.status(200).json({ ok: true, platform, method: 's3_api', url: `https://archive.org/details/${identifier}` });
+      // Retry up to 4 times with exponential backoff — handles 503 SlowDown throttling
+      let lastStatus = 0, lastErr = '';
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt > 0) {
+          const delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+          await new Promise(r => setTimeout(r, delay));
+        }
+        let archiveRes;
+        try {
+          archiveRes = await fetch(uploadUrl, { method: 'PUT', headers: archiveHeaders, body: pdfBuf });
+        } catch (fetchErr) {
+          lastErr = fetchErr.message;
+          continue;
+        }
+        lastStatus = archiveRes.status;
+        if (archiveRes.ok || archiveRes.status === 200) {
+          return res.status(200).json({ ok: true, platform, method: 's3_api', url: `https://archive.org/details/${identifier}` });
+        }
+        const errText = await archiveRes.text().catch(() => archiveRes.statusText);
+        lastErr = `HTTP ${archiveRes.status}: ${errText.slice(0, 200)}`;
+        // Only retry on 503 SlowDown — fail fast on auth errors
+        if (archiveRes.status !== 503) break;
       }
-      const errText = await archiveRes.text().catch(() => archiveRes.statusText);
-      return res.status(200).json({ ok: false, platform, error: `Archive.org error ${archiveRes.status}: ${errText.slice(0, 120)}` });
+      return res.status(200).json({ ok: false, platform, error: `Archive.org upload failed after retries — ${lastErr}` });
     }
 
     // ── Issuu API v2 ─────────────────────────────────────────────────────────

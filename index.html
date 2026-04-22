@@ -12990,8 +12990,40 @@ const PDF_PLATFORMS = [
 
 /* ── ARCHIVE.ORG S3 UPLOAD (FULLY AUTOMATED) ── */
 async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, onProgress){
-  const identifier = 'seo-'+slug(keyword)+'-'+(Date.now().toString(36));
   const filename = slug(title)+'.pdf';
+  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
+
+  // Helper: safe JSON parse — never throws on HTML error pages
+  async function safeJson(r){
+    const text = await r.text();
+    try { return JSON.parse(text); }
+    catch(e){ throw new Error('Server returned non-JSON (HTTP '+r.status+'): '+text.slice(0,120)); }
+  }
+
+  // Strategy 1: Server-side proxy via /api/proxy?mode=pdf-upload (no CORS issues)
+  if(vercelBase){
+    if(onProgress) onProgress(10,'Connecting to Archive.org via proxy...');
+    const bytes = new Uint8Array(pdfBytes);
+    let b64=''; const cs=8192;
+    for(let i=0;i<bytes.length;i+=cs) b64+=btoa(String.fromCharCode(...bytes.subarray(i,i+cs)));
+    if(onProgress) onProgress(25,'Uploading to Archive.org S3...');
+    const res = await fetch(vercelBase+'/api/proxy',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mode:'pdf-upload',platform:'archive',pdfBase64:b64,filename,title,keyword,accessKey,secretKey})
+    });
+    const d = await safeJson(res);
+    if(d.ok && d.url){
+      if(onProgress) onProgress(100,'Live! \u2192 '+d.url);
+      return { url:d.url, identifier:d.identifier };
+    }
+    throw new Error(d.error || 'Archive.org upload failed via proxy');
+  }
+
+  // Strategy 2: Direct browser S3 PUT (fallback when no Vercel backend configured)
+  if(onProgress) onProgress(10,'Connecting to Archive.org S3 (direct)...');
+  const identifier = 'seo-'+slug(keyword)+'-'+(Date.now().toString(36));
+  const uploadUrl = 'https://s3.us.archive.org/'+identifier+'/'+filename;
   const headers = {
     'Authorization':'LOW '+accessKey+':'+secretKey,
     'Content-Type':'application/pdf',
@@ -13002,17 +13034,16 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
     'x-archive-meta-collection':'opensource',
     'x-archive-auto-make-bucket':'1',
   };
-  if(onProgress) onProgress(10,'Connecting to Archive.org S3...');
-  const uploadUrl = 'https://s3.us.archive.org/'+identifier+'/'+filename;
-  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
-  // Direct S3 upload — archive.org sends permissive CORS headers (Access-Control-Allow-Origin: *)
   if(onProgress) onProgress(20,'Uploading to Archive.org S3...');
   const res = await fetch(uploadUrl,{method:'PUT',headers,body:pdfBytes});
-  if(!res.ok) throw new Error('Archive.org upload failed: HTTP '+res.status+' — Check your S3 Access/Secret keys at archive.org/account/s3.php');
+  if(!res.ok){
+    const errText = await res.text().catch(()=>'');
+    throw new Error('Archive.org S3 error HTTP '+res.status+' \u2014 '+errText.slice(0,100)+' | Tip: configure Vercel URL in Settings for reliable uploads.');
+  }
   if(onProgress) onProgress(80,'Upload complete, waiting for processing...');
   await sleep(3000);
   const liveUrl = 'https://archive.org/details/'+identifier;
-  if(onProgress) onProgress(100,'Live! → '+liveUrl);
+  if(onProgress) onProgress(100,'Live! \u2192 '+liveUrl);
   return { url:liveUrl, identifier };
 }
 
@@ -13564,10 +13595,11 @@ async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
   }
   const filename = (job.title||job.keyword).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,60)+'.pdf';
   try{
-    const res = await fetch(vercelBase+'/api/upload-pdf',{
+    const res = await fetch(vercelBase+'/api/proxy',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
+        mode: 'pdf-upload',
         platform: plat.id,
         pdfBase64: b64,
         filename,
@@ -13580,9 +13612,10 @@ async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
         apiToken: creds.apiToken||'',
       })
     });
-    const d = await res.json();
+    const text = await res.text();
+    let d; try{ d=JSON.parse(text); }catch(e){ throw new Error('Server error (HTTP '+res.status+'): '+text.slice(0,100)); }
     if(d.ok && d.url){
-      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:d.url, note:d.note||'Auto-uploaded via /api/upload-pdf'};
+      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:d.url, note:d.note||'Auto-uploaded via proxy'};
     }
     // Platform returned manual=true (needs cookie) — download + open upload page
     if(d.manual){
@@ -14241,22 +14274,9 @@ async function pdfBlastPlatformsV2(pdfBytes,job,selectedPlatformIds,credentials,
           secretKey:(credentials.archive&&credentials.archive.secretKey)||PDF_STATE.archiveSecretKey||''
         };
         if(c.accessKey&&c.secretKey){
-          // Always try direct S3 first — archive.org has permissive CORS headers
-          try {
-            const r=await archiveUploadPDF(pdfBytes,job.title,job.keyword,c.accessKey,c.secretKey,(pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg}));
-            result={...result,status:'live',url:r.url,note:'Archive.org S3 ✓'};
-          } catch(directErr){
-            // If direct fails and Vercel is configured, try proxying through it
-            if(vercelBase){
-              const res=await fetch(vercelBase+'/api/upload-pdf',{method:'POST',headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({platform:'archive',pdfBase64:b64,filename,title:job.title,keyword:job.keyword,accessKey:c.accessKey,secretKey:c.secretKey})});
-              const d=await res.json();
-              if(d.ok&&d.url) result={...result,status:'live',url:d.url,note:'Archive.org via Vercel proxy'};
-              else throw new Error(d.error||'Archive upload failed via both direct and proxy');
-            } else {
-              throw directErr;
-            }
-          }
+          // archiveUploadPDF handles proxy-first then direct fallback — safe JSON parsing throughout
+          const r=await archiveUploadPDF(pdfBytes,job.title,job.keyword,c.accessKey,c.secretKey,(pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg}));
+          result={...result,status:'live',url:r.url,note:'Archive.org S3 ✓'};
         } else {
           result.note='Add Archive.org S3 keys in Settings → Archive.org S3 Keys section';
         }

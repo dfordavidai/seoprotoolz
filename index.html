@@ -12865,8 +12865,18 @@ const PDF_STATE = {
   jobs:[],
   groqKey:'',
   vercelBase:'',
+  archiveAccessKey:'',
+  archiveSecretKey:'',
   settings:{ density:'rich', font:'helvetica', color:'#0057ff', includeLinks:true, includeSchema:true, addTOC:true }
 };
+// Auto-populate PDF_STATE from global settings — deferred until after SETTINGS is declared
+function _pdfStateInit(){
+  if(typeof settingGet!=='function') return;
+  PDF_STATE.groqKey          = settingGet('groq_api_key')||'';
+  PDF_STATE.vercelBase       = (settingGet('vercel_url')||'').replace(/\/+$/,'');
+  PDF_STATE.archiveAccessKey = settingGet('pdf_archive_access')||'';
+  PDF_STATE.archiveSecretKey = settingGet('pdf_archive_secret')||'';
+}
 
 /* ── PDF PERSISTENCE ── */
 function pdfSaveJobs(){
@@ -12994,7 +13004,7 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
   };
   if(onProgress) onProgress(10,'Connecting to Archive.org S3...');
   const uploadUrl = 'https://s3.us.archive.org/'+identifier+'/'+filename;
-  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
   let res;
   if(vercelBase){
     // Route through Vercel proxy to bypass CORS
@@ -13720,8 +13730,8 @@ async function pdfBlastJob(jobId){
   // Collect credentials
   const creds = {};
   creds.archive = {
-    accessKey:(document.getElementById('cred-archive-access')||{value:''}).value.trim(),
-    secretKey:(document.getElementById('cred-archive-secret')||{value:''}).value.trim()
+    accessKey:(document.getElementById('cred-archive-access')||{value:''}).value.trim()||PDF_STATE.archiveAccessKey||'',
+    secretKey:(document.getElementById('cred-archive-secret')||{value:''}).value.trim()||PDF_STATE.archiveSecretKey||''
   };
   PDF_PLATFORMS.forEach(p=>{
     const cookieEl = document.getElementById('cred-'+p.id+'-cookie');
@@ -14156,8 +14166,8 @@ function showBlastPicker(jobId){
       <div class="fg" style="margin-bottom:8px" data-cred-pid="archive">
         <label class="lbl">🏛️ Archive.org — S3 Keys (<a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">get free keys</a>)</label>
         <div class="grid2" style="gap:6px">
-          <input type="text" id="bp-cred-archive-access" placeholder="Access Key" style="font-size:10px;font-family:var(--mono)">
-          <input type="password" id="bp-cred-archive-secret" placeholder="Secret Key" style="font-size:10px;font-family:var(--mono)">
+          <input type="text" id="bp-cred-archive-access" placeholder="Access Key" value="${PDF_STATE.archiveAccessKey||''}" style="font-size:10px;font-family:var(--mono)">
+          <input type="password" id="bp-cred-archive-secret" placeholder="Secret Key" value="${PDF_STATE.archiveSecretKey||''}" style="font-size:10px;font-family:var(--mono)">
         </div>
       </div>`;
     if(p.id==='issuu') return `
@@ -14210,8 +14220,8 @@ async function pdfBlastPickerGo(jobId){
   if(!sel.length){pdfToast('Select at least one platform','warn');return;}
   const creds={};
   creds.archive={
-    accessKey:(document.getElementById('bp-cred-archive-access')||{value:''}).value.trim(),
-    secretKey:(document.getElementById('bp-cred-archive-secret')||{value:''}).value.trim(),
+    accessKey:(document.getElementById('bp-cred-archive-access')||{value:''}).value.trim()||PDF_STATE.archiveAccessKey||'',
+    secretKey:(document.getElementById('bp-cred-archive-secret')||{value:''}).value.trim()||PDF_STATE.archiveSecretKey||'',
   };
   creds.issuu={apiToken:(document.getElementById('bp-cred-issuu-token')||{value:''}).value.trim()};
   PDF_PLATFORMS.forEach(p=>{
@@ -14277,8 +14287,8 @@ window.pdfBlastJob = async function(jobId, sel){
   if(!sel.length){pdfToast('No platforms selected','warn');return;}
   const creds={};
   creds.archive={
-    accessKey:(document.getElementById('cred-archive-access')||{value:''}).value.trim(),
-    secretKey:(document.getElementById('cred-archive-secret')||{value:''}).value.trim(),
+    accessKey:(document.getElementById('cred-archive-access')||{value:''}).value.trim()||PDF_STATE.archiveAccessKey||'',
+    secretKey:(document.getElementById('cred-archive-secret')||{value:''}).value.trim()||PDF_STATE.archiveSecretKey||'',
   };
   PDF_PLATFORMS.forEach(p=>{
     const el=document.getElementById('cred-'+p.id+'-cookie');
@@ -14315,8 +14325,8 @@ function renderPDFTools(el){
     <!-- CONFIG BANNER -->
     <div class="notice notice-info" style="margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <strong>⚙ Config:</strong>
-      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-groq-key" placeholder="Groq API Key (llama-3.3-70b)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.groqKey=this.value.trim()"></div>
-      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-vercel-base" placeholder="Vercel Backend URL (https://your.vercel.app)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.vercelBase=this.value.trim().replace(/\\/$/,'')"></div>
+      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-groq-key" placeholder="Groq API Key (llama-3.3-70b)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.groqKey=this.value.trim();if(typeof settingSet==='function')settingSet('groq_api_key',this.value.trim())"></div>
+      <div class="fg" style="flex:1;min-width:200px;margin:0"><input type="text" id="cfg-vercel-base" placeholder="Vercel Backend URL (https://your.vercel.app)" style="font-family:var(--mono);font-size:11px" oninput="PDF_STATE.vercelBase=this.value.trim().replace(/\\/$/,'');if(typeof settingSet==='function')settingSet('vercel_url',PDF_STATE.vercelBase)"></div>
       <div class="fg" style="min-width:120px;margin:0">
         <select id="cfg-groq-model" onchange="_groqModel=this.value" style="font-size:11px">
           ${GROQ_MODELS.map(m=>`<option value="${m}">${m}</option>`).join('')}
@@ -14476,8 +14486,8 @@ function renderPDFTools(el){
             </div>
             <div class="card-title" style="margin-top:4px">🔑 Archive.org S3 (Full Automation)</div>
             <div class="grid2">
-              <div class="fg"><label class="lbl">S3 Access Key</label><input type="text" id="blast-archive-access" placeholder="archive.org access key" oninput="document.getElementById('cred-archive-access')&&(document.getElementById('cred-archive-access').value=this.value)"></div>
-              <div class="fg"><label class="lbl">S3 Secret Key</label><input type="password" id="blast-archive-secret" placeholder="archive.org secret key" oninput="document.getElementById('cred-archive-secret')&&(document.getElementById('cred-archive-secret').value=this.value)"></div>
+              <div class="fg"><label class="lbl">S3 Access Key</label><input type="text" id="blast-archive-access" placeholder="archive.org access key" value="${PDF_STATE.archiveAccessKey||''}" oninput="PDF_STATE.archiveAccessKey=this.value.trim();if(typeof settingSet==='function')settingSet('pdf_archive_access',this.value.trim());document.getElementById('cred-archive-access')&&(document.getElementById('cred-archive-access').value=this.value)"></div>
+              <div class="fg"><label class="lbl">S3 Secret Key</label><input type="password" id="blast-archive-secret" placeholder="archive.org secret key" value="${PDF_STATE.archiveSecretKey||''}" oninput="PDF_STATE.archiveSecretKey=this.value.trim();if(typeof settingSet==='function')settingSet('pdf_archive_secret',this.value.trim());document.getElementById('cred-archive-secret')&&(document.getElementById('cred-archive-secret').value=this.value)"></div>
             </div>
             <div class="notice notice-info" style="margin:8px 0;font-size:10px">Get S3 keys free at: <a href="https://archive.org/account/s3.php" target="_blank">archive.org/account/s3.php</a></div>
             <div class="card-title" style="margin-top:8px">🍪 Platform Session Cookies (for proxy upload)</div>
@@ -14617,8 +14627,15 @@ function renderPDFTools(el){
     </div>
   `;
 
-  // Sync config fields
+  // Sync config fields from settings and PDF_STATE
   setTimeout(()=>{
+    // Re-sync PDF_STATE from global settings (picks up changes made in Settings tab)
+    if(typeof settingGet==='function'){
+      PDF_STATE.groqKey         = settingGet('groq_api_key')||PDF_STATE.groqKey||'';
+      PDF_STATE.vercelBase      = ((settingGet('vercel_url')||'')).replace(/\/+$/,'')||PDF_STATE.vercelBase||'';
+      PDF_STATE.archiveAccessKey= settingGet('pdf_archive_access')||PDF_STATE.archiveAccessKey||'';
+      PDF_STATE.archiveSecretKey= settingGet('pdf_archive_secret')||PDF_STATE.archiveSecretKey||'';
+    }
     const gk=document.getElementById('cfg-groq-key');
     const vb=document.getElementById('cfg-vercel-base');
     const sp=document.getElementById('scanner-proxy-base');
@@ -14627,6 +14644,9 @@ function renderPDFTools(el){
     if(sp && PDF_STATE.vercelBase) sp.value=PDF_STATE.vercelBase;
     // Sync vercel to scanner field
     if(vb) vb.addEventListener('input',()=>{ if(sp) sp.value=vb.value.trim(); });
+    // Show "from settings" badge if keys are pre-loaded
+    if(PDF_STATE.groqKey && gk){ gk.style.borderColor='var(--sup-green)'; gk.title='✓ Loaded from Settings'; }
+    if(PDF_STATE.vercelBase && vb){ vb.style.borderColor='var(--sup-green)'; vb.title='✓ Loaded from Settings'; }
     pdfRenderQueue();
     pdfUpdateStats();
   },50);
@@ -19075,6 +19095,14 @@ const SETTINGS_DEFAULTS = {
   groq_api_key:          '',
   groq_model:            'llama-3.3-70b-versatile',
 
+  // ── PDF SEO / ARCHIVE.ORG S3 ──
+  pdf_archive_access:    '',
+  pdf_archive_secret:    '',
+
+  // ── PDF SEO / ARCHIVE.ORG ──
+  pdf_archive_access:    '',
+  pdf_archive_secret:    '',
+
   // ── SESSION MANAGER ──
   csm_rotateOnFail:      true,
   csm_testOnLoad:        false,
@@ -19102,6 +19130,9 @@ const SETTINGS = (() => {
   } catch(e) { return Object.assign({}, SETTINGS_DEFAULTS); }
 })();
 
+// Now that SETTINGS/settingGet are available, populate PDF_STATE from persisted settings
+if(typeof _pdfStateInit === 'function') _pdfStateInit();
+
 function saveSETTINGS() {
   try { localStorage.setItem('spp_settings', JSON.stringify(SETTINGS)); } catch(e) {}
 }
@@ -19127,6 +19158,11 @@ function _supaSettingsSyncDebounced() {
 }
 
 function settingSet(key, val) {
+  // Keep PDF_STATE in sync with archive key settings
+  if(key==='pdf_archive_access') PDF_STATE.archiveAccessKey=val||'';
+  if(key==='pdf_archive_secret') PDF_STATE.archiveSecretKey=val||'';
+  if(key==='groq_api_key') PDF_STATE.groqKey=val||'';
+  if(key==='vercel_url') PDF_STATE.vercelBase=(val||'').replace(/\/+$/,'');
   SETTINGS[key] = val;
   saveSETTINGS();
   applySettingsToModules();
@@ -19641,6 +19677,16 @@ function renderSettings(el) {
     </div>
   </div>
 
+  ${sSection('🏛️','Archive.org S3 Keys','Access &amp; Secret keys for fully-automated PDF uploads to Archive.org (DA94)',
+    sField('pdf_archive_access','S3 Access Key','text',{ph:'your-archive-access-key',hint:'From archive.org/account/s3.php — top field',width:'280px'}) +
+    sField('pdf_archive_secret','S3 Secret Key','password',{ph:'your-archive-secret-key',hint:'From archive.org/account/s3.php — second field'}) +
+    '<div style="font-size:10px;color:var(--win-text-muted);font-family:var(--mono);margin-top:4px">Get keys free at <a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">archive.org/account/s3.php</a> — keys are stored here and auto-used in PDF SEO blast.</div>'
+  )}
+  ${sSection('🏛️','Archive.org S3 Keys','Access &amp; Secret keys for fully-automated PDF uploads to Internet Archive (DA94) — enter once, used everywhere',
+    sField('pdf_archive_access','S3 Access Key','text',{ph:'your-archive-access-key',hint:'From archive.org/account/s3.php — Access key field',width:'280px'}) +
+    sField('pdf_archive_secret','S3 Secret Key','password',{ph:'your-archive-secret-key',hint:'From archive.org/account/s3.php — Secret key field'}) +
+    '<div style="font-size:10px;color:var(--win-text-muted);font-family:var(--mono);margin-top:4px">Get keys free at <a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">archive.org/account/s3.php</a> — saved here, auto-used in PDF SEO blast.</div>'
+  )}
   ${sSection('▲','Vercel Backend','Serverless backend API on Vercel for CORS bypass &amp; server-side operations',
     sField('vercel_url','Vercel API URL','text',{ph:'https://your-app.vercel.app',hint:'Base URL of your deployed Vercel backend',width:'280px'}) +
     sField('vercel_secret','Vercel Secret Key','password',{ph:'your-secret-api-key',hint:'Auth header sent as X-API-Key on every request'}) +
@@ -23220,7 +23266,7 @@ window.hubSwitch = function(ns, tab, allTabs){
 // ═══════════════════════════════════════════════════════════════
 function renderBacklinkChecker(el){
   if(el&&el.dataset.rendered) return; if(el) el.dataset.rendered='1';
-  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
   el.innerHTML=`
   <div class="page-title">🔎 Backlink Checker</div>
   <div class="page-sub">// Find who links to any domain or URL — Common Crawl (free, no key) + Bing Webmaster API (free key)</div>
@@ -23318,7 +23364,7 @@ async function blcRun(){
   const source=document.getElementById('blc-source')?.value||'commoncrawl';
   const bingKey=localStorage.getItem('blc_bing_key')||'';
   const gscToken=localStorage.getItem('blc_gsc_token')||'';
-  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
 
   if(source==='bing'&&!bingKey){ toast('Add your Bing Webmaster API key above','w'); return; }
   if(source==='gsc'&&!gscToken){ toast('Add your GSC OAuth token above','w'); return; }
@@ -23391,7 +23437,7 @@ async function blcCommonCrawl(q, updateFn){
     updateFn(`🌐 Common Crawl index ${idx} (${i+1}/3)…`, 10+i*10);
     try{
       const url=`https://index.commoncrawl.org/${idx}-index?url=${encoded}&output=json&limit=500&matchType=domain`;
-      const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+      const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
       let data;
       if(vercelBase){
         const r=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -23418,7 +23464,7 @@ async function blcCommonCrawl(q, updateFn){
 async function blcBing(q, apiKey){
   const domain=q.replace(/^https?:\/\//,'').replace(/\/.*/,'');
   const rows=[];
-  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
   try{
     // Bing Webmaster Tools API - inbound links
     const url=`https://ssl.bing.com/webmaster/api.svc/json/GetLinkCounts?siteUrl=https%3A%2F%2F${encodeURIComponent(domain)}%2F&apikey=${apiKey}`;
@@ -23444,7 +23490,7 @@ async function blcGSC(q, token){
   const rows=[];
   const domain=q.replace(/^https?:\/\//,'').split('/')[0];
   const siteUrl='sc-domain:'+domain;
-  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
   try{
     const url='https://www.googleapis.com/webmasters/v3/sites/'+encodeURIComponent(siteUrl)+'/searchAnalytics/query';
     const body=JSON.stringify({startDate:'2024-01-01',endDate:new Date().toISOString().slice(0,10),dimensions:['page','query'],rowLimit:500});
@@ -23680,7 +23726,7 @@ async function saRun(){
   const depth=parseInt(document.getElementById('sa-depth')?.value)||25;
   const psiKey=localStorage.getItem('sa_psi_key')||'';
   const gscToken=localStorage.getItem('blc_gsc_token')||'';
-  const vercelBase=(typeof S!=='undefined'&&S.vercel_url)||'';
+  const vercelBase=(typeof settingGet==='function'?settingGet('vercel_url'):'').replace(/\/+$/,'');
 
   _saPages=[];
   const statusEl=document.getElementById('sa-status');

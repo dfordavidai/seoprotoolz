@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "name": "seo-parasite-pro",
+  "name": "daveai-seo",
   "functions": {
     "api/register.js": {
       "maxDuration": 120,
@@ -14,10 +14,6 @@
       "maxDuration": 60,
       "memory": 1024
     },
-    "api/gb-post.js": {
-      "maxDuration": 300,
-      "memory": 1024
-    },
     "api/captcha.js": {
       "maxDuration": 180,
       "memory": 512
@@ -28,7 +24,7 @@
     },
     "api/proxy.js": {
       "maxDuration": 60,
-      "memory": 256
+      "memory": 512
     },
     "api/health.js": {
       "maxDuration": 30,
@@ -52,10 +48,6 @@
     }
   },
   "routes": [
-    {
-      "src": "/api/proxy-test",
-      "dest": "/api/proxy?_mode=proxytest"
-    },
     {
       "src": "/api/(.*)",
       "dest": "/api/$1"

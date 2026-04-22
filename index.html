@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -12958,6 +12957,19 @@ async function loadJsPDF(){
   });
 }
 
+/* ── DOWNLOAD HELPER (used by blast fallback) ── */
+function pdfDownloadJobBytes(pdfBytes, filename){
+  if(!pdfBytes) return;
+  try{
+    const blob = new Blob([pdfBytes],{type:'application/pdf'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename||'document.pdf';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }catch(e){}
+}
+
 /* ── REAL PDF BUILDER using jsPDF ── */
 async function buildRealPDF(job){
   await loadJsPDF();
@@ -12996,7 +13008,25 @@ async function buildRealPDF(job){
   doc.setFontSize(12); doc.setFont('helvetica','normal');
   doc.text('The Definitive 2025 Resource on '+kw, mx, ty+4);
   doc.setTextColor(0,0,0);
-  y = 75;
+  y = 68;
+
+  // ── COVER IMAGE (optional, clickable) ──
+  if(job.coverImgDataUrl){
+    try{
+      const imgH = 45;
+      const imgW = tw;
+      doc.addImage(job.coverImgDataUrl, 'JPEG', mx, y, imgW, imgH, undefined, 'FAST');
+      if(job.imgLink){
+        doc.link(mx, y, imgW, imgH, {url: job.imgLink});
+        // Small label
+        doc.setFontSize(7); doc.setTextColor(100,100,200);
+        doc.text('🔗 Click image: '+job.imgLink.substring(0,60), mx, y+imgH+3);
+      }
+      y += imgH + 8;
+    }catch(imgErr){ y += 4; } // silently skip if image fails
+  } else {
+    y = 75;
+  }
 
   // ── METADATA BOX ──
   doc.setFillColor(245,247,255);
@@ -13237,6 +13267,12 @@ function templateHeadings(template, kw){
     report:   [`${kw} Executive Summary`,`${kw} Market Overview`,`${kw} Data & Statistics`,`${kw} Expert Insights`,`${kw} Future Predictions`,`${kw} Key Takeaways`],
     casestudy:[`${kw} Background`,`The ${kw} Challenge`,`${kw} Strategy Used`,`${kw} Results Achieved`,`${kw} Lessons Learned`,`Apply ${kw} to Your Business`],
     listicle: [`Top ${kw} Introduction`,`Best ${kw} Option #1`,`Best ${kw} Option #2`,`Best ${kw} Option #3`,`${kw} Comparison Chart`,`Final ${kw} Rankings`],
+    sports:   [`${kw} — Match Preview & Analysis`,`Team Form & Head-to-Head Stats`,`Key Players to Watch`,`Tactical Breakdown & Predictions`,`Live Score & Half-Time Report`,`Full-Time Analysis & Aftermath`],
+    news:     [`${kw} — Breaking News`,`Background & Context`,`What Happened: The Full Story`,`Expert Reactions & Quotes`,`Impact & Implications`,`What Comes Next`],
+    interview:[`Meet the Expert: ${kw} Insider`,`Q: How did you get started with ${kw}?`,`Q: What are the biggest challenges in ${kw}?`,`Q: What strategies work best for ${kw}?`,`Q: What's the future of ${kw}?`,`Key Takeaways from This Interview`],
+    event:    [`${kw} — Event Overview`,`What to Expect: Programme & Schedule`,`Key Speakers & Participants`,`Highlights & Standout Moments`,`Audience Reactions & Press Coverage`,`Summary & What Happens Next`],
+    opinion:  [`The ${kw} Debate: Our Position`,`The Case FOR ${kw}`,`The Case AGAINST ${kw}`,`Industry Expert Opinions on ${kw}`,`Data That Supports Our View`,`Final Verdict: Our Stance on ${kw}`],
+    howto:    [`What You Need Before Starting ${kw}`,`Step 1: Setting Up for ${kw}`,`Step 2: The Core ${kw} Process`,`Step 3: Advanced Techniques for ${kw}`,`Troubleshooting Common ${kw} Problems`,`${kw} Done Right — Checklist & Next Steps`],
   };
   return T[template]||T.guide;
 }
@@ -13446,33 +13482,49 @@ async function pdfBlastPlatforms(pdfBytes, job, selectedPlatformIds, credentials
 }
 
 async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
-  // Convert PDF bytes to base64 for proxy transmission
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(pdfBytes)));
+  if(!vercelBase) return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'manual', url:plat.uploadUrl, note:'Set Vercel URL in config for auto-upload'};
+  // Chunk-safe base64 conversion (avoids stack overflow on large PDFs)
+  const bytes = new Uint8Array(pdfBytes);
+  let b64 = '';
+  const chunkSize = 8192;
+  for(let i=0; i<bytes.length; i+=chunkSize){
+    b64 += btoa(String.fromCharCode(...bytes.subarray(i, i+chunkSize)));
+  }
+  const filename = (job.title||job.keyword).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,60)+'.pdf';
   try{
     const res = await fetch(vercelBase+'/api/proxy',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
-        url: plat.uploadUrl,
-        method:'POST',
-        uploadBase64: b64,
-        filename: slug(job.title)+'.pdf',
-        fields:{ title:job.title, description:'Guide on '+job.keyword, tags:job.keyword },
+        mode: 'pdf-upload',
+        platform: plat.id,
+        pdfBase64: b64,
+        filename,
+        title: job.title,
+        description: 'Comprehensive guide on '+job.keyword,
+        tags: job.keyword,
+        keyword: job.keyword,
         cookie: creds.cookie||'',
-        timeout:30000
+        // Issuu token
+        apiToken: creds.apiToken||'',
       })
     });
     const d = await res.json();
-    if(d.ok && d.body){
-      const urlMatch = d.body.match(/https?:\/\/[^\s"'<>]+(?:pdf|document|doc|file)[^\s"'<>]{5,80}/i)
-        || d.body.match(/"(?:url|permalink|view_url|link)":\s*"(https?:\/\/[^"]+)"/i);
-      if(urlMatch){
-        return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:urlMatch[1]||urlMatch[0], note:'Auto-uploaded via proxy'};
-      }
+    if(d.ok && d.url){
+      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:d.url, note:d.note||'Auto-uploaded via /api/proxy'};
     }
-  }catch(e){}
-  // Fallback: open platform + download PDF simultaneously
-  return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'manual', url:plat.uploadUrl, note:'CORS — manual upload required (PDF downloaded)'};
+    // Platform returned manual=true (needs cookie) — download + open upload page
+    if(d.manual){
+      pdfDownloadJobBytes(job.pdfBytes, filename);
+      if(plat.uploadUrl) window.open(plat.uploadUrl,'_blank');
+      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'manual', url:plat.uploadUrl, note:d.error||'Cookie needed — PDF downloaded, upload page opened'};
+    }
+    return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'error', url:null, note:(d.error||'Upload failed').substring(0,80)};
+  }catch(e){
+    pdfDownloadJobBytes(job.pdfBytes, filename);
+    if(plat.uploadUrl) window.open(plat.uploadUrl,'_blank');
+    return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'manual', url:plat.uploadUrl, note:'Network error — PDF downloaded'};
+  }
 }
 
 /* ── MAIN PDF JOB ADD ── */
@@ -13483,12 +13535,26 @@ async function pdfAddJob(){
   const dens   = (document.getElementById('pdf-density')||{value:'rich'}).value;
   const bls    = (document.getElementById('pdf-backlinks')||{value:''}).value.trim();
   const color  = (document.getElementById('pdf-color')||{value:'#0057ff'}).value;
+  const imgLink= (document.getElementById('pdf-img-link')||{value:''}).value.trim();
   const groqKey= PDF_STATE.groqKey;
 
   if(!kw){ pdfToast('Enter a target keyword first','warn'); return; }
 
+  // Read cover image as dataURL if provided
+  let coverImgDataUrl = null;
+  const imgFile = document.getElementById('pdf-cover-img');
+  if(imgFile && imgFile.files && imgFile.files[0]){
+    coverImgDataUrl = await new Promise(resolve=>{
+      const fr = new FileReader();
+      fr.onload = ()=>resolve(fr.result);
+      fr.onerror = ()=>resolve(null);
+      fr.readAsDataURL(imgFile.files[0]);
+    });
+  }
+
   const job = {
     id:uid(), keyword:kw, title, template:tpl, density:dens, backlinks:bls, color,
+    coverImgDataUrl, imgLink,
     status:'building', log:[], ts:new Date().toLocaleTimeString(),
     sections:[], wordCount:0, pdfBytes:null, uploadedTo:[],
     lsiUsed:0, hasSchema:true, hasTOC:true, titleOptimized:kw.toLowerCase().split(' ').some(w=>title.toLowerCase().includes(w)),
@@ -13913,55 +13979,150 @@ function showBlastPicker(jobId){
   const job=PDF_STATE.jobs.find(j=>j.id===jobId);
   if(!job||!job.pdfBytes){pdfToast('Build PDF first','warn');return;}
   const modal=document.createElement('div');
-  modal.className='modal-overlay';
+  modal.className='modal-overlay'; modal.id='pdf-blast-picker-modal';
   modal.onclick=e=>{if(e.target===modal)modal.remove();};
-  const chips=PDF_PLATFORMS.map(p=>`<div class="chip pdf-blast-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on')" title="${p.note}">
+
+  const chips=PDF_PLATFORMS.map(p=>`<div class="chip pdf-blast-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on');pdfBlastPickerRefreshCreds()" title="${p.note}">
     ${p.icon} ${p.name} <span class="mono" style="font-size:8px">DA${p.da}</span>
   </div>`).join('');
-  modal.innerHTML=`<div class="modal-box" style="min-width:580px">
-    <div class="modal-title">🚀 Blast "${esc(job.title)}"
-      <button class="btn btn-ghost btn-xs" onclick="this.closest('.modal-overlay').remove()">✕</button>
+
+  const credInputs=PDF_PLATFORMS.map(p=>{
+    if(p.id==='archive') return `
+      <div class="fg" style="margin-bottom:8px" data-cred-pid="archive">
+        <label class="lbl">🏛️ Archive.org — S3 Keys (<a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">get free keys</a>)</label>
+        <div class="grid2" style="gap:6px">
+          <input type="text" id="bp-cred-archive-access" placeholder="Access Key" style="font-size:10px;font-family:var(--mono)">
+          <input type="password" id="bp-cred-archive-secret" placeholder="Secret Key" style="font-size:10px;font-family:var(--mono)">
+        </div>
+      </div>`;
+    if(p.id==='issuu') return `
+      <div class="fg" style="margin-bottom:8px" data-cred-pid="issuu">
+        <label class="lbl">📰 Issuu — API Token (<a href="https://issuu.com/home/settings/integrations" target="_blank" style="color:var(--accent)">get token</a>)</label>
+        <input type="password" id="bp-cred-issuu-token" placeholder="Issuu API token" style="font-size:10px;font-family:var(--mono);width:100%">
+      </div>`;
+    return `
+      <div class="fg" style="margin-bottom:8px" data-cred-pid="${p.id}">
+        <label class="lbl">${p.icon} ${p.name} Cookie (<a href="${p.loginUrl||'#'}" target="_blank" style="color:var(--accent)">Login</a> → DevTools → Application → Cookies)</label>
+        <input type="password" id="bp-cred-${p.id}-cookie" placeholder="Paste session cookie string" style="font-size:10px;font-family:var(--mono);width:100%">
+      </div>`;
+  }).join('');
+
+  modal.innerHTML=`<div class="modal-box" style="min-width:640px;max-width:96vw;max-height:88vh;overflow-y:auto">
+    <div class="modal-title">🚀 PDF Blast — "${esc(job.title)}"
+      <button class="btn btn-ghost btn-xs" onclick="document.getElementById('pdf-blast-picker-modal')?.remove()">✕</button>
     </div>
-    <div style="margin-bottom:10px;font-size:11px;color:var(--muted2)">Select platforms to upload to:</div>
-    <div style="display:flex;gap:6px;margin-bottom:8px">
-      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.add('on'))">All</button>
-      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.remove('on'))">None</button>
-      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.toggle('on',parseInt(c.title.match(/DA(\\d+)/)?.[1]||0)>=90))">DA90+</button>
-      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.toggle('on',${JSON.stringify(PDF_PLATFORMS.filter(p=>p.free).map(p=>p.id))}.includes(c.dataset.pid)))">Free Only</button>
+    <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.add('on'));pdfBlastPickerRefreshCreds()">All</button>
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.remove('on'));pdfBlastPickerRefreshCreds()">None</button>
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-blast-chip').forEach(c=>c.classList.toggle('on',${JSON.stringify(PDF_PLATFORMS.filter(p=>p.free).map(p=>p.id))}.includes(c.dataset.pid)));pdfBlastPickerRefreshCreds()">Free Only</button>
     </div>
-    <div class="chips" style="max-height:200px;overflow-y:auto">${chips}</div>
-    <div style="margin-top:12px">
-      <div style="font-size:11px;font-weight:700;margin-bottom:6px">🔑 Archive.org Keys (for full automation):</div>
-      <div class="grid2" style="gap:8px;margin-bottom:10px">
-        <div class="fg"><label class="lbl">Access Key</label><input type="text" id="cred-archive-access" placeholder="archive.org S3 access key"></div>
-        <div class="fg"><label class="lbl">Secret Key</label><input type="password" id="cred-archive-secret" placeholder="archive.org S3 secret key"></div>
-      </div>
+    <div class="chips" style="max-height:140px;overflow-y:auto;margin-bottom:10px">${chips}</div>
+    <div style="font-size:11px;font-weight:700;padding:4px 8px;background:var(--win-blue);color:#fff;margin-bottom:8px">🔑 Credentials for selected platforms</div>
+    <div id="bp-cred-fields" style="max-height:300px;overflow-y:auto">${credInputs}</div>
+    <div class="notice notice-info" style="font-size:10px;margin-top:8px">
+      <strong>Archive.org</strong> = fully automated (S3 API) · <strong>Issuu</strong> = API v2 automated · <strong>Others</strong> = paste session cookie or leave blank for guided manual upload
     </div>
-    <div style="text-align:right;gap:8px;display:flex;justify-content:flex-end">
-      <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-      <button class="btn btn-primary" onclick="(() => { const sel=[...document.querySelectorAll('.pdf-blast-chip.on')].map(c=>c.dataset.pid); this.closest('.modal-overlay').remove(); pdfBlastJob('${jobId}',sel); })()">🚀 Blast Selected</button>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="document.getElementById('pdf-blast-picker-modal')?.remove()">Cancel</button>
+      <button class="btn btn-primary" style="min-width:140px" onclick="pdfBlastPickerGo('${jobId}')">🚀 Blast Selected</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
+  pdfBlastPickerRefreshCreds();
 }
 
-// Override pdfBlastJob to accept sel param
-const _origBlastJob = pdfBlastJob;
-window.pdfBlastJob = async function(jobId, sel){
+function pdfBlastPickerRefreshCreds(){
+  const selected=new Set([...document.querySelectorAll('.pdf-blast-chip.on')].map(c=>c.dataset.pid));
+  document.querySelectorAll('#bp-cred-fields [data-cred-pid]').forEach(row=>{
+    row.style.display=selected.has(row.dataset.credPid)?'':'none';
+  });
+}
+
+async function pdfBlastPickerGo(jobId){
   const job=PDF_STATE.jobs.find(j=>j.id===jobId);
   if(!job||!job.pdfBytes){pdfToast('Build PDF first','warn');return;}
-  if(!sel||!sel.length){pdfToast('No platforms selected','warn');return;}
+  const sel=[...document.querySelectorAll('.pdf-blast-chip.on')].map(c=>c.dataset.pid);
+  if(!sel.length){pdfToast('Select at least one platform','warn');return;}
   const creds={};
-  const accessEl=document.getElementById('cred-archive-access');
-  const secretEl=document.getElementById('cred-archive-secret');
-  creds.archive={accessKey:accessEl?.value?.trim()||'',secretKey:secretEl?.value?.trim()||''};
+  creds.archive={
+    accessKey:(document.getElementById('bp-cred-archive-access')||{value:''}).value.trim(),
+    secretKey:(document.getElementById('bp-cred-archive-secret')||{value:''}).value.trim(),
+  };
+  creds.issuu={apiToken:(document.getElementById('bp-cred-issuu-token')||{value:''}).value.trim()};
+  PDF_PLATFORMS.forEach(p=>{
+    if(p.id==='archive'||p.id==='issuu') return;
+    const el=document.getElementById('bp-cred-'+p.id+'-cookie');
+    if(el) creds[p.id]={cookie:el.value.trim()};
+  });
+  document.getElementById('pdf-blast-picker-modal')?.remove();
   showBlastModal(job,sel);
   const vercelBase=PDF_STATE.vercelBase;
-  const results=await pdfBlastPlatforms(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{updateBlastRow(pid,status,url,pct,msg);});
+  const results=await pdfBlastPlatformsV2(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{updateBlastRow(pid,status,url,pct,msg);});
   job.uploadedTo=results; job.status=results.some(r=>r.status==='live')?'live':'manual';
   pdfRenderQueue(); pdfUpdateStats();
-  const liveCount=results.filter(r=>r.status==='live').length;
-  pdfLog(jobId,'Blast done — '+liveCount+'/'+results.length+' live uploads','success');
+  pdfLog(jobId,'Blast done — '+results.filter(r=>r.status==='live').length+'/'+results.length+' live uploads','success');
+}
+
+/* ── BLAST ENGINE v2 ── */
+async function pdfBlastPlatformsV2(pdfBytes,job,selectedPlatformIds,credentials,vercelBase,onUpdate){
+  const results=[];
+  for(const pid of selectedPlatformIds){
+    const plat=PDF_PLATFORMS.find(p=>p.id===pid);
+    if(!plat) continue;
+    onUpdate({pid,name:plat.name,status:'uploading',url:null});
+    let result={pid,name:plat.name,icon:plat.icon,da:plat.da,status:'manual',url:null,note:''};
+    try{
+      const bytes=new Uint8Array(pdfBytes);
+      let b64=''; const cs=8192;
+      for(let i=0;i<bytes.length;i+=cs) b64+=btoa(String.fromCharCode(...bytes.subarray(i,i+cs)));
+      const filename=job.title.toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,60)+'.pdf';
+      if(pid==='archive'){
+        const c=credentials.archive||{};
+        if(c.accessKey&&c.secretKey){
+          if(vercelBase){
+            const res=await fetch(vercelBase+'/api/proxy',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({mode:'pdf-upload',platform:'archive',pdfBase64:b64,filename,title:job.title,keyword:job.keyword,accessKey:c.accessKey,secretKey:c.secretKey})});
+            const d=await res.json();
+            if(d.ok&&d.url) result={...result,status:'live',url:d.url,note:'Archive.org S3'};
+            else throw new Error(d.error||'Archive upload failed');
+          } else {
+            const r=await archiveUploadPDF(pdfBytes,job.title,job.keyword,c.accessKey,c.secretKey,(pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg}));
+            result={...result,status:'live',url:r.url,note:'Archive.org S3 direct'};
+          }
+        } else { result.note='Add Archive.org S3 keys'; }
+      } else {
+        result=await attemptProxiedUpload(pdfBytes,job,plat,credentials[pid]||{},vercelBase);
+      }
+    }catch(e){ result={...result,status:'error',note:e.message.substring(0,80)}; }
+    results.push(result);
+    onUpdate({pid,name:plat.name,...result});
+    await sleep(600);
+  }
+  return results;
+}
+
+// Keep pdfBlastJob working (called from job queue Blast button → routes to picker)
+const _origBlastJob = pdfBlastJob;
+window.pdfBlastJob = async function(jobId, sel){
+  if(!sel){ showBlastPicker(jobId); return; }
+  const job=PDF_STATE.jobs.find(j=>j.id===jobId);
+  if(!job||!job.pdfBytes){pdfToast('Build PDF first','warn');return;}
+  if(!sel.length){pdfToast('No platforms selected','warn');return;}
+  const creds={};
+  creds.archive={
+    accessKey:(document.getElementById('cred-archive-access')||{value:''}).value.trim(),
+    secretKey:(document.getElementById('cred-archive-secret')||{value:''}).value.trim(),
+  };
+  PDF_PLATFORMS.forEach(p=>{
+    const el=document.getElementById('cred-'+p.id+'-cookie');
+    if(el) creds[p.id]={cookie:el.value.trim()};
+  });
+  showBlastModal(job,sel);
+  const vercelBase=PDF_STATE.vercelBase;
+  const results=await pdfBlastPlatformsV2(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{updateBlastRow(pid,status,url,pct,msg);});
+  job.uploadedTo=results; job.status=results.some(r=>r.status==='live')?'live':'manual';
+  pdfRenderQueue(); pdfUpdateStats();
+  pdfLog(jobId,'Blast done — '+results.filter(r=>r.status==='live').length+'/'+results.length+' live uploads','success');
 };
 
 /* ══════════════════════════════════════════════════════════════
@@ -13972,7 +14133,7 @@ function renderPDFTools(el){
   if(!el) return;
 
   const platOptions=PDF_PLATFORMS.map(p=>`<option value="${p.id}">${p.icon} ${p.name} (DA ${p.da})</option>`).join('');
-  const tplOptions=`<option value="guide">Ultimate Guide</option><option value="review">Product Review</option><option value="checklist">Checklist / SOP</option><option value="report">Industry Report</option><option value="casestudy">Case Study</option><option value="listicle">Top-N Listicle</option>`;
+  const tplOptions=`<option value="guide">Ultimate Guide</option><option value="review">Product Review</option><option value="checklist">Checklist / SOP</option><option value="report">Industry Report</option><option value="casestudy">Case Study</option><option value="listicle">Top-N Listicle</option><option value="sports">⚽ Sports Article</option><option value="news">📰 News Article</option><option value="interview">🎤 Interview / Q&amp;A</option><option value="event">📅 Event Preview / Recap</option><option value="opinion">💬 Opinion / Editorial</option><option value="howto">🔧 How-To Tutorial</option>`;
   const densOptions=`<option value="thin">Thin (~120 w/sec)</option><option value="rich" selected>Rich (~220 w/sec)</option><option value="ultra">Ultra (~380 w/sec)</option>`;
   const platformChips=PDF_PLATFORMS.map(p=>`<div class="chip pdf-plat-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on')" title="${p.note}">
     ${p.icon} ${p.name} <span class="mono" style="font-size:8px">DA${p.da}${p.free?'':' 💰'}</span>
@@ -14029,6 +14190,12 @@ function renderPDFTools(el){
               <div class="fg"><label class="lbl">PDF Brand Color</label><input type="color" id="pdf-color" value="#0057ff" style="height:32px;padding:2px"></div>
               <div class="fg"><label class="lbl">Backlink URL <span class="xs tm">(embedded)</span></label>
                 <input type="url" id="pdf-backlinks" placeholder="https://yoursite.com/page"></div>
+            </div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Cover Image <span class="xs tm">(optional · clickable)</span></label>
+                <input type="file" id="pdf-cover-img" accept="image/*" style="padding:4px;font-size:10px"></div>
+              <div class="fg"><label class="lbl">Image Link URL <span class="xs tm">(clicking image opens)</span></label>
+                <input type="url" id="pdf-img-link" placeholder="https://yoursite.com/"></div>
             </div>
             <div class="row mt8">
               <button class="btn btn-primary" onclick="pdfAddJob()" style="flex:1">⚡ Generate &amp; Build PDF</button>
@@ -20401,7 +20568,7 @@ async function backendValidateSession(targetUrl, cookies, userAgent=null){
 
 // ── PDF Uploader ──────────────────────────────────────────────────────────
 async function backendUploadPdf({siteUrl, uploadUrl, htmlContent, filename='document.html', cookies=null, extraFields={}}){
-  return backendPost('/upload-pdf', {
+  return backendPost('/proxy', { mode: 'pdf-upload',
     site_url:siteUrl, upload_url:uploadUrl,
     html_content:htmlContent, filename, cookies, extra_fields:extraFields
   }, 45000);

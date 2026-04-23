@@ -26448,7 +26448,17 @@ const MBP = {
   getCred(domain){
     if(!domain) return null;
     const base = domain.replace(/^www\./,'');
-    return this.creds[domain]||this.creds[base]||this.creds['www.'+base]||null;
+    // Exact match first (with/without www)
+    if(this.creds[domain]) return this.creds[domain];
+    if(this.creds[base]) return this.creds[base];
+    if(this.creds['www.'+base]) return this.creds['www.'+base];
+    // Fuzzy match — find any stored cred key that contains or is contained by the domain
+    const keys = Object.keys(this.creds);
+    const fuzzy = keys.find(k => {
+      const kb = k.replace(/^www\./,'');
+      return base.includes(kb) || kb.includes(base);
+    });
+    return fuzzy ? this.creds[fuzzy] : null;
   },
 
   setLearned(domain, schema){ this.learned[domain]=schema; this.saveLearned(); },

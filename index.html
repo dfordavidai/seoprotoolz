@@ -26444,28 +26444,60 @@ const MBP = {
   saveBlast(){    localStorage.setItem('mbp_blast_jobs',JSON.stringify(this.blastJobs)); },
   saveStates(){   localStorage.setItem('mbp_states',    JSON.stringify(this._states)); },
 
-  setCred(domain, obj){ this.creds[domain]=obj; this.saveCreds(); },
+  // getCredsArr — returns normalized array for a domain (handles legacy single-object)
+  getCredsArr(domain){
+    if(!domain) return [];
+    const base = domain.replace(/^www\./,'');
+    const raw = this.creds[base] || this.creds['www.'+base] || this.creds[domain] || null;
+    if(!raw) return [];
+    if(Array.isArray(raw)) return raw;
+    return [raw]; // backward compat: legacy single object wrapped in array
+  },
+  // setCred — stores as array; idx≥0 updates existing, omit to add/update by user match
+  setCred(domain, obj, idx){
+    const base = domain.replace(/^www\./,'');
+    let arr = this.getCredsArr(base);
+    if(typeof idx==='number' && idx>=0 && idx<arr.length){
+      arr[idx]=Object.assign({},arr[idx],obj);
+    } else {
+      const existing = arr.findIndex(function(a){return a.user===obj.user;});
+      if(existing>=0) arr[existing]=Object.assign({},arr[existing],obj);
+      else arr.push(obj);
+    }
+    this.creds[base]=arr;
+    this.saveCreds();
+  },
+  // getCred — returns first account (backward compat for auto-post logic)
   getCred(domain){
     if(!domain) return null;
     const base = domain.replace(/^www\./,'');
-    // Exact match first (with/without www)
-    if(this.creds[domain]) return this.creds[domain];
-    if(this.creds[base]) return this.creds[base];
-    if(this.creds['www.'+base]) return this.creds['www.'+base];
-    // Fuzzy match — find any stored cred key that contains or is contained by the domain
+    let arr = this.getCredsArr(base);
+    if(arr.length) return arr[0];
+    // Fuzzy match
     const keys = Object.keys(this.creds);
-    const fuzzy = keys.find(k => {
+    const fuzzy = keys.find(function(k){
       const kb = k.replace(/^www\./,'');
       return base.includes(kb) || kb.includes(base);
     });
-    return fuzzy ? this.creds[fuzzy] : null;
+    if(fuzzy){ arr=this.getCredsArr(fuzzy); return arr[0]||null; }
+    return null;
   },
 
   setLearned(domain, schema){ this.learned[domain]=schema; this.saveLearned(); },
   getLearned(domain){
     if(!domain) return null;
     const base = domain.replace(/^www\./,'');
-    return this.learned[domain]||this.learned[base]||null;
+    // Exact match first
+    if(this.learned[domain]) return this.learned[domain];
+    if(this.learned[base]) return this.learned[base];
+    if(this.learned['www.'+base]) return this.learned['www.'+base];
+    // Fuzzy match — substring
+    const keys = Object.keys(this.learned);
+    const fuzzy = keys.find(k => {
+      const kb = k.replace(/^www\./,'');
+      return base.includes(kb) || kb.includes(base);
+    });
+    return fuzzy ? this.learned[fuzzy] : null;
   },
 
   setState(id, state){
@@ -26777,21 +26809,70 @@ function mbpGenerateBookmarklets(){
     +'alert("📎 MBP Capture active!\\nBlue HUD is watching for success URLs.\\nOr click it to capture manually.");'
   +'})();';
 
-  // AUTOFILL — reads live creds from localStorage at click time (NOT baked-in snapshot)
-  const autofillCode='javascript:(function(){'
-    +'var creds=JSON.parse(localStorage.getItem("mbp_creds")||"{}");'  // FIX: read live, not baked snapshot
-    +'var host=location.hostname.replace(/^www\\./,"");'
-    +'var cred=creds[host]||creds["www."+host]||creds[Object.keys(creds).find(function(k){return host.includes(k)||k.includes(host);})||""];'
-    +'if(!cred||!cred.user){alert("No credentials for "+host+"\\nAdd them in MBP → Credentials tab.");return;}'
-    +'function fill(sel,val){var el=document.querySelector(sel);if(el){el.value=val;el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}));return true;}return false;}'
-    +'var uf=fill("input[name=username],input[name=user],input[name=login],input[type=email],input[name=email],input[id*=user i],input[id*=login i],input[id*=email i],input[autocomplete=username]",cred.user);'
-    +'var pf=fill("input[type=password]",cred.pass||"");'
-    +'var n=(uf?1:0)+(pf?1:0);'
-    +'var h=document.createElement("div");'
-    +'h.style="position:fixed;bottom:20px;right:20px;background:"+(n>0?"#006600":"#cc0000")+";color:#fff;padding:12px 16px;font-family:monospace;font-size:12px;z-index:999999;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.4)";'
-    +'h.textContent=n>0?"✅ Auto-filled "+n+" field"+(n>1?"s":"")+" for "+host:"❌ Could not find login fields";'
-    +'document.body.appendChild(h);setTimeout(function(){h.remove();},4000);'
-  +'})();';
+  // AUTOFILL — bakes credentials at generation time (fixes cross-origin localStorage issue).
+  // When domain has multiple saved accounts a picker overlay is shown on the target page.
+  var autofillCode = (function(){
+    var snap = {};
+    Object.keys(MBP.creds).forEach(function(k){
+      var v = MBP.creds[k];
+      snap[k] = Array.isArray(v) ? v : [v];
+    });
+    var snapStr = JSON.stringify(snap)
+      .replace(/\\/g,'\\\\')
+      .replace(/"/g,'\\"');
+
+    var fillFn = [
+      'function mbpFill(cred){',
+        'function f(sel,val){var el=document.querySelector(sel);if(el){el.value=val;el.dispatchEvent(new Event("input",{bubbles:true}));el.dispatchEvent(new Event("change",{bubbles:true}));return true;}return false;}',
+        'var uf=f("input[name=username],input[name=user],input[name=login],input[type=email],input[name=email],input[id*=user i],input[id*=login i],input[id*=email i],input[autocomplete=username]",cred.user||"");',
+        'var pf=f("input[type=password]",cred.pass||"");',
+        'var n=(uf?1:0)+(pf?1:0);',
+        'var h=document.createElement("div");',
+        'h.style="position:fixed;bottom:20px;right:20px;background:"+(n>0?"#006600":"#cc0000")+";color:#fff;padding:12px 16px;font-family:monospace;font-size:12px;z-index:999999;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.4)";',
+        'h.textContent=n>0?"[OK] Filled "+(cred.label||cred.user)+" ("+n+" field"+(n>1?"s":"")+")":"[ERR] Could not find login fields";',
+        'document.body.appendChild(h);setTimeout(function(){h.remove();},4000);',
+      '}'
+    ].join('');
+
+    var pickerFn = [
+      'function mbpPick(arr,host){',
+        'var ov=document.createElement("div");',
+        'ov.style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999998;display:flex;align-items:center;justify-content:center;";',
+        'var box=document.createElement("div");',
+        'box.style="background:#0a0f0a;color:#00cc44;font-family:monospace;font-size:13px;border:2px solid #003087;border-radius:6px;padding:20px;min-width:280px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,.8)";',
+        'box.innerHTML="<div style=\\"margin-bottom:12px;font-weight:700;color:#fff;font-size:14px\\">Choose account for "+host+"</div>";',
+        'arr.forEach(function(c,i){',
+          'var btn=document.createElement("button");',
+          'btn.textContent=(c.label||c.user||"Account "+(i+1));',
+          'btn.style="display:block;width:100%;margin-bottom:6px;padding:8px 12px;background:#003087;color:#fff;border:1px solid #0a4dc4;border-radius:3px;font-family:monospace;font-size:12px;cursor:pointer;text-align:left";',
+          'btn.onmouseover=function(){this.style.background="#0a4dc4";};',
+          'btn.onmouseout=function(){this.style.background="#003087";};',
+          'btn.onclick=function(){ov.remove();mbpFill(c);};',
+          'box.appendChild(btn);',
+        '});',
+        'var cancel=document.createElement("button");',
+        'cancel.textContent="Cancel";',
+        'cancel.style="display:block;width:100%;padding:6px;background:transparent;color:#808080;border:1px solid #808080;border-radius:3px;font-family:monospace;font-size:11px;cursor:pointer;margin-top:4px";',
+        'cancel.onclick=function(){ov.remove();};',
+        'box.appendChild(cancel);',
+        'ov.appendChild(box);',
+        'ov.onclick=function(e){if(e.target===ov)ov.remove();};',
+        'document.body.appendChild(ov);',
+      '}'
+    ].join('');
+
+    var mainFn = [
+      'var CREDS=JSON.parse(\"'+snapStr+'\");',
+      'var host=location.hostname.replace(/^www\\./, "");',
+      'var arr=CREDS[host]||CREDS["www."+host]||CREDS[Object.keys(CREDS).find(function(k){var kb=k.replace(/^www\\./,"");return host.includes(kb)||kb.includes(host);})||""]||null;',
+      'if(!arr||!arr.length){alert("No credentials for "+host+"\\nSave them in MBP Credentials tab first — then regenerate the bookmarklet.");return;}',
+      'if(arr.length===1){mbpFill(arr[0]);}else{mbpPick(arr,host);}'
+    ].join('');
+
+    return 'javascript:(function(){' + fillFn + pickerFn + mainFn + '})();';
+  })();
+  // Keep legacy var name used by mbpWireBookmarklets
+  var _autofillLegacy = autofillCode;
 
   // RECORD — scans the current post form and sends schema back
   const recordCode='javascript:(function(){'
@@ -27285,23 +27366,33 @@ function blpRenderManualBrowser(){
   html+='<div class="fg"><label class="lbl" style="font-size:10px">Domain</label><input type="text" id="mbp-cred-domain" placeholder="forum.example.com" style="width:100%"/></div>';
   html+='<div class="fg"><label class="lbl" style="font-size:10px">Username / Email</label><input type="text" id="mbp-cred-user" placeholder="your_username" style="width:100%"/></div>';
   html+='<div class="fg"><label class="lbl" style="font-size:10px">Password</label><input type="password" id="mbp-cred-pass" placeholder="••••••••" style="width:100%"/></div>';
+  html+='<div class="fg"><label class="lbl" style="font-size:10px">Label <small style="font-weight:400;color:var(--win-text-muted)">(e.g. Main, Alt, Work)</small></label><input type="text" id="mbp-cred-label" placeholder="shown in picker when multiple accounts" style="width:100%"/></div>';
   html+='<div class="fg"><label class="lbl" style="font-size:10px">Extra (note, 2FA hint)</label><input type="text" id="mbp-cred-extra" placeholder="optional" style="width:100%"/></div>';
-  html+='<button class="btn btn-primary btn-sm" onclick="mbpSaveCred()">💾 Save Credential</button>';
+  html+='<input type="hidden" id="mbp-cred-edit-domain" value=""/>';
+  html+='<input type="hidden" id="mbp-cred-edit-idx" value="-1"/>';
+  html+='<button class="btn btn-primary btn-sm" onclick="mbpSaveCred()">&#x1F4BE; Save Credential</button> ';
+  html+='<button class="btn btn-sm" onclick="mbpCredClearForm()" style="font-size:9px">&#x2715; Clear</button>';
   html+='</div>';
   html+='<div class="notice notice-warn" style="font-size:10px;align-self:start"><strong>⚠ Security:</strong> Stored in localStorage only — never sent to any server. The Autofill bookmarklet reads these on the login page you open.</div>';
   html+='</div></div>';
   const credKeys=Object.keys(MBP.creds);
-  html+='<div class="card" style="padding:0;overflow:hidden"><div class="card-title">🔑 Saved Credentials ('+credKeys.length+')</div>';
+  const totalAccounts=credKeys.reduce(function(sum,k){return sum+MBP.getCredsArr(k).length;},0);
+  html+='<div class="card" style="padding:0;overflow:hidden"><div class="card-title">Saved Credentials ('+credKeys.length+' domain'+(credKeys.length!==1?'s':'')+', '+totalAccounts+' account'+(totalAccounts!==1?'s':'')+')</div>';
   if(credKeys.length){
-    html+='<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Domain</th><th style="padding:5px 8px;text-align:left">Username</th><th style="padding:5px 8px;text-align:left">Password</th><th style="padding:5px 8px;text-align:center">Act</th></tr></thead><tbody>';
-    credKeys.forEach(function(domain,i){
-      const c=MBP.creds[domain];
-      html+='<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">';
-      html+='<td style="padding:5px 8px;font-family:var(--mono);font-weight:700">'+esc(domain)+'</td>';
-      html+='<td style="padding:5px 8px;font-family:var(--mono)">'+esc(c.user||'')+'</td>';
-      html+='<td style="padding:5px 8px;font-family:var(--mono)"><span id="mbp-pw-'+i+'">••••••••</span><button class="btn btn-xs" onclick="var e=document.getElementById(\'mbp-pw-'+i+'\');e.textContent=e.textContent===\''+esc(c.pass||'')+'\' ? \'••••••••\' : \''+esc(c.pass||'')+'\'" style="font-size:8px;margin-left:4px">👁</button></td>';
-      html+='<td style="padding:5px 8px;text-align:center"><button class="btn btn-xs" onclick="mbpLoadCred(\''+esc(domain)+'\')">✏</button> <button class="btn btn-xs btn-danger" onclick="mbpDeleteCred(\''+esc(domain)+'\')">✕</button></td>';
-      html+='</tr>';
+    html+='<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Domain</th><th style="padding:5px 8px;text-align:left">Label</th><th style="padding:5px 8px;text-align:left">Username</th><th style="padding:5px 8px;text-align:left">Password</th><th style="padding:5px 8px;text-align:center">Act</th></tr></thead><tbody>';
+    var rowIdx=0;
+    credKeys.forEach(function(domain){
+      var arr=MBP.getCredsArr(domain);
+      arr.forEach(function(c,i){
+        html+='<tr style="border-bottom:1px solid var(--win-border);'+(rowIdx%2?'background:var(--win-surface)':'')+'">';
+        html+='<td style="padding:5px 8px;font-family:var(--mono);font-weight:700">'+(i===0?esc(domain):'<span style="color:var(--win-text-muted);padding-left:10px">&#x21B3;</span>')+'</td>';
+        html+='<td style="padding:5px 8px;font-family:var(--mono);color:var(--accent)">'+esc(c.label||'')+'</td>';
+        html+='<td style="padding:5px 8px;font-family:var(--mono)">'+esc(c.user||'')+'</td>';
+        html+='<td style="padding:5px 8px;font-family:var(--mono)"><span id="mbp-pw-r'+rowIdx+'">&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;</span><button class="btn btn-xs" onclick="var e=document.getElementById(\'mbp-pw-r'+rowIdx+'\');e.textContent=e.textContent===\''+esc(c.pass||'')+'\' ? \'&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;\' : \''+esc(c.pass||'')+'\'" style="font-size:8px;margin-left:4px">&#x1F441;</button></td>';
+        html+='<td style="padding:5px 8px;text-align:center;white-space:nowrap"><button class="btn btn-xs" title="Edit" onclick="mbpLoadCred(\''+esc(domain)+'\','+i+')">&#x270F;</button> <button class="btn btn-xs btn-danger" title="Delete" onclick="mbpDeleteCred(\''+esc(domain)+'\','+i+')">&#x2715;</button></td>';
+        html+='</tr>';
+        rowIdx++;
+      });
     });
     html+='</tbody></table>';
   } else {
@@ -27682,26 +27773,30 @@ function mbpRefreshBlastUI(){
 // Refreshes the saved-credentials table in-place without wiping the whole page.
 // Called after save/delete so the terminal, kanban, and all other state survives.
 function mbpRefreshCredsList(){
-  // Try to find the creds container inside mbp-sub-4
   const sub4 = document.getElementById('mbp-sub-4');
   if(!sub4) return;
-  // The creds card is the second .card inside sub4 (first is the Save form)
   const cards = sub4.querySelectorAll('.card');
-  const credCard = cards[1]; // [0]=Save form, [1]=Saved Credentials table
+  const credCard = cards[1];
   if(!credCard) return;
   const credKeys = Object.keys(MBP.creds);
-  let html = '<div class="card-title">🔑 Saved Credentials ('+credKeys.length+')</div>';
+  const totalAccounts = credKeys.reduce(function(sum,k){return sum+MBP.getCredsArr(k).length;},0);
+  let html = '<div class="card-title">Saved Credentials ('+credKeys.length+' domain'+(credKeys.length!==1?'s':'')+', '+totalAccounts+' account'+(totalAccounts!==1?'s':'')+')</div>';
   if(credKeys.length){
-    html += '<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Domain</th><th style="padding:5px 8px;text-align:left">Username</th><th style="padding:5px 8px;text-align:left">Password</th><th style="padding:5px 8px;text-align:center">Act</th></tr></thead><tbody>';
-    credKeys.forEach(function(domain,i){
-      const c = MBP.creds[domain];
-      html += '<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">';
-      html += '<td style="padding:5px 8px;font-family:var(--mono);font-weight:700">'+esc(domain)+'</td>';
-      html += '<td style="padding:5px 8px;font-family:var(--mono)">'+esc(c.user||'')+'</td>';
-      html += '<td style="padding:5px 8px;font-family:var(--mono)"><span id="mbp-pw-'+i+'">••••••••</span>'
-        +'<button class="btn btn-xs" onclick="var e=document.getElementById(\'mbp-pw-'+i+'\');e.textContent=e.textContent===\''+esc(c.pass||'')+'\' ? \'••••••••\' : \''+esc(c.pass||'')+'\'" style="font-size:8px;margin-left:4px">👁</button></td>';
-      html += '<td style="padding:5px 8px;text-align:center"><button class="btn btn-xs" onclick="mbpLoadCred(\''+esc(domain)+'\')">✏</button> <button class="btn btn-xs btn-danger" onclick="mbpDeleteCred(\''+esc(domain)+'\')">✕</button></td>';
-      html += '</tr>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Domain</th><th style="padding:5px 8px;text-align:left">Label</th><th style="padding:5px 8px;text-align:left">Username</th><th style="padding:5px 8px;text-align:left">Password</th><th style="padding:5px 8px;text-align:center">Act</th></tr></thead><tbody>';
+    var rowIdx=0;
+    credKeys.forEach(function(domain){
+      var arr=MBP.getCredsArr(domain);
+      arr.forEach(function(c,i){
+        html += '<tr style="border-bottom:1px solid var(--win-border);'+(rowIdx%2?'background:var(--win-surface)':'')+'">';
+        html += '<td style="padding:5px 8px;font-family:var(--mono);font-weight:700">'+(i===0?esc(domain):'<span style="color:var(--win-text-muted);padding-left:10px">&#x21B3;</span>')+'</td>';
+        html += '<td style="padding:5px 8px;font-family:var(--mono);color:var(--accent)">'+esc(c.label||'')+'</td>';
+        html += '<td style="padding:5px 8px;font-family:var(--mono)">'+esc(c.user||'')+'</td>';
+        html += '<td style="padding:5px 8px;font-family:var(--mono)"><span id="mbp-pw-r'+rowIdx+'">&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;</span>'
+          +'<button class="btn btn-xs" onclick="var e=document.getElementById(\'mbp-pw-r'+rowIdx+'\');e.textContent=e.textContent===\''+esc(c.pass||'')+'\' ? \'&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;\' : \''+esc(c.pass||'')+'\'" style="font-size:8px;margin-left:4px">&#x1F441;</button></td>';
+        html += '<td style="padding:5px 8px;text-align:center;white-space:nowrap"><button class="btn btn-xs" onclick="mbpLoadCred(\''+esc(domain)+'\','+i+')" title="Edit">&#x270F;</button> <button class="btn btn-xs btn-danger" onclick="mbpDeleteCred(\''+esc(domain)+'\','+i+')" title="Delete">&#x2715;</button></td>';
+        html += '</tr>';
+        rowIdx++;
+      });
     });
     html += '</tbody></table>';
   } else {
@@ -27711,36 +27806,72 @@ function mbpRefreshCredsList(){
 }
 
 function mbpSaveCred(){
-  let domain=document.getElementById('mbp-cred-domain')?.value.trim().replace(/^https?:\/\//,'').split('/')[0].replace(/^www\./,'');
-  const user=document.getElementById('mbp-cred-user')?.value.trim();
-  const pass=document.getElementById('mbp-cred-pass')?.value;
-  const extra=document.getElementById('mbp-cred-extra')?.value.trim();
+  let domain=(document.getElementById('mbp-cred-domain')?.value.trim()||'').replace(/^https?:\/\//,'').split('/')[0].replace(/^www\./,'');
+  const user=(document.getElementById('mbp-cred-user')?.value||'').trim();
+  const pass=document.getElementById('mbp-cred-pass')?.value||'';
+  const extra=(document.getElementById('mbp-cred-extra')?.value||'').trim();
+  const label=(document.getElementById('mbp-cred-label')?.value||'').trim();
+  const editIdx=parseInt(document.getElementById('mbp-cred-edit-idx')?.value||'-1',10);
+  const editDomain=(document.getElementById('mbp-cred-edit-domain')?.value||'').trim();
   if(!domain){toast('Enter a domain','w');return;}
-  MBP.setCred(domain,{user,pass,extra});
-  mbpGenerateBookmarklets();  // updates window._mbpBM
-  mbpWireBookmarklets();       // rewires bookmarklet hrefs/textareas
-  mbpRefreshCredsList();       // refresh creds table in-place (no full page wipe)
+  if(!user){toast('Enter a username/email','w');return;}
+  // If editing a specific account, use that domain+idx
+  const targetDomain = editDomain||domain;
+  const targetIdx = (editDomain&&editIdx>=0) ? editIdx : -1;
+  MBP.setCred(targetDomain,{user,pass,extra,label},targetIdx>=0?targetIdx:undefined);
+  mbpCredClearForm();
+  mbpGenerateBookmarklets();
+  mbpWireBookmarklets();
+  mbpRefreshCredsList();
   mbpRefreshStats();
-  toast('✅ Credentials saved for '+domain+' — Autofill bookmarklet already updated (reads live from localStorage)','s');
+  toast('Credentials saved for '+targetDomain+(label?' ('+label+')':''),' — regenerate the AUTOFILL bookmarklet to update it.','s');
 }
-function mbpLoadCred(domain){
-  const c=MBP.creds[domain]||{};
-  // Switch to creds sub-tab if not already there
+function mbpCredClearForm(){
+  var fields=['mbp-cred-domain','mbp-cred-user','mbp-cred-pass','mbp-cred-extra','mbp-cred-label'];
+  fields.forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
+  var eid=document.getElementById('mbp-cred-edit-idx');if(eid)eid.value='-1';
+  var edom=document.getElementById('mbp-cred-edit-domain');if(edom)edom.value='';
+}
+function mbpLoadCred(domain, idx){
+  var arr=MBP.getCredsArr(domain);
+  var i = (typeof idx==='number'&&idx>=0) ? idx : 0;
+  var c = arr[i]||{};
   if(window._mbpSubTab!==4){ mbpSubTab(4); }
-  // Populate fields — use setTimeout so the subtab show animation settles
   setTimeout(function(){
-    const d=document.getElementById('mbp-cred-domain');
-    const u=document.getElementById('mbp-cred-user');
-    const p=document.getElementById('mbp-cred-pass');
-    const e=document.getElementById('mbp-cred-extra');
-    if(d)d.value=domain;if(u)u.value=c.user||'';if(p)p.value=c.pass||'';if(e)e.value=c.extra||'';
+    var d=document.getElementById('mbp-cred-domain');
+    var u=document.getElementById('mbp-cred-user');
+    var p=document.getElementById('mbp-cred-pass');
+    var e=document.getElementById('mbp-cred-extra');
+    var l=document.getElementById('mbp-cred-label');
+    var ei=document.getElementById('mbp-cred-edit-idx');
+    var ed=document.getElementById('mbp-cred-edit-domain');
+    if(d)d.value=domain;
+    if(u)u.value=c.user||'';
+    if(p)p.value=c.pass||'';
+    if(e)e.value=c.extra||'';
+    if(l)l.value=c.label||'';
+    if(ei)ei.value=String(i);
+    if(ed)ed.value=domain;
   },50);
 }
-function mbpDeleteCred(domain){
-  if(!confirm('Delete credentials for '+domain+'?')) return;
-  delete MBP.creds[domain];MBP.saveCreds();
+function mbpDeleteCred(domain, idx){
+  var arr=MBP.getCredsArr(domain);
+  var label='';
+  if(typeof idx==='number'&&idx>=0&&arr.length>1){
+    // Delete just one account from the array
+    label = arr[idx]?(' ('+(arr[idx].label||arr[idx].user)+')'):'';
+    if(!confirm('Delete account'+label+' for '+domain+'?')) return;
+    arr.splice(idx,1);
+    MBP.creds[domain.replace(/^www\./,'')]=arr;
+    MBP.saveCreds();
+  } else {
+    // Delete all credentials for this domain
+    if(!confirm('Delete ALL credentials for '+domain+'?')) return;
+    delete MBP.creds[domain.replace(/^www\./,'')];
+    MBP.saveCreds();
+  }
   mbpRefreshCredsList();mbpRefreshStats();
-  toast('Deleted','i');
+  toast('Deleted'+label,'i');
 }
 function mbpClearLearned(domain){
   if(!confirm('Clear learned form schema for '+domain+'?')) return;
@@ -28183,20 +28314,22 @@ switchPage = function(id){
 updatePlatformBar();
 updateHeader();
 switchPage('dashboard');
-MBP.startCapturePoll();  // FIX: start poll at app init — not just when Manual Browser tab renders
+if(!window.__MBP_IS_RELAY_TAB__) MBP.startCapturePoll();  // FIX: start poll at app init — not just when Manual Browser tab renders
 
 // ── RELAY HASH HANDLER ────────────────────────────────────────────────────
-// When a bookmarklet opens the dashboard URL with #mbp_relay=TYPE:B64PAYLOAD,
+// When a bookmarklet opens the dashboard URL with #mbp_relay=TYPE:PAYLOAD,
 // this handler detects it, writes the payload to localStorage (same origin!),
-// and closes the relay tab immediately. This bridges cross-origin comms.
+// and self-closes. The relay tab must NOT start the poll (or it would
+// immediately consume and delete the key before the real dashboard tab reads it).
 (function mbpHandleRelayHash(){
   const hash = location.hash;
   if(!hash.startsWith('#mbp_relay=')) return;
+  // RELAY MODE: write key, then close. Don't let the app poll run.
+  window.__MBP_IS_RELAY_TAB__ = true;
   try {
-    // Format: #mbp_relay=TYPE:BASE64PAYLOAD
     const rest = hash.slice('#mbp_relay='.length);
     const colon = rest.indexOf(':');
-    if(colon < 0) return;
+    if(colon < 0){ window.close(); return; }
     const type = rest.slice(0, colon);
     const payload = decodeURIComponent(rest.slice(colon + 1));
     const keyMap = {
@@ -28207,13 +28340,16 @@ MBP.startCapturePoll();  // FIX: start poll at app init — not just when Manual
     const storageKey = keyMap[type];
     if(storageKey){
       localStorage.setItem(storageKey, payload);
-      console.log('[MBP Relay] ✅ Wrote', storageKey, 'via hash relay');
+      console.log('[MBP Relay] ✅ Wrote', storageKey, 'payload length:', payload.length);
     }
-    // Clean up the hash so the UI doesn't show it
-    history.replaceState(null, '', location.pathname + location.search);
   } catch(e) {
     console.warn('[MBP Relay] Hash relay error:', e);
   }
+  // Close immediately — the real dashboard tab's poll will pick up the key
+  try { window.close(); } catch(e){}
+  // Fallback: hide everything and stop in case close() is blocked
+  document.documentElement.style.display = 'none';
+  throw new Error('[MBP Relay] Relay tab done — halting execution');
 })();
 
 // Helper: returns the current dashboard URL (used by bookmarklet generator)

@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -26471,13 +26470,19 @@ const MBP = {
   startCapturePoll(){
     if(this._pollTimer) clearInterval(this._pollTimer);
 
-    // FIX: listen for postMessage from bookmarklet popup (cross-origin capture)
+    // FIX: listen for postMessage from bookmarklet popup (cross-origin for all 3 bookmarklets)
     if(!this._msgListener){
       this._msgListener = (evt) => {
         try {
-          if(!evt.data || evt.data.type !== 'mbp_capture') return;
-          // Route through same localStorage key so single handler processes it
-          localStorage.setItem('mbp_capture_incoming', evt.data.payload);
+          if(!evt.data || !evt.data.type) return;
+          // Route each message type through the appropriate localStorage key
+          if(evt.data.type === 'mbp_capture'){
+            localStorage.setItem('mbp_capture_incoming', evt.data.payload);
+          } else if(evt.data.type === 'mbp_learn'){
+            localStorage.setItem('mbp_learn_incoming', evt.data.payload);
+          } else if(evt.data.type === 'mbp_autopost_result'){
+            localStorage.setItem('mbp_autopost_result', evt.data.payload);
+          }
         } catch(e){ console.warn('[MBP] postMessage relay error', e); }
       };
       window.addEventListener('message', this._msgListener);
@@ -26754,30 +26759,45 @@ function mbpGenerateBookmarklets(){
       +'});'
     +'});'
     +'var schema={domain:location.hostname,url:location.href,fields:fields,captchaSel:document.querySelector(".g-recaptcha,iframe[src*=recaptcha],iframe[src*=hcaptcha],.h-captcha,#cf-turnstile")?"detected":"none",recordedAt:Date.now()};'
-    +'localStorage.setItem("mbp_learn_incoming",JSON.stringify({domain:location.hostname,schema:schema}));'
+    +'var learnPayload=JSON.stringify({domain:location.hostname,schema:schema});'
+    +'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:"mbp_learn",payload:learnPayload},"*");}else{localStorage.setItem("mbp_learn_incoming",learnPayload);}}catch(e){try{localStorage.setItem("mbp_learn_incoming",learnPayload);}catch(e2){}}'
     +'alert("🧠 Form learned! "+fields.length+" fields captured for "+location.hostname+"\\nSwitch back to Backlink Pro to confirm.");'
   +'})();';
 
-  // AUTO-POST — reads schema + creds + post data, fills form, solves captcha, submits
-  // Injects a script that reads mbp_autopost_job from localStorage, executes it, posts result
+  // AUTO-POST — receives job via postMessage from opener (cross-origin safe), fills form, submits
   const autopostCode='javascript:(function(){'
-    +'var raw=localStorage.getItem("mbp_autopost_job");'
-    +'if(!raw){alert("No auto-post job queued. Use Bulk Blaster in Backlink Pro to queue one.");return;}'
-    +'var job=JSON.parse(raw);'
-    +'localStorage.removeItem("mbp_autopost_job");'
-    +'var schema=job.schema,data=job.postData,capKey=job.captchaKey||"",siteId=job.siteId||"",siteName=job.siteName||location.hostname;'
+    // Try to get job from opener via postMessage; fall back to localStorage poll
+    +'var job=null,schema,data,capKey,siteId,siteName;'
     +'var hud=document.createElement("div");'
     +'hud.style="position:fixed;top:10px;right:10px;background:#660099;color:#fff;padding:10px 14px;font-family:monospace;font-size:11px;z-index:999999;border-radius:4px;box-shadow:0 2px 10px rgba(0,0,0,.5);min-width:220px";'
-    +'hud.innerHTML="🤖 AUTO-POST running…<br><span id=\\"ap-status\\" style=\\"font-size:9px;opacity:.8\\">Filling fields…</span>";'
+    +'hud.innerHTML="🤖 AUTO-POST waiting for job…<br><span id=\\"ap-status\\" style=\\"font-size:9px;opacity:.8\\">Listening for Backlink Pro…</span>";'
     +'document.body.appendChild(hud);'
     +'function setStatus(s){var el=document.getElementById("ap-status");if(el)el.textContent=s;}'
+    +'function initJob(j){'
+      +'job=j;schema=job.schema;data=job.postData;capKey=job.captchaKey||"";siteId=job.siteId||"";siteName=job.siteName||location.hostname;'
+      +'setStatus("Job received! Filling fields…");'
+      +'runAutoPost();'
+    +'}'
+    // Listen for postMessage from dashboard
+    +'window.addEventListener("message",function(evt){'
+      +'if(evt.data&&evt.data.type==="mbp_autopost_job"){try{initJob(JSON.parse(evt.data.payload));}catch(e){setStatus("❌ Job parse error");}}'
+    +'});'
+    // Also poll localStorage as fallback (same-origin scenario)
+    +'var pollCount=0;'
+    +'var poll=setInterval(function(){'
+      +'pollCount++;'
+      +'var raw=localStorage.getItem("mbp_autopost_job");'
+      +'if(raw){clearInterval(poll);localStorage.removeItem("mbp_autopost_job");try{initJob(JSON.parse(raw));}catch(e){setStatus("❌ Job parse error");}}'
+      +'else if(pollCount>20){clearInterval(poll);setStatus("⚠ No job received. Trigger from Backlink Pro.");}'
+    +'},500);'
     +'function done(success,url,error){'
       +'var result={success:success,url:url||location.href,error:error||"",domain:location.hostname,siteId:siteId,siteName:siteName,title:document.title};'
-      +'localStorage.setItem("mbp_autopost_result",JSON.stringify(result));'
+      +'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:"mbp_autopost_result",payload:JSON.stringify(result)},"*");}else{localStorage.setItem("mbp_autopost_result",JSON.stringify(result));}}catch(e){try{localStorage.setItem("mbp_autopost_result",JSON.stringify(result));}catch(e2){}}'
       +'hud.style.background=success?"#006600":"#cc0000";'
       +'hud.innerHTML=(success?"✅ AUTO-POST SUCCESS":"❌ AUTO-POST FAILED")+"<br><span style=\\"font-size:9px;word-break:break-all\\">"+(url||error||"").slice(0,60)+"</span>";'
       +'setTimeout(function(){hud.remove();},5000);'
     +'}'
+    +'function runAutoPost(){'
     +'function fillField(sel,val){'
       +'var el=document.querySelector(sel);'
       +'if(!el) return false;'
@@ -27377,13 +27397,25 @@ function mbpTriggerAutoPost(id){
   };
   const capKey=settingGet('cap_2captchaKey')||'';
   const job={siteId:id,siteName:site.name,schema,postData,captchaKey:capKey,queuedAt:Date.now()};
-  localStorage.setItem('mbp_autopost_job',JSON.stringify(job));
+  const jobJson=JSON.stringify(job);
   MBP.setState(id,'auto_posting');
   mbpTermLog('🤖 Auto-post queued for: '+site.name,'t-accent');
   mbpTermLog('   Opening post URL: '+site.postUrl,'t-info');
   const w=window.open(site.postUrl,'mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
   if(!w){toast('⚠ Popup blocked — allow popups','e');MBP.setState(id,'idle');return;}
   MBP._popups[id]=w;
+  // FIX: deliver job via postMessage to popup (cross-origin safe).
+  // Poll until popup is ready, then postMessage the job. localStorage fallback via bookmarklet.
+  (function deliverJob(attempts){
+    if(attempts<=0) return;
+    setTimeout(function(){
+      try{
+        w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*');
+      }catch(e){}
+      // Retry until popup acknowledges or closes
+      if(!w.closed) deliverJob(attempts-1);
+    }, attempts===10 ? 1500 : 800); // first delivery after 1.5s (page load), then every 800ms
+  })(10);
   toast('🤖 Auto-post started for '+site.name+' — AUTO-POST bookmarklet will fire automatically','i',6000);
   mbpTermLog('   ℹ Click the 🤖 AUTO-POST bookmarklet on the post page if it does not auto-fire','t-info');
   blpSetTab(4);
@@ -27443,7 +27475,7 @@ async function mbpBlastStep(){
     return;
   }
   const job={siteId:site.id,siteName:site.name,schema,postData:next.postData,captchaKey:next.captchaKey,queuedAt:Date.now()};
-  localStorage.setItem('mbp_autopost_job',JSON.stringify(job));
+  const jobJson=JSON.stringify(job);
   MBP.setState(site.id,'auto_posting');
   mbpTermLog('🤖 Blasting: '+site.name,'t-accent');
   const w=window.open(site.postUrl,'mbp_blast_'+site.id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
@@ -27457,6 +27489,14 @@ async function mbpBlastStep(){
     return;
   }
   MBP._popups[site.id]=w;
+  // FIX: deliver job via postMessage (cross-origin safe)
+  (function deliverJob(attempts){
+    if(attempts<=0||w.closed) return;
+    setTimeout(function(){
+      try{ w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*'); }catch(e){}
+      if(!w.closed) deliverJob(attempts-1);
+    }, attempts===10 ? 1500 : 800);
+  })(10);
   // Wait for result with timeout
   const timeout=90000; // 90s per site
   const started=Date.now();

@@ -26675,7 +26675,7 @@ function mbpGenerateBookmarklets(){
 
   // AUTOFILL — reads saved creds, fills login form
   const autofillCode='javascript:(function(){'
-    +'var creds=JSON.parse(localStorage.getItem("mbp_creds")||"{}");'
+    +'var creds='+JSON.stringify(MBP.creds)+';'
     +'var host=location.hostname.replace(/^www\\./,"");'
     +'var cred=creds[host]||creds["www."+host]||creds[Object.keys(creds).find(function(k){return host.includes(k)||k.includes(host);})||""];'
     +'if(!cred||!cred.user){alert("No credentials for "+host+"\\nAdd them in MBP → Credentials tab.");return;}'
@@ -27496,7 +27496,9 @@ function mbpSaveCred(){
   const extra=document.getElementById('mbp-cred-extra')?.value.trim();
   if(!domain){toast('Enter a domain','w');return;}
   MBP.setCred(domain,{user,pass,extra});
-  toast('✅ Saved credentials for '+domain,'s');blpSetTab(4);
+  mbpGenerateBookmarklets();
+  mbpWireBookmarklets();
+  toast('✅ Saved credentials for '+domain+' — re-drag Autofill bookmarklet to update it','s');blpSetTab(4);
 }
 function mbpLoadCred(domain){
   const c=MBP.creds[domain]||{};

@@ -26494,6 +26494,27 @@ const MBP = {
       window.addEventListener('message', this._msgListener);
     }
 
+    // BroadcastChannel listener — catches relay messages from bookmarklets in same browser session
+    // Works alongside the hash relay; whichever arrives first wins (poll deduplicates via removeItem)
+    if(!this._bcListener){
+      try {
+        this._bc = new BroadcastChannel('mbp_bridge');
+        this._bcListener = (evt) => {
+          try {
+            if(!evt.data || !evt.data.type) return;
+            const keyMap = {
+              'mbp_capture': 'mbp_capture_incoming',
+              'mbp_learn':   'mbp_learn_incoming',
+              'mbp_autopost_result': 'mbp_autopost_result'
+            };
+            const storageKey = keyMap[evt.data.type];
+            if(storageKey) localStorage.setItem(storageKey, evt.data.payload);
+          } catch(e){ console.warn('[MBP] BroadcastChannel relay error', e); }
+        };
+        this._bc.addEventListener('message', this._bcListener);
+      } catch(e){ console.warn('[MBP] BroadcastChannel not supported', e); }
+    }
+
     this._pollTimer = setInterval(()=>{
       // ── Capture incoming URLs from bookmarklet ──
       const raw = localStorage.getItem('mbp_capture_incoming');
@@ -26691,19 +26712,39 @@ function mbpRefreshKanban(){
 // ── BOOKMARKLET GENERATORS ────────────────────────────────────────────────
 function mbpGenerateBookmarklets(){
   const patternsJSON = JSON.stringify(MBP_PATTERNS.map(function(p){return p.r.source;}));
+  // Bake in the dashboard URL at generation time — relay popup will open this URL with #mbp_relay hash
+  const DASH_URL = JSON.stringify(mbpGetDashboardUrl());
+
+  // Shared send helper — injected as string into each bookmarklet.
+  // Priority: 1) postMessage to opener (if alive)  2) BroadcastChannel  3) Relay popup (ALWAYS works cross-origin)  4) localStorage last resort
+  const mbpSendFn =
+    'function mbpSend(type,payload){'
+    +'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:type,payload:payload},"*");}}catch(e){}'
+    +'try{var bc=new BroadcastChannel("mbp_bridge");bc.postMessage({type:type,payload:payload});bc.close();}catch(e){}'
+    +'try{'
+      +'var ru='+DASH_URL+'+"#mbp_relay="+type+":"+encodeURIComponent(payload);'
+      +'var rw=window.open(ru,"mbp_relay_"+Date.now(),"width=1,height=1,left=-9999,top=-9999,toolbar=no,menubar=no");'
+      +'if(rw)setTimeout(function(){try{rw.close();}catch(e){}},4000);'
+    +'}catch(e){}'
+    +'try{'
+      +'var km={"mbp_capture":"mbp_capture_incoming","mbp_learn":"mbp_learn_incoming","mbp_autopost_result":"mbp_autopost_result"};'
+      +'if(km[type])localStorage.setItem(km[type],payload);'
+    +'}catch(e){}'
+    +'}';
 
   // CAPTURE v2 — auto-detects success URL, HUD overlay, 3-min watcher
   const captureCode='javascript:(function(){'
-    +'var KEY="mbp_capture_incoming",DONE="mbp_bm_done_"+location.hostname;'
+    +'var DONE="mbp_bm_done_"+location.hostname;'
     +'if(localStorage.getItem(DONE)===location.href){alert("Already captured: "+location.href);return;}'
     +'var patterns='+patternsJSON+';'
     +'function isSuccess(u){return patterns.some(function(p){return new RegExp(p).test(u);});}'
+    +mbpSendFn
     +'function send(url,auto){'
       +'var title=document.title,domain=location.hostname;'
       +'var note=auto?"":prompt("Note (optional — OK to capture):","backlink post");'
       +'if(note===null)return;'
       +'var payload=JSON.stringify({url:url,title:title,domain:domain,note:note||"",auto:!!auto});'
-      +'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:"mbp_capture",payload:payload},"*");}else{localStorage.setItem(KEY,payload);}}catch(e){try{localStorage.setItem(KEY,payload);}catch(e2){}}'
+      +'mbpSend("mbp_capture",payload);'
       +'localStorage.setItem(DONE,url);'
       +'var h=document.createElement("div");'
       +'h.style="position:fixed;bottom:20px;right:20px;background:#006600;color:#fff;padding:12px 18px;font-family:monospace;font-size:13px;font-weight:bold;z-index:999999;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.4)";'
@@ -26766,12 +26807,14 @@ function mbpGenerateBookmarklets(){
     +'});'
     +'var schema={domain:location.hostname,url:location.href,fields:fields,captchaSel:document.querySelector(".g-recaptcha,iframe[src*=recaptcha],iframe[src*=hcaptcha],.h-captcha,#cf-turnstile")?"detected":"none",recordedAt:Date.now()};'
     +'var learnPayload=JSON.stringify({domain:location.hostname,schema:schema});'
-    +'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:"mbp_learn",payload:learnPayload},"*");}else{localStorage.setItem("mbp_learn_incoming",learnPayload);}}catch(e){try{localStorage.setItem("mbp_learn_incoming",learnPayload);}catch(e2){}}'
+    +mbpSendFn
+    +'mbpSend("mbp_learn",learnPayload);'
     +'alert("🧠 Form learned! "+fields.length+" fields captured for "+location.hostname+"\\nSwitch back to Backlink Pro to confirm.");'
   +'})();';
 
   // AUTO-POST — receives job via postMessage from opener (cross-origin safe), fills form, submits
   const autopostCode='javascript:(function(){'
+    +mbpSendFn
     // Try to get job from opener via postMessage; fall back to localStorage poll
     +'var job=null,schema,data,capKey,siteId,siteName;'
     +'var hud=document.createElement("div");'
@@ -26798,7 +26841,7 @@ function mbpGenerateBookmarklets(){
     +'},500);'
     +'function done(success,url,error){'
       +'var result={success:success,url:url||location.href,error:error||"",domain:location.hostname,siteId:siteId,siteName:siteName,title:document.title};'
-      +'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:"mbp_autopost_result",payload:JSON.stringify(result)},"*");}else{localStorage.setItem("mbp_autopost_result",JSON.stringify(result));}}catch(e){try{localStorage.setItem("mbp_autopost_result",JSON.stringify(result));}catch(e2){}}'
+      +'mbpSend("mbp_autopost_result",JSON.stringify(result));'
       +'hud.style.background=success?"#006600":"#cc0000";'
       +'hud.innerHTML=(success?"✅ AUTO-POST SUCCESS":"❌ AUTO-POST FAILED")+"<br><span style=\\"font-size:9px;word-break:break-all\\">"+(url||error||"").slice(0,60)+"</span>";'
       +'setTimeout(function(){hud.remove();},5000);'
@@ -28131,6 +28174,42 @@ updatePlatformBar();
 updateHeader();
 switchPage('dashboard');
 MBP.startCapturePoll();  // FIX: start poll at app init — not just when Manual Browser tab renders
+
+// ── RELAY HASH HANDLER ────────────────────────────────────────────────────
+// When a bookmarklet opens the dashboard URL with #mbp_relay=TYPE:B64PAYLOAD,
+// this handler detects it, writes the payload to localStorage (same origin!),
+// and closes the relay tab immediately. This bridges cross-origin comms.
+(function mbpHandleRelayHash(){
+  const hash = location.hash;
+  if(!hash.startsWith('#mbp_relay=')) return;
+  try {
+    // Format: #mbp_relay=TYPE:BASE64PAYLOAD
+    const rest = hash.slice('#mbp_relay='.length);
+    const colon = rest.indexOf(':');
+    if(colon < 0) return;
+    const type = rest.slice(0, colon);
+    const payload = decodeURIComponent(rest.slice(colon + 1));
+    const keyMap = {
+      'mbp_capture': 'mbp_capture_incoming',
+      'mbp_learn':   'mbp_learn_incoming',
+      'mbp_autopost_result': 'mbp_autopost_result'
+    };
+    const storageKey = keyMap[type];
+    if(storageKey){
+      localStorage.setItem(storageKey, payload);
+      console.log('[MBP Relay] ✅ Wrote', storageKey, 'via hash relay');
+    }
+    // Clean up the hash so the UI doesn't show it
+    history.replaceState(null, '', location.pathname + location.search);
+  } catch(e) {
+    console.warn('[MBP Relay] Hash relay error:', e);
+  }
+})();
+
+// Helper: returns the current dashboard URL (used by bookmarklet generator)
+function mbpGetDashboardUrl(){
+  return location.href.split('#')[0];
+}
 </script>
 </body>
 </html>

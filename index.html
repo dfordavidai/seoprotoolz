@@ -26061,6 +26061,12 @@ function renderBacklinkPro(el){
 
   // Attach filter state handlers
   el._filterType = selType; el._filterAuth = selAuth; el._filterDA = selDA; el._search = el._search||'';
+
+  // FIX: Browsers never execute <script> tags injected via innerHTML.
+  // Run MBP init immediately after render when Manual Browser tab is active.
+  if((el._tab||0) === 4){
+    setTimeout(mbpPostRenderInit, 0);
+  }
 }
 
 function blpRenderCredentials(){
@@ -26532,7 +26538,7 @@ const MBP = {
           mbpTermLog('🧠 LEARNED form schema for: '+data.domain+' ('+data.schema.fields.length+' fields)','t-accent');
           toast('🧠 Form learned for '+data.domain,'s',4000);
           mbpRefreshStats();  // FIX: update Learned Forms counter live
-          blpSetTab(4);
+          mbpRefreshCredsList();  // FIX: update creds/learned table in-place
         } catch(e){ console.warn('[MBP] learn error',e); }
       }
 
@@ -26720,9 +26726,9 @@ function mbpGenerateBookmarklets(){
     +'alert("📎 MBP Capture active!\\nBlue HUD is watching for success URLs.\\nOr click it to capture manually.");'
   +'})();';
 
-  // AUTOFILL — reads saved creds, fills login form
+  // AUTOFILL — reads live creds from localStorage at click time (NOT baked-in snapshot)
   const autofillCode='javascript:(function(){'
-    +'var creds='+JSON.stringify(MBP.creds)+';'
+    +'var creds=JSON.parse(localStorage.getItem("mbp_creds")||"{}");'  // FIX: read live, not baked snapshot
     +'var host=location.hostname.replace(/^www\\./,"");'
     +'var cred=creds[host]||creds["www."+host]||creds[Object.keys(creds).find(function(k){return host.includes(k)||k.includes(host);})||""];'
     +'if(!cred||!cred.user){alert("No credentials for "+host+"\\nAdd them in MBP → Credentials tab.");return;}'
@@ -26912,7 +26918,19 @@ function mbpWireBookmarklets(){
   });
 }
 
-// ── MAIN RENDER ───────────────────────────────────────────────────────────
+// Called after renderBacklinkPro sets el.innerHTML — executes the init that the dead inline script never could.
+// Safe to call multiple times (poll guard already in MBP.startCapturePoll).
+function mbpPostRenderInit(){
+  var logEl=document.getElementById('mbp-log-table');
+  if(logEl) mbpRenderLogTable(logEl);
+  mbpRefreshKanban();
+  mbpGenerateBookmarklets();   // populates window._mbpBM
+  mbpWireBookmarklets();       // wires href + textarea values via DOM
+  mbpTermLog('🌐 MBP v3 — GOD-TIER active | Auto-Post Engine + Bulk Blaster ready','t-accent');
+  if(MBP.log.length) mbpTermLog('📋 '+MBP.log.length+' previously captured URLs loaded','t-info');
+  if(MBP.sites.length) mbpTermLog('🗂 '+MBP.sites.length+' sites in queue | '+Object.keys(MBP.learned).length+' forms learned','t-info');
+  mbpRefreshStats();
+}
 function blpRenderManualBrowser(){
   const bm = mbpGenerateBookmarklets();
   const totalCaptures = MBP.log.length;
@@ -27245,22 +27263,53 @@ function blpRenderManualBrowser(){
   html+='</div>';
 
   html+='<input type="hidden" id="mbp-active-site-id" value="">';
-
-  html+='<script>(function(){'
-    +'var logEl=document.getElementById("mbp-log-table");if(logEl)mbpRenderLogTable(logEl);'
-    +'mbpRefreshKanban();'
-    +'MBP.startCapturePoll();'
-    +'mbpGenerateBookmarklets();'  // populates window._mbpBM
-    +'mbpWireBookmarklets();'      // wires href + textarea values via DOM (no esc() corruption)
-    +'mbpTermLog("🌐 MBP v3 — GOD-TIER active | Auto-Post Engine + Bulk Blaster ready","t-accent");'
-    +(MBP.log.length?'mbpTermLog("📋 '+MBP.log.length+' previously captured URLs loaded","t-info");':'')
-    +(MBP.sites.length?'mbpTermLog("🗂 '+MBP.sites.length+' sites in queue | '+Object.keys(MBP.learned).length+' forms learned","t-info");':'')
-    +'})();<\/script>';
+  // NOTE: No inline <script> here — browsers never execute scripts injected via innerHTML.
+  // Init is handled by mbpPostRenderInit() called from renderBacklinkPro after innerHTML is set.
 
   return html;
 }
 
-// ── SUB-TAB SWITCHER ──────────────────────────────────────────────────────
+// Refreshes the site queue table and kanban in-place — no full page re-render.
+// Terminal, bookmarklet iframes, and form inputs survive.
+function mbpRefreshQueue(){
+  // Refresh kanban and stats
+  mbpRefreshKanban();
+  mbpRefreshStats();
+  // Refresh the site queue table inside mbp-sub-0
+  const sub0 = document.getElementById('mbp-sub-0');
+  if(!sub0) return;
+  // Find the site queue card (has the table/no-sites message)
+  const queueCard = sub0.querySelector('.card[style*="overflow:hidden"]');
+  if(!queueCard) return;
+  const stColors={idle:'#808080',opening:'var(--win-blue)',auto_posting:'#9900cc',captured:'var(--win-green)',done:'var(--win-green)',failed:'var(--win-red)'};
+  let html = '<div class="card-title">🗂 Site Queue ('+MBP.sites.length+' sites)</div>';
+  if(MBP.sites.length){
+    html += '<table style="width:100%;border-collapse:collapse;font-size:10px">';
+    html += '<thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Name</th><th style="padding:5px 8px;text-align:left">Login URL</th><th style="padding:5px 8px;text-align:center">State</th><th style="padding:5px 8px;text-align:center">Cred</th><th style="padding:5px 8px;text-align:center">🧠</th><th style="padding:5px 8px;text-align:center">Got</th><th style="padding:5px 8px;text-align:center">Actions</th></tr></thead><tbody>';
+    MBP.sites.forEach(function(s,i){
+      const st=MBP._states[s.id]||{state:'idle',captureCount:0};
+      const hasCred=!!(s.credDomain&&MBP.getCred(s.credDomain));
+      const hasLearn=!!(s.credDomain&&MBP.getLearned(s.credDomain));
+      html += '<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">';
+      html += '<td style="padding:5px 8px;font-weight:700;font-size:10px">'+esc(s.name)+'</td>';
+      html += '<td style="padding:5px 8px;font-family:var(--mono);font-size:9px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="'+esc(s.url)+'" target="_blank" style="color:var(--accent)">'+esc(s.url.replace(/^https?:\/\//,'').slice(0,40))+'</a></td>';
+      html += '<td style="padding:5px 8px;text-align:center"><span style="font-size:9px;font-weight:700;color:'+(stColors[st.state]||'#808080')+'">'+st.state.toUpperCase()+'</span></td>';
+      html += '<td style="padding:5px 8px;text-align:center">'+(hasCred?'<span style="color:var(--win-green)">✅</span>':'<span style="color:var(--win-red)">✗</span>')+'</td>';
+      html += '<td style="padding:5px 8px;text-align:center">'+(hasLearn?'<span style="color:#9900cc" title="Form schema learned">🧠</span>':'<span style="color:#808080;font-size:8px">—</span>')+'</td>';
+      html += '<td style="padding:5px 8px;text-align:center;font-weight:700;color:var(--win-green);font-family:var(--mono)">'+(st.captureCount||0)+'</td>';
+      html += '<td style="padding:5px 8px;text-align:center">';
+      html += '<button class="btn btn-primary btn-xs" onclick="mbpOpenSite(\''+s.id+'\')" title="Open login URL">🌐</button> ';
+      if(s.postUrl) html += '<button class="btn btn-xs" onclick="mbpOpenPostUrl(\''+s.id+'\')" title="Open post URL">✏</button> ';
+      if(hasLearn&&hasCred) html += '<button class="btn btn-xs" style="background:#9900cc;color:#fff;border-color:#660066" onclick="mbpTriggerAutoPost(\''+s.id+'\')" title="Auto-post now">🤖</button> ';
+      html += '<button class="btn btn-xs btn-danger" onclick="mbpDeleteSite(\''+s.id+'\')" title="Remove">✕</button>';
+      html += '</td></tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div style="padding:16px;text-align:center;color:var(--win-text-muted);font-size:10px">No sites yet — add one above or import a list</div>';
+  }
+  queueCard.innerHTML = html;
+}
 function mbpSubTab(i){
   window._mbpSubTab=i;
   [0,1,2,3,4,5].forEach(function(n){
@@ -27286,7 +27335,11 @@ function mbpAddSite(){
   MBP.sites.push({id:uid(),name,url,postUrl,credDomain,notes,addedAt:Date.now()});
   MBP.save();
   toast('✅ '+name+' added','s');
-  blpSetTab(4);
+  mbpRefreshQueue();
+  // Clear form fields
+  ['mbp-new-name','mbp-new-url','mbp-new-post-url','mbp-new-cred-domain','mbp-new-notes'].forEach(function(id){
+    const el=document.getElementById(id);if(el)el.value='';
+  });
 }
 
 function mbpDeleteSite(id){
@@ -27296,7 +27349,7 @@ function mbpDeleteSite(id){
   delete MBP._states[id];
   delete MBP._popups[id];
   MBP.save();
-  blpSetTab(4);
+  mbpRefreshQueue();
 }
 
 function mbpOpenSite(id){
@@ -27374,7 +27427,8 @@ async function mbpRunQueue(){
 function mbpResetAllStates(){
   if(!confirm('Reset all states to idle?')) return;
   MBP.sites.forEach(function(s){if(MBP._states[s.id])MBP._states[s.id].state='idle';});
-  mbpRefreshKanban();blpSetTab(4);
+  MBP.saveStates();
+  mbpRefreshKanban();mbpRefreshQueue();
 }
 
 // ── AUTO-POST TRIGGER ─────────────────────────────────────────────────────
@@ -27418,7 +27472,7 @@ function mbpTriggerAutoPost(id){
   })(10);
   toast('🤖 Auto-post started for '+site.name+' — AUTO-POST bookmarklet will fire automatically','i',6000);
   mbpTermLog('   ℹ Click the 🤖 AUTO-POST bookmarklet on the post page if it does not auto-fire','t-info');
-  blpSetTab(4);
+  mbpSubTab(0);  // Switch to Queue tab to show state change
 }
 
 // ── BLAST ALL ENGINE ──────────────────────────────────────────────────────
@@ -27450,7 +27504,7 @@ function mbpStartBlast(){
   window._mbpBlastResults = [];
   window._mbpBlastActive  = {total:queue.length, done:0, startedAt:Date.now()};
   mbpTermLog('💥 BLAST STARTED: '+queue.length+' sites','t-accent');
-  blpSetTab(4);
+  mbpSubTab(3);  // Switch to Blast All tab to show progress
   mbpBlastStep();
 }
 
@@ -27545,7 +27599,8 @@ function mbpBlastFinish(){
   window._mbpBlastActive=null;
   mbpTermLog('🏁 BLAST COMPLETE: '+done+' success, '+failed+' failed','t-accent');
   toast('💥 Blast complete: '+done+' posted!','s',8000);
-  blpSetTab(4);
+  mbpRefreshQueue();
+  mbpRefreshBlastUI();
 }
 
 function mbpRefreshBlastUI(){
@@ -27571,6 +27626,37 @@ function mbpRefreshBlastUI(){
 }
 
 // ── CREDENTIALS ───────────────────────────────────────────────────────────
+// Refreshes the saved-credentials table in-place without wiping the whole page.
+// Called after save/delete so the terminal, kanban, and all other state survives.
+function mbpRefreshCredsList(){
+  // Try to find the creds container inside mbp-sub-4
+  const sub4 = document.getElementById('mbp-sub-4');
+  if(!sub4) return;
+  // The creds card is the second .card inside sub4 (first is the Save form)
+  const cards = sub4.querySelectorAll('.card');
+  const credCard = cards[1]; // [0]=Save form, [1]=Saved Credentials table
+  if(!credCard) return;
+  const credKeys = Object.keys(MBP.creds);
+  let html = '<div class="card-title">🔑 Saved Credentials ('+credKeys.length+')</div>';
+  if(credKeys.length){
+    html += '<table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:var(--win-dark)"><th style="padding:5px 8px;text-align:left">Domain</th><th style="padding:5px 8px;text-align:left">Username</th><th style="padding:5px 8px;text-align:left">Password</th><th style="padding:5px 8px;text-align:center">Act</th></tr></thead><tbody>';
+    credKeys.forEach(function(domain,i){
+      const c = MBP.creds[domain];
+      html += '<tr style="border-bottom:1px solid var(--win-border);'+(i%2?'background:var(--win-surface)':'')+'">';
+      html += '<td style="padding:5px 8px;font-family:var(--mono);font-weight:700">'+esc(domain)+'</td>';
+      html += '<td style="padding:5px 8px;font-family:var(--mono)">'+esc(c.user||'')+'</td>';
+      html += '<td style="padding:5px 8px;font-family:var(--mono)"><span id="mbp-pw-'+i+'">••••••••</span>'
+        +'<button class="btn btn-xs" onclick="var e=document.getElementById(\'mbp-pw-'+i+'\');e.textContent=e.textContent===\''+esc(c.pass||'')+'\' ? \'••••••••\' : \''+esc(c.pass||'')+'\'" style="font-size:8px;margin-left:4px">👁</button></td>';
+      html += '<td style="padding:5px 8px;text-align:center"><button class="btn btn-xs" onclick="mbpLoadCred(\''+esc(domain)+'\')">✏</button> <button class="btn btn-xs btn-danger" onclick="mbpDeleteCred(\''+esc(domain)+'\')">✕</button></td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div style="padding:14px;text-align:center;color:var(--win-text-muted);font-size:10px">No credentials saved yet</div>';
+  }
+  credCard.innerHTML = html;
+}
+
 function mbpSaveCred(){
   let domain=document.getElementById('mbp-cred-domain')?.value.trim().replace(/^https?:\/\//,'').split('/')[0].replace(/^www\./,'');
   const user=document.getElementById('mbp-cred-user')?.value.trim();
@@ -27578,28 +27664,36 @@ function mbpSaveCred(){
   const extra=document.getElementById('mbp-cred-extra')?.value.trim();
   if(!domain){toast('Enter a domain','w');return;}
   MBP.setCred(domain,{user,pass,extra});
-  mbpGenerateBookmarklets();
-  mbpWireBookmarklets();
-  toast('✅ Saved credentials for '+domain+' — re-drag Autofill bookmarklet to update it','s');blpSetTab(4);
+  mbpGenerateBookmarklets();  // updates window._mbpBM
+  mbpWireBookmarklets();       // rewires bookmarklet hrefs/textareas
+  mbpRefreshCredsList();       // refresh creds table in-place (no full page wipe)
+  mbpRefreshStats();
+  toast('✅ Credentials saved for '+domain+' — Autofill bookmarklet already updated (reads live from localStorage)','s');
 }
 function mbpLoadCred(domain){
   const c=MBP.creds[domain]||{};
-  window._mbpSubTab=4;blpSetTab(4);
+  // Switch to creds sub-tab if not already there
+  if(window._mbpSubTab!==4){ mbpSubTab(4); }
+  // Populate fields — use setTimeout so the subtab show animation settles
   setTimeout(function(){
     const d=document.getElementById('mbp-cred-domain');
     const u=document.getElementById('mbp-cred-user');
     const p=document.getElementById('mbp-cred-pass');
     const e=document.getElementById('mbp-cred-extra');
     if(d)d.value=domain;if(u)u.value=c.user||'';if(p)p.value=c.pass||'';if(e)e.value=c.extra||'';
-  },100);
+  },50);
 }
 function mbpDeleteCred(domain){
   if(!confirm('Delete credentials for '+domain+'?')) return;
-  delete MBP.creds[domain];MBP.saveCreds();toast('Deleted','i');blpSetTab(4);
+  delete MBP.creds[domain];MBP.saveCreds();
+  mbpRefreshCredsList();mbpRefreshStats();
+  toast('Deleted','i');
 }
 function mbpClearLearned(domain){
   if(!confirm('Clear learned form schema for '+domain+'?')) return;
-  delete MBP.learned[domain];MBP.saveLearned();toast('Schema cleared','i');blpSetTab(4);
+  delete MBP.learned[domain];MBP.saveLearned();
+  mbpRefreshCredsList();mbpRefreshStats();
+  toast('Schema cleared','i');
 }
 
 // ── IMPORT / EXPORT ───────────────────────────────────────────────────────
@@ -27626,7 +27720,7 @@ function mbpImportSites(){
       added++;
     }catch(_){}
   });
-  MBP.save();toast('✅ Imported '+added+' sites','s');blpSetTab(4);
+  MBP.save();toast('✅ Imported '+added+' sites','s');mbpRefreshQueue();
 }
 
 // ── LOG MANAGEMENT ────────────────────────────────────────────────────────
@@ -28036,6 +28130,7 @@ switchPage = function(id){
 updatePlatformBar();
 updateHeader();
 switchPage('dashboard');
+MBP.startCapturePoll();  // FIX: start poll at app init — not just when Manual Browser tab renders
 </script>
 </body>
 </html>

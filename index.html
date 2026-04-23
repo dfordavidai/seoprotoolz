@@ -27490,7 +27490,7 @@ function mbpRefreshBlastUI(){
 
 // ── CREDENTIALS ───────────────────────────────────────────────────────────
 function mbpSaveCred(){
-  let domain=document.getElementById('mbp-cred-domain')?.value.trim().replace(/^https?:\/\//,'').split('/')[0];
+  let domain=document.getElementById('mbp-cred-domain')?.value.trim().replace(/^https?:\/\//,'').split('/')[0].replace(/^www\./,'');
   const user=document.getElementById('mbp-cred-user')?.value.trim();
   const pass=document.getElementById('mbp-cred-pass')?.value;
   const extra=document.getElementById('mbp-cred-extra')?.value.trim();

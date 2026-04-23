@@ -26425,7 +26425,7 @@ const MBP = {
   learned:  JSON.parse(localStorage.getItem('mbp_learned')||'{}'),  // per-domain learned form schemas
   blastJobs:JSON.parse(localStorage.getItem('mbp_blast_jobs')||'[]'),
   _popups:  {},
-  _states:  {},
+  _states:  JSON.parse(localStorage.getItem('mbp_states')||'{}'),  // FIX: persisted across reloads
   _pollTimer: null,
   _stateTimer: null,
   _activeId: null,
@@ -26436,6 +26436,7 @@ const MBP = {
   saveCreds(){    localStorage.setItem('mbp_creds',     JSON.stringify(this.creds)); },
   saveLearned(){  localStorage.setItem('mbp_learned',   JSON.stringify(this.learned)); },
   saveBlast(){    localStorage.setItem('mbp_blast_jobs',JSON.stringify(this.blastJobs)); },
+  saveStates(){   localStorage.setItem('mbp_states',    JSON.stringify(this._states)); },
 
   setCred(domain, obj){ this.creds[domain]=obj; this.saveCreds(); },
   getCred(domain){
@@ -26455,6 +26456,7 @@ const MBP = {
     if(!this._states[id]) this._states[id]={state:'idle', captureCount:0};
     this._states[id].state = state;
     this._states[id].updatedAt = Date.now();
+    this.saveStates();  // FIX: persist state changes immediately
     mbpRefreshKanban();
   },
   getState(id){ return (this._states[id]||{state:'idle'}).state; },
@@ -26467,6 +26469,19 @@ const MBP = {
 
   startCapturePoll(){
     if(this._pollTimer) clearInterval(this._pollTimer);
+
+    // FIX: listen for postMessage from bookmarklet popup (cross-origin capture)
+    if(!this._msgListener){
+      this._msgListener = (evt) => {
+        try {
+          if(!evt.data || evt.data.type !== 'mbp_capture') return;
+          // Route through same localStorage key so single handler processes it
+          localStorage.setItem('mbp_capture_incoming', evt.data.payload);
+        } catch(e){ console.warn('[MBP] postMessage relay error', e); }
+      };
+      window.addEventListener('message', this._msgListener);
+    }
+
     this._pollTimer = setInterval(()=>{
       // ── Capture incoming URLs from bookmarklet ──
       const raw = localStorage.getItem('mbp_capture_incoming');
@@ -26497,6 +26512,7 @@ const MBP = {
           const logEl=document.getElementById('mbp-log-table');
           if(logEl) mbpRenderLogTable(logEl);
           mbpRefreshKanban();
+          mbpRefreshStats();  // FIX: update Captured/Today counters live
         } catch(e){ console.warn('[MBP] capture error',e); }
       }
 
@@ -26509,6 +26525,7 @@ const MBP = {
           MBP.setLearned(data.domain, data.schema);
           mbpTermLog('🧠 LEARNED form schema for: '+data.domain+' ('+data.schema.fields.length+' fields)','t-accent');
           toast('🧠 Form learned for '+data.domain,'s',4000);
+          mbpRefreshStats();  // FIX: update Learned Forms counter live
           blpSetTab(4);
         } catch(e){ console.warn('[MBP] learn error',e); }
       }
@@ -26558,8 +26575,31 @@ const MBP = {
   stopCapturePoll(){
     if(this._pollTimer){clearInterval(this._pollTimer);this._pollTimer=null;}
     if(this._stateTimer){clearInterval(this._stateTimer);this._stateTimer=null;}
+    if(this._msgListener){window.removeEventListener('message',this._msgListener);this._msgListener=null;}
   },
 };
+
+// ── STATS BAR LIVE REFRESH ────────────────────────────────────────────────
+// Patches the 5 stat-card numbers in-place so captures reflect immediately
+// without a full blpRenderManualBrowser() re-render.
+function mbpRefreshStats(){
+  const el = document.getElementById('mbp-stats-bar');
+  if(!el) return;
+  const totalCaptures = MBP.log.length;
+  const todayCaptures = MBP.log.filter(function(l){return l.ts>Date.now()-86400000;}).length;
+  const learnedCount  = Object.keys(MBP.learned).length;
+  const vals = [
+    MBP.sites.length,
+    totalCaptures,
+    todayCaptures,
+    learnedCount,
+    Object.keys(MBP.creds).length,
+  ];
+  const cards = el.querySelectorAll('[data-mbp-stat]');
+  cards.forEach(function(c, i){
+    if(vals[i] !== undefined) c.textContent = vals[i];
+  });
+}
 
 // ── TERMINAL ──────────────────────────────────────────────────────────────
 function mbpTermLog(msg, cls='t-info'){
@@ -26650,7 +26690,8 @@ function mbpGenerateBookmarklets(){
       +'var title=document.title,domain=location.hostname;'
       +'var note=auto?"":prompt("Note (optional — OK to capture):","backlink post");'
       +'if(note===null)return;'
-      +'localStorage.setItem(KEY,JSON.stringify({url:url,title:title,domain:domain,note:note||"",auto:!!auto}));'
+      +'var payload=JSON.stringify({url:url,title:title,domain:domain,note:note||"",auto:!!auto});'
+      +'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:"mbp_capture",payload:payload},"*");}else{localStorage.setItem(KEY,payload);}}catch(e){try{localStorage.setItem(KEY,payload);}catch(e2){}}'
       +'localStorage.setItem(DONE,url);'
       +'var h=document.createElement("div");'
       +'h.style="position:fixed;bottom:20px;right:20px;background:#006600;color:#fff;padding:12px 18px;font-family:monospace;font-size:13px;font-weight:bold;z-index:999999;border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.4)";'
@@ -26860,14 +26901,14 @@ function blpRenderManualBrowser(){
   let html='';
 
   // Stats row
-  html+='<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:10px">';
+  html+='<div id="mbp-stats-bar" style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:10px">';
   [['🌐',MBP.sites.length,'Sites','var(--win-blue)'],
    ['✅',totalCaptures,'Captured','var(--win-green)'],
    ['📅',todayCaptures,'Today','var(--win-text)'],
    ['🧠',learnedCount,'Learned Forms','#9900cc'],
    ['🔑',Object.keys(MBP.creds).length,'Credentials','#c47a00'],
   ].forEach(function(r){
-    html+='<div class="card" style="text-align:center;padding:8px 4px"><div style="font-size:18px;font-weight:700;font-family:var(--mono);color:'+r[3]+'">'+r[1]+'</div><div style="font-size:9px;font-weight:700">'+r[0]+' '+r[2]+'</div></div>';
+    html+='<div class="card" style="text-align:center;padding:8px 4px"><div data-mbp-stat style="font-size:18px;font-weight:700;font-family:var(--mono);color:'+r[3]+'">'+r[1]+'</div><div style="font-size:9px;font-weight:700">'+r[0]+' '+r[2]+'</div></div>';
   });
   html+='</div>';
 

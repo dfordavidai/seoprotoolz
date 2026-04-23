@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -13029,7 +13028,7 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
   // Note: browser cannot set Content-Length — may get 503 SlowDown on first attempt.
   // Retry up to 3 times with backoff.
   if(onProgress) onProgress(20,'Uploading directly to Archive.org S3...');
-  const identifier = 'seo-'+slug(keyword)+'-'+(Date.now().toString(36));
+  const identifier = slug(keyword)+'-'+(Date.now().toString(36));
   const uploadUrl  = 'https://s3.us.archive.org/'+identifier+'/'+encodeURIComponent(filename);
   const putHeaders = {
     'Authorization':'LOW '+accessKey+':'+secretKey,
@@ -13117,37 +13116,47 @@ async function buildRealPDF(job){
   }
 
   // ── COVER PAGE ──
+  const coverH = 36; // compact header height
   doc.setFillColor(rgb.r,rgb.g,rgb.b);
-  doc.rect(0,0,W,60,'F');
-  doc.setFillColor(rgb.r,rgb.g,rgb.b);
-  doc.setDrawColor(255,255,255);
-  doc.rect(0,55,W,5,'F');
+  doc.rect(0,0,W,coverH,'F');
   doc.setTextColor(255,255,255);
-  doc.setFontSize(22); doc.setFont('helvetica','bold');
+  doc.setFontSize(18); doc.setFont('helvetica','bold');
   const titleLines = doc.splitTextToSize(title,tw);
-  let ty=22;
-  titleLines.forEach(l=>{ doc.text(l,mx,ty); ty+=9; });
-  doc.setFontSize(12); doc.setFont('helvetica','normal');
-  doc.text('The Definitive 2025 Resource on '+kw, mx, ty+4);
+  let ty=13;
+  titleLines.slice(0,2).forEach(l=>{ doc.text(l,mx,ty); ty+=8; });
+  doc.setFontSize(9); doc.setFont('helvetica','normal');
+  doc.text('The Definitive 2025 Resource on '+kw, mx, Math.min(ty+1, coverH-4));
   doc.setTextColor(0,0,0);
-  y = 68;
+  y = coverH + 6;
 
   // ── COVER IMAGE (optional, clickable) ──
   if(job.coverImgDataUrl){
     try{
-      const imgH = 45;
+      const imgH = 42;
       const imgW = tw;
       doc.addImage(job.coverImgDataUrl, 'JPEG', mx, y, imgW, imgH, undefined, 'FAST');
       if(job.imgLink){
         doc.link(mx, y, imgW, imgH, {url: job.imgLink});
-        // Small label
         doc.setFontSize(7); doc.setTextColor(100,100,200);
-        doc.text('🔗 Click image: '+job.imgLink.substring(0,60), mx, y+imgH+3);
+        doc.text('Click image: '+job.imgLink.substring(0,70), mx, y+imgH+3);
       }
-      y += imgH + 8;
-    }catch(imgErr){ y += 4; } // silently skip if image fails
-  } else {
-    y = 75;
+      y += imgH + 6;
+    }catch(imgErr){ y += 2; }
+  }
+
+  // ── COVER TEXT BLOCK (optional, shown after image or after header) ──
+  if(job.coverText){
+    doc.setFontSize(10); doc.setFont('helvetica','normal'); doc.setTextColor(30,30,30);
+    const ctLines = doc.splitTextToSize(job.coverText, tw);
+    ctLines.slice(0,6).forEach(l=>{ checkY(6); doc.text(l,mx,y); y+=5.5; });
+    y+=3;
+  }
+  if(job.coverLink){
+    doc.setFontSize(9); doc.setTextColor(rgb.r,rgb.g,rgb.b);
+    const clLabel = job.coverLinkLabel||job.coverLink;
+    doc.text('→ '+clLabel.substring(0,80), mx, y);
+    doc.link(mx, y-4, tw, 6, {url: job.coverLink});
+    y+=8;
   }
 
   // ── METADATA BOX ──
@@ -13634,7 +13643,7 @@ async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
     const text = await res.text();
     let d; try{ d=JSON.parse(text); }catch(e){ throw new Error('Server error (HTTP '+res.status+'): '+text.slice(0,100)); }
     if(d.ok && d.url){
-      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:d.url, note:d.note||'Auto-uploaded via proxy'};
+      return {pid:plat.id, name:plat.name, icon:plat.icon, da:plat.da, status:'live', url:d.url, pdfFilename:filename, note:d.note||'Auto-uploaded via proxy'};
     }
     // Platform returned manual=true (needs cookie) — download + open upload page
     if(d.manual){
@@ -13651,14 +13660,23 @@ async function attemptProxiedUpload(pdfBytes, job, plat, creds, vercelBase){
 }
 
 /* ── MAIN PDF JOB ADD ── */
+let _pdfAddJobRunning = false;
 async function pdfAddJob(){
+  if(_pdfAddJobRunning){ pdfToast('Already building a PDF, please wait...','warn'); return; }
+  _pdfAddJobRunning = true;
+  try { await _pdfAddJobInner(); } finally { _pdfAddJobRunning = false; }
+}
+async function _pdfAddJobInner(){
   const kw     = (document.getElementById('pdf-kw')||{value:''}).value.trim();
   const title  = (document.getElementById('pdf-title-input')||{value:''}).value.trim() || 'The Complete Guide to '+kw+' (2025)';
   const tpl    = (document.getElementById('pdf-template')||{value:'guide'}).value;
   const dens   = (document.getElementById('pdf-density')||{value:'rich'}).value;
   const bls    = (document.getElementById('pdf-backlinks')||{value:''}).value.trim();
   const color  = (document.getElementById('pdf-color')||{value:'#0057ff'}).value;
-  const imgLink= (document.getElementById('pdf-img-link')||{value:''}).value.trim();
+  const imgLink    = (document.getElementById('pdf-img-link')||{value:''}).value.trim();
+  const coverText  = (document.getElementById('pdf-cover-text')||{value:''}).value.trim();
+  const coverLink  = (document.getElementById('pdf-cover-link')||{value:''}).value.trim();
+  const coverLinkLabel = (document.getElementById('pdf-cover-link-label')||{value:''}).value.trim();
   const groqKey= PDF_STATE.groqKey;
 
   if(!kw){ pdfToast('Enter a target keyword first','warn'); return; }
@@ -13677,7 +13695,8 @@ async function pdfAddJob(){
 
   const job = {
     id:uid(), keyword:kw, title, template:tpl, density:dens, backlinks:bls, color,
-    coverImgDataUrl, imgLink,
+    coverImgDataUrl, imgLink, coverText, coverLink, coverLinkLabel,
+    pdfFilename: slug(title||kw)+'.pdf',
     status:'building', log:[], ts:new Date().toLocaleTimeString(),
     sections:[], wordCount:0, pdfBytes:null, uploadedTo:[],
     lsiUsed:0, hasSchema:true, hasTOC:true, titleOptimized:kw.toLowerCase().split(' ').some(w=>title.toLowerCase().includes(w)),
@@ -13911,6 +13930,12 @@ function pdfShowBlastResults(jobId){
       <div style="flex:1;min-width:0">
         <div style="font-weight:700;font-size:11px">${esc(r.name)} <span class="badge badge-g">DA${r.da}</span></div>
         <a href="${esc(r.url)}" target="_blank" style="color:var(--accent);font-family:var(--mono);font-size:10px;word-break:break-all">${esc(r.url)}</a>
+        ${r.url && r.url.includes('archive.org/details/') ? (() => {
+          const identifier = r.url.split('/details/')[1];
+          const pdfFilename = (r.pdfFilename || slug(job.title||job.keyword)+'.pdf');
+          const directPdfUrl = 'https://archive.org/download/'+identifier+'/'+pdfFilename;
+          return `<div style="margin-top:3px"><span style="font-size:9px;color:var(--muted2)">Direct PDF: </span><a href="${esc(directPdfUrl)}" target="_blank" style="color:var(--win-green);font-family:var(--mono);font-size:9px;word-break:break-all">${esc(directPdfUrl)}</a> <button class="btn btn-ghost btn-xs" style="font-size:9px" onclick="navigator.clipboard.writeText('${esc(directPdfUrl)}');pdfToast('PDF URL copied!','success')">📋</button></div>`;
+        })() : ''}
       </div>
       <button class="btn btn-ghost btn-xs" onclick="navigator.clipboard.writeText('${esc(r.url)}');pdfToast('Copied!','success')">📋 Copy</button>
       <a href="${esc(r.url)}" target="_blank" class="btn btn-primary btn-xs">🔗 Open</a>
@@ -14126,6 +14151,243 @@ function pdfLog(jobId,msg,type='info'){
     termEl.innerHTML+=`<div class="tline"><span class="ttime">${ts()}</span><span class="${cls}">${esc(msg)}</span></div>`;
     termEl.scrollTop=termEl.scrollHeight;
   }
+}
+
+/* ── MANUAL PDF BUILDER ── */
+function mbLog(msg, type='info'){
+  const el = document.getElementById('mb-log');
+  if(!el) return;
+  const colors = {info:'var(--term-text)',success:'var(--term-accent)',warn:'var(--term-warn)',error:'var(--term-err)'};
+  const line = document.createElement('div');
+  line.className='tline';
+  const now=new Date(); const ts=now.toTimeString().slice(0,8);
+  line.innerHTML=`<span class="ttime">${ts}</span><span style="color:${colors[type]||colors.info}">${esc(msg)}</span>`;
+  el.appendChild(line); el.scrollTop=el.scrollHeight;
+}
+
+// Minimal markdown to jsPDF renderer
+async function buildManualPDF(){
+  const title   = (document.getElementById('mb-title')||{value:''}).value.trim();
+  const kw      = (document.getElementById('mb-keyword')||{value:''}).value.trim() || title;
+  const md      = (document.getElementById('mb-markdown')||{value:''}).value;
+  const color   = (document.getElementById('mb-color')||{value:'#0057ff'}).value;
+  const bls     = (document.getElementById('mb-backlinks')||{value:''}).value.trim();
+  const imgLink = (document.getElementById('mb-img-link')||{value:''}).value.trim();
+  const imgUrl  = (document.getElementById('mb-img-url')||{value:''}).value.trim();
+
+  if(!title){ pdfToast('Enter a document title','warn'); return; }
+  if(!md.trim()){ pdfToast('Enter some Markdown content','warn'); return; }
+
+  mbLog('Loading PDF engine...','info');
+  await loadJsPDF();
+  const { jsPDF } = window.jspdf;
+
+  function hexToRgb(h){ const r=/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(h); return r?{r:parseInt(r[1],16),g:parseInt(r[2],16),b:parseInt(r[3],16)}:null; }
+  const rgb = hexToRgb(color)||{r:0,g:87,b:255};
+
+  const doc = new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+  const W=210, H=297, mx=18, tw=W-mx*2;
+  let y=0;
+
+  function newPage(){ doc.addPage(); y=18; }
+  function checkY(need){ if(y+need>H-20) newPage(); }
+  function wrapText(text,maxW,fs){ doc.setFontSize(fs||11); return doc.splitTextToSize(text,maxW); }
+
+  // Cover header
+  const coverH = 36;
+  doc.setFillColor(rgb.r,rgb.g,rgb.b);
+  doc.rect(0,0,W,coverH,'F');
+  doc.setTextColor(255,255,255);
+  doc.setFontSize(18); doc.setFont('helvetica','bold');
+  const titleLines2 = doc.splitTextToSize(title, tw);
+  let ty2=13; titleLines2.slice(0,2).forEach(l=>{ doc.text(l,mx,ty2); ty2+=8; });
+  doc.setFontSize(9); doc.setFont('helvetica','normal');
+  if(kw&&kw!==title) doc.text(kw, mx, Math.min(ty2+1, coverH-4));
+  doc.setTextColor(0,0,0);
+  y = coverH + 6;
+
+  // Cover image (file upload OR URL)
+  let coverImgDataUrl = null;
+  const imgFile = document.getElementById('mb-cover-img');
+  if(imgFile && imgFile.files && imgFile.files[0]){
+    mbLog('Loading cover image...','info');
+    coverImgDataUrl = await new Promise(resolve=>{ const fr=new FileReader(); fr.onload=()=>resolve(fr.result); fr.onerror=()=>resolve(null); fr.readAsDataURL(imgFile.files[0]); });
+  } else if(imgUrl){
+    mbLog('Fetching cover image from URL...','info');
+    try{
+      const vb = PDF_STATE.vercelBase || (typeof settingGet==='function'?settingGet('vercel_url'):'');
+      if(vb){
+        const res = await fetch(vb+'/api/proxy', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:imgUrl,method:'GET'})});
+        if(res.ok){ const d=await res.json(); if(d.text) mbLog('Image fetched via proxy','success'); }
+      }
+    }catch(e){}
+    // Try direct load via Image element
+    coverImgDataUrl = await new Promise(resolve=>{
+      const img=new Image(); img.crossOrigin='anonymous';
+      img.onload=()=>{ const c=document.createElement('canvas'); c.width=img.width; c.height=img.height; c.getContext('2d').drawImage(img,0,0); resolve(c.toDataURL('image/jpeg',0.85)); };
+      img.onerror=()=>resolve(null);
+      img.src=imgUrl;
+    });
+  }
+
+  if(coverImgDataUrl){
+    try{
+      const imgH=42, imgW=tw;
+      doc.addImage(coverImgDataUrl,'JPEG',mx,y,imgW,imgH,undefined,'FAST');
+      if(imgLink){ doc.link(mx,y,imgW,imgH,{url:imgLink}); doc.setFontSize(7); doc.setTextColor(100,100,200); doc.text('Click image: '+imgLink.substring(0,70),mx,y+imgH+3); }
+      y+=imgH+6;
+    }catch(e){ mbLog('Image embed failed: '+e.message,'warn'); }
+  }
+
+  // Parse and render markdown
+  mbLog('Rendering Markdown content...','info');
+  doc.setTextColor(0,0,0);
+  const lines = md.split('\n');
+  let paraBuffer = [];
+
+  function flushPara(){
+    if(!paraBuffer.length) return;
+    const text = paraBuffer.join(' ').trim();
+    if(!text){ paraBuffer=[]; return; }
+    doc.setFont('helvetica','normal'); doc.setFontSize(11); doc.setTextColor(30,30,30);
+    const wl = wrapText(text,tw,11);
+    checkY(wl.length*5.5+4);
+    wl.forEach(l=>{ doc.text(l,mx,y); y+=5.5; });
+    y+=3;
+    paraBuffer=[];
+  }
+
+  function renderInline(text){
+    // Strip markdown inline formatting for plain text output
+    return text.replace(/\*\*(.+?)\*\*/g,'$1').replace(/\*(.+?)\*/g,'$1').replace(/\[([^\]]+)\]\([^)]+\)/g,'$1').replace(/!\[([^\]]*)\]\([^)]+\)/g,'[image: $1]');
+  }
+
+  function extractLink(text){
+    const m=text.match(/\[([^\]]+)\]\(([^)]+)\)/);
+    return m?{label:m[1],url:m[2]}:null;
+  }
+
+  function extractImg(text){
+    const m=text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
+    return m?{alt:m[1],url:m[2]}:null;
+  }
+
+  for(let i=0;i<lines.length;i++){
+    const raw=lines[i];
+    const trimmed=raw.trim();
+
+    if(!trimmed){ flushPara(); continue; }
+    if(trimmed==='---'){ flushPara(); checkY(6); doc.setDrawColor(200,200,200); doc.setLineWidth(0.3); doc.line(mx,y,W-mx,y); y+=6; continue; }
+
+    // Headings
+    if(trimmed.startsWith('### ')){
+      flushPara();
+      const text=renderInline(trimmed.slice(4));
+      checkY(10); doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(rgb.r,rgb.g,rgb.b);
+      doc.text(text,mx,y); y+=9; doc.setTextColor(0,0,0);
+      continue;
+    }
+    if(trimmed.startsWith('## ')){
+      flushPara();
+      const text=renderInline(trimmed.slice(3));
+      checkY(14);
+      doc.setFillColor(rgb.r,rgb.g,rgb.b);
+      doc.rect(mx,y-5,tw,9,'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(255,255,255);
+      doc.text(text,mx+3,y); y+=12; doc.setTextColor(0,0,0);
+      continue;
+    }
+    if(trimmed.startsWith('# ')){
+      flushPara();
+      const text=renderInline(trimmed.slice(2));
+      checkY(18);
+      doc.setFillColor(rgb.r,rgb.g,rgb.b);
+      doc.rect(0,y-7,W,12,'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.setTextColor(255,255,255);
+      doc.text(text,mx,y); y+=15; doc.setTextColor(0,0,0);
+      continue;
+    }
+
+    // Bullet list
+    if(trimmed.startsWith('- ')||trimmed.startsWith('* ')){
+      flushPara();
+      const text=renderInline(trimmed.slice(2));
+      const wl=wrapText(text,tw-8,10);
+      checkY(wl.length*5+3);
+      doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(30,30,30);
+      doc.setFillColor(rgb.r,rgb.g,rgb.b); doc.circle(mx+2,y-1.2,1,'F');
+      wl.forEach((l,li)=>{ doc.text(l,mx+6,y+(li*5)); }); y+=wl.length*5+2;
+      continue;
+    }
+
+    // Inline image ![alt](url)
+    const imgMatch=extractImg(trimmed);
+    if(imgMatch){
+      flushPara();
+      mbLog('Embedding image: '+imgMatch.url.substring(0,60)+'...','info');
+      try{
+        const imgData2=await new Promise(resolve=>{ const img2=new Image(); img2.crossOrigin='anonymous'; img2.onload=()=>{ const c2=document.createElement('canvas'); c2.width=img2.width; c2.height=img2.height; c2.getContext('2d').drawImage(img2,0,0); resolve(c2.toDataURL('image/jpeg',0.85)); }; img2.onerror=()=>resolve(null); img2.src=imgMatch.url; });
+        if(imgData2){ checkY(46); doc.addImage(imgData2,'JPEG',mx,y,tw,42,undefined,'FAST'); y+=44; if(imgMatch.alt){ doc.setFontSize(8);doc.setTextColor(120,120,120);doc.text(imgMatch.alt,mx,y);y+=6; } }
+        else{ paraBuffer.push('[Image: '+imgMatch.alt+'] '+imgMatch.url); flushPara(); }
+      }catch(e){ paraBuffer.push('[Image: '+imgMatch.url+']'); flushPara(); }
+      continue;
+    }
+
+    // Inline link [text](url)
+    const linkMatch=extractLink(trimmed);
+    if(linkMatch && trimmed===`[${linkMatch.label}](${linkMatch.url})`){
+      flushPara();
+      checkY(10);
+      doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(rgb.r,rgb.g,rgb.b);
+      doc.text('\u2192 '+linkMatch.label+' ('+linkMatch.url.substring(0,60)+')', mx, y);
+      doc.link(mx,y-4,tw,7,{url:linkMatch.url});
+      y+=8; doc.setTextColor(0,0,0);
+      continue;
+    }
+
+    // Regular paragraph text (may contain inline formatting)
+    paraBuffer.push(renderInline(trimmed));
+  }
+  flushPara();
+
+  // Backlink at end
+  if(bls){
+    checkY(22); y+=4;
+    doc.setFillColor(rgb.r,rgb.g,rgb.b);
+    doc.roundedRect(mx,y,tw,18,3,3,'F');
+    doc.setFontSize(10); doc.setTextColor(255,255,255); doc.setFont('helvetica','bold');
+    doc.text('Learn more: '+kw, mx+4, y+7);
+    doc.setFont('helvetica','normal'); doc.setFontSize(9);
+    doc.text(bls.substring(0,80), mx+4, y+13);
+    doc.link(mx,y,tw,18,{url:bls});
+    y+=22;
+  }
+
+  // Page numbers
+  const pgCount=doc.getNumberOfPages();
+  for(let i=1;i<=pgCount;i++){
+    doc.setPage(i);
+    doc.setFontSize(7); doc.setTextColor(180,180,180); doc.setFont('helvetica','normal');
+    doc.text('Page '+i+' of '+pgCount+' · '+title.substring(0,50), W/2, H-4, {align:'center'});
+  }
+
+  const pdfBytes = doc.output('arraybuffer');
+  mbLog('PDF built — '+(pdfBytes.byteLength/1024).toFixed(1)+' KB','success');
+
+  // Create job and add to queue
+  const mbJob = {
+    id:uid(), keyword:kw||title, title, template:'manual', density:'manual', backlinks:bls, color,
+    coverImgDataUrl, imgLink,
+    status:'ready', log:[], ts:new Date().toLocaleTimeString(),
+    sections:[], wordCount:md.split(/\s+/).length, pdfBytes,
+    uploadedTo:[], lsiUsed:0, hasSchema:false, hasTOC:false,
+    titleOptimized:true, aiGenerated:false,
+    seoScore:{score:60,issues:['Manual build — AI content not used'],wins:['Custom content','User-controlled']}
+  };
+  PDF_STATE.jobs.unshift(mbJob);
+  pdfSaveJobs(); pdfRenderQueue(); pdfUpdateStats();
+  pdfToast('Manual PDF built! Ready to blast.','success');
+  mbLog('Added to job queue. Click Blast to upload.','success');
 }
 
 function pdfRenderQueue(){
@@ -14364,11 +14626,12 @@ function renderPDFTools(el){
 
     <!-- TAB NAV -->
     <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:2px solid var(--win-btn-sh);flex-wrap:wrap">
-      <div class="ptab active" id="pt-tab-builder"  onclick="hubSwitch('pt','builder', ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">🔨 AI Builder</div>
-      <div class="ptab"        id="pt-tab-bulk"     onclick="hubSwitch('pt','bulk',    ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">⚡ Bulk Build</div>
-      <div class="ptab"        id="pt-tab-blast"    onclick="hubSwitch('pt','blast',   ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">🚀 Blast Config</div>
-      <div class="ptab"        id="pt-tab-manual"   onclick="hubSwitch('pt','manual',  ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">📤 Manual Upload</div>
-      <div class="ptab"        id="pt-tab-scanner"  onclick="hubSwitch('pt','scanner', ['builder','bulk','blast','manual','scanner'])" style="font-size:11px">🔍 Upload Scanner</div>
+      <div class="ptab active" id="pt-tab-builder"  onclick="hubSwitch('pt','builder', ['builder','bulk','blast','manual','scanner','manualbuild'])" style="font-size:11px">🔨 AI Builder</div>
+      <div class="ptab"        id="pt-tab-bulk"     onclick="hubSwitch('pt','bulk',    ['builder','bulk','blast','manual','scanner','manualbuild'])" style="font-size:11px">⚡ Bulk Build</div>
+      <div class="ptab"        id="pt-tab-blast"    onclick="hubSwitch('pt','blast',   ['builder','bulk','blast','manual','scanner','manualbuild'])" style="font-size:11px">🚀 Blast Config</div>
+      <div class="ptab"        id="pt-tab-manualbuild" onclick="hubSwitch('pt','manualbuild',['builder','bulk','blast','manual','scanner','manualbuild'])" style="font-size:11px">✍ Manual Builder</div>
+      <div class="ptab"        id="pt-tab-manual"   onclick="hubSwitch('pt','manual',  ['builder','bulk','blast','manual','scanner','manualbuild'])" style="font-size:11px">📤 Manual Upload</div>
+      <div class="ptab"        id="pt-tab-scanner"  onclick="hubSwitch('pt','scanner', ['builder','bulk','blast','manual','scanner','manualbuild'])" style="font-size:11px">🔍 Upload Scanner</div>
     </div>
 
     <!-- TAB: AI BUILDER -->
@@ -14395,6 +14658,14 @@ function renderPDFTools(el){
                 <input type="file" id="pdf-cover-img" accept="image/*" style="padding:4px;font-size:10px"></div>
               <div class="fg"><label class="lbl">Image Link URL <span class="xs tm">(clicking image opens)</span></label>
                 <input type="url" id="pdf-img-link" placeholder="https://yoursite.com/"></div>
+            </div>
+            <div class="fg"><label class="lbl">Cover Text <span class="xs tm">(shown below image/header)</span></label>
+              <textarea id="pdf-cover-text" rows="2" placeholder="Optional: description or intro paragraph shown on the cover page..." style="resize:vertical;min-height:48px;font-size:10px"></textarea></div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Cover Link URL <span class="xs tm">(shown below cover text)</span></label>
+                <input type="url" id="pdf-cover-link" placeholder="https://yoursite.com/page"></div>
+              <div class="fg"><label class="lbl">Link Label <span class="xs tm">(optional display text)</span></label>
+                <input type="text" id="pdf-cover-link-label" placeholder="Visit our full guide →"></div>
             </div>
             <div class="row mt8">
               <button class="btn btn-primary" onclick="pdfAddJob()" style="flex:1">⚡ Generate &amp; Build PDF</button>
@@ -14640,6 +14911,73 @@ function renderPDFTools(el){
               <span class="badge badge-y">HTML SCORE</span> Scores pages by upload form fingerprints<br>
               <span class="badge badge-r">API DETECT</span> Extracts JS fetch() API endpoint calls<br>
               Results ranked by <strong>confidence score</strong>. Top result auto-fills Manual Upload tab.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: MANUAL BUILDER -->
+    <div id="pt-panel-manualbuild" style="display:none">
+      <div class="grid2" style="gap:18px">
+        <div>
+          <div class="card">
+            <div class="card-title">✍ Manual PDF Builder</div>
+            <div class="notice notice-info" style="margin-bottom:10px;font-size:10px">
+              Full manual control. Input Markdown text, images (URL or upload), and links. The PDF is built locally — no AI required.
+            </div>
+            <div class="fg"><label class="lbl">Document Title *</label>
+              <input type="text" id="mb-title" placeholder="My Custom PDF Document"></div>
+            <div class="fg"><label class="lbl">Target Keyword <span class="xs tm">(for SEO metadata)</span></label>
+              <input type="text" id="mb-keyword" placeholder="e.g. satta king result"></div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Brand Color</label>
+                <input type="color" id="mb-color" value="#0057ff" style="height:32px;padding:2px"></div>
+              <div class="fg"><label class="lbl">Backlink URL</label>
+                <input type="url" id="mb-backlinks" placeholder="https://yoursite.com/page"></div>
+            </div>
+            <div class="fg"><label class="lbl">Cover Image <span class="xs tm">(file upload)</span></label>
+              <input type="file" id="mb-cover-img" accept="image/*" style="padding:4px;font-size:10px"></div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Cover Image URL <span class="xs tm">(alternative to file)</span></label>
+                <input type="url" id="mb-img-url" placeholder="https://cdn.example.com/image.jpg"></div>
+              <div class="fg"><label class="lbl">Image Click Link</label>
+                <input type="url" id="mb-img-link" placeholder="https://yoursite.com/"></div>
+            </div>
+            <div class="fg"><label class="lbl">Markdown Content *</label>
+              <textarea id="mb-markdown" rows="14" style="font-family:var(--mono);font-size:10px;resize:vertical;min-height:200px" placeholder="# Section Heading&#10;&#10;Your paragraph text here. Supports **bold**, *italic*.&#10;&#10;## Another Section&#10;&#10;More content...&#10;&#10;[Link text](https://yoursite.com)&#10;&#10;![Image caption](https://cdn.example.com/img.jpg)"></textarea>
+              <span class="xs tm">Supports: # headings, **bold**, *italic*, [links], ![images]. Blank lines = paragraph breaks.</span>
+            </div>
+            <div class="row mt8">
+              <button class="btn btn-primary" onclick="buildManualPDF()" style="flex:1">📄 Build PDF from Markdown</button>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="card">
+            <div class="card-title">🖥 Build Log</div>
+            <div class="terminal" id="mb-log" style="height:180px">
+              <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">Manual Builder ready. Enter content and click Build.</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">💡 Markdown Reference</div>
+            <div style="font-family:var(--mono);font-size:10px;line-height:2;color:var(--muted2)">
+              <code># Heading 1</code> — Large section title<br>
+              <code>## Heading 2</code> — Sub-section<br>
+              <code>**bold text**</code> — Bold<br>
+              <code>*italic text*</code> — Italic<br>
+              <code>[Link text](https://url)</code> — Clickable link<br>
+              <code>![Alt](https://img-url)</code> — Inline image<br>
+              <code>- item</code> — Bullet list<br>
+              <code>---</code> — Horizontal divider<br>
+              Blank line = new paragraph
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">📤 Send to Blast</div>
+            <div style="font-size:10px;color:var(--muted2);line-height:1.7">
+              After building, your PDF appears in the <strong>job queue below</strong>. Click <strong>🚀 Blast</strong> to upload it to Archive.org and other platforms just like an AI-built PDF.
             </div>
           </div>
         </div>

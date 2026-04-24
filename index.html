@@ -27278,6 +27278,7 @@ function blpRenderManualBrowser(){
 
   // ── TAB 3: BLAST ALL ─────────────────────────────────────────────────
   html+='<div id="mbp-sub-3" style="display:'+(subTab===3?'block':'none')+'">';
+  html+='<div class="notice notice-warn" style="margin-bottom:8px;font-size:10px"><strong>&#x26A0; Popup permission required:</strong> Clicking <em>Start Blast</em> opens one window per site all at once (to bypass popup blockers). If windows are still blocked, click the <strong>&#x1F6AB; icon</strong> in your browser address bar \u2192 <strong>Always allow popups from this page</strong> \u2192 then click Start Blast again.</div>';
 
   const blastableSites = MBP.sites.filter(function(s){
     return MBP.getLearned(s.credDomain||'') && MBP.getCred(s.credDomain||'');
@@ -27503,7 +27504,11 @@ function mbpOpenSite(id){
   document.getElementById('mbp-active-site-id').value=id;
   MBP.setState(id,'opening');
   const w=window.open(site.url,'mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
-  if(!w){toast('⚠ Popup blocked — allow popups for this site','e');MBP.setState(id,'idle');return;}
+  if(!w){
+    toast('\u26a0 Popup blocked! Click the popup icon (\uD83D\uDEAB) in the address bar \u2192 Always allow \u2192 then retry','e',10000);
+    mbpTermLog('\u274c Popup blocked for '+site.name+' \u2014 look for the popup icon in your browser address bar and allow it','t-warn');
+    MBP.setState(id,'idle');return;
+  }
   MBP._popups[id]=w;
   mbpTermLog('🌐 Opened: '+site.name+' → '+site.url,'t-accent');
   const hasCred=site.credDomain&&MBP.getCred(site.credDomain);
@@ -27599,24 +27604,26 @@ function mbpTriggerAutoPost(id){
   MBP.setState(id,'auto_posting');
   mbpTermLog('🤖 Auto-post queued for: '+site.name,'t-accent');
   mbpTermLog('   Opening post URL: '+site.postUrl,'t-info');
+  // This is a direct user click — window.open won't be blocked
   const w=window.open(site.postUrl,'mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
-  if(!w){toast('⚠ Popup blocked — allow popups','e');MBP.setState(id,'idle');return;}
+  if(!w){
+    toast('\u26a0 Popup blocked! Click the popup icon in the address bar \u2192 Allow popups \u2192 then retry','e',10000);
+    mbpTermLog('\u274c Popup blocked for '+site.name+' \u2014 allow popups in browser settings then try again','t-warn');
+    MBP.setState(id,'idle');return;
+  }
   MBP._popups[id]=w;
-  // FIX: deliver job via postMessage to popup (cross-origin safe).
-  // Poll until popup is ready, then postMessage the job. localStorage fallback via bookmarklet.
+  // Deliver job via postMessage every 900ms + localStorage fallback
   (function deliverJob(attempts){
-    if(attempts<=0) return;
+    if(attempts<=0||w.closed) return;
     setTimeout(function(){
-      try{
-        w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*');
-      }catch(e){}
-      // Retry until popup acknowledges or closes
+      try{ w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*'); }catch(e){}
+      try{ w.localStorage&&w.localStorage.setItem('mbp_autopost_job',jobJson); }catch(e){}
       if(!w.closed) deliverJob(attempts-1);
-    }, attempts===10 ? 1500 : 800); // first delivery after 1.5s (page load), then every 800ms
-  })(10);
-  toast('🤖 Auto-post started for '+site.name+' — AUTO-POST bookmarklet will fire automatically','i',6000);
-  mbpTermLog('   ℹ Click the 🤖 AUTO-POST bookmarklet on the post page if it does not auto-fire','t-info');
-  mbpSubTab(0);  // Switch to Queue tab to show state change
+    }, attempts===12 ? 1800 : 900);
+  })(12);
+  toast('\U0001f916 Auto-post started for '+site.name+' \u2014 AUTO-POST bookmarklet fires automatically on the post page','i',6000);
+  mbpTermLog('   \u2139 If it does not auto-fire, click the \U0001f916 AUTO-POST bookmarklet manually on the post page','t-info');
+  mbpSubTab(0);
 }
 
 // ── BLAST ALL ENGINE ──────────────────────────────────────────────────────
@@ -27647,9 +27654,34 @@ function mbpStartBlast(){
   window._mbpBlastQueue   = queue;
   window._mbpBlastResults = [];
   window._mbpBlastActive  = {total:queue.length, done:0, startedAt:Date.now()};
-  mbpTermLog('💥 BLAST STARTED: '+queue.length+' sites','t-accent');
-  mbpSubTab(3);  // Switch to Blast All tab to show progress
-  mbpBlastStep();
+  // Pre-open ALL windows RIGHT NOW in the synchronous click handler — this is the ONLY way
+  // to bypass the browser popup blocker (only direct user gestures can open windows).
+  window._mbpBlastWindowPool = {};
+  var poolOk = 0, poolFail = 0;
+  queue.forEach(function(q, i){
+    var w = window.open('about:blank','mbp_blast_'+q.siteId,
+      'width=1100,height=780,left='+(80+i*20)+',top='+(50+i*16)+
+      ',toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+    if(w){
+      window._mbpBlastWindowPool[q.siteId] = w;
+      poolOk++;
+      try{
+        w.document.write('<html><body style="background:#0a0f0a;color:#00cc44;font-family:monospace;'+
+          'display:flex;align-items:center;justify-content:center;height:100vh;margin:0">'+
+          '<div style="text-align:center"><div style="font-size:28px;margin-bottom:10px">&#x1F916;</div>'+
+          '<div style="font-size:15px;font-weight:bold">Backlink Pro</div>'+
+          '<div style="font-size:12px;opacity:.7;margin-top:6px">Loading: '+q.site.name+'&hellip;</div></div></body></html>');
+        w.document.close();
+      }catch(e){}
+    } else { poolFail++; }
+  });
+  if(poolFail>0){
+    mbpTermLog('\u26a0 '+poolFail+' window(s) were blocked \u2014 click the popup icon (??) in the browser address bar and choose "Always allow", then start blast again','t-warn');
+    toast('\u26a0 '+poolFail+' popup(s) blocked! Click the blocked-popup icon in address bar \u2192 Allow','w',12000);
+  }
+  mbpTermLog('\uD83D\uDCA5 BLAST STARTED: '+queue.length+' sites ('+poolOk+' windows opened)','t-accent');
+  mbpSubTab(3);
+  setTimeout(mbpBlastStep, 600);
 }
 
 async function mbpBlastStep(){
@@ -27676,10 +27708,18 @@ async function mbpBlastStep(){
   const jobJson=JSON.stringify(job);
   MBP.setState(site.id,'auto_posting');
   mbpTermLog('🤖 Blasting: '+site.name,'t-accent');
-  const w=window.open(site.postUrl,'mbp_blast_'+site.id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  // Use pre-opened window from pool (opened synchronously on user click) or open now
+  var w = window._mbpBlastWindowPool && window._mbpBlastWindowPool[site.id];
+  if(!w||w.closed){
+    // Fallback: try window.open now (may be blocked in some browsers)
+    w=window.open(site.postUrl,'mbp_blast_'+site.id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  } else {
+    // Navigate the pre-opened window to the post URL
+    try{ w.location.href=site.postUrl; }catch(e){}
+  }
   if(!w){
     next.status='failed';next.error='popup blocked';
-    mbpTermLog('❌ Popup blocked: '+site.name,'t-warn');
+    mbpTermLog('\u274c Popup blocked: '+site.name+' \u2014 allow popups for this page then retry','t-warn');
     MBP.setState(site.id,'failed');
     if(window._mbpBlastActive) window._mbpBlastActive.done++;
     mbpRefreshBlastUI();
@@ -27687,14 +27727,16 @@ async function mbpBlastStep(){
     return;
   }
   MBP._popups[site.id]=w;
-  // FIX: deliver job via postMessage (cross-origin safe)
+  // Deliver job via postMessage — poll until page is ready then send
   (function deliverJob(attempts){
     if(attempts<=0||w.closed) return;
     setTimeout(function(){
       try{ w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*'); }catch(e){}
+      // Also attempt localStorage (works if same-origin)
+      try{ w.localStorage&&w.localStorage.setItem('mbp_autopost_job',jobJson); }catch(e){}
       if(!w.closed) deliverJob(attempts-1);
-    }, attempts===10 ? 1500 : 800);
-  })(10);
+    }, attempts===10 ? 1800 : 900);
+  })(12);
   // Wait for result with timeout
   const timeout=90000; // 90s per site
   const started=Date.now();

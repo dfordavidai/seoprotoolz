@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -26638,9 +26639,18 @@ const MBP = {
         if(win&&win.closed){
           delete MBP._popups[id];
           const cur = MBP.getState(id);
-          if(['opening','auto_posting'].includes(cur)){
+          // For auto_posting state: window.closed can briefly appear true during cross-origin
+          // navigation transition. Use a grace period — only mark closed if state has been
+          // auto_posting for >6s without a result (prevents premature failure).
+          if(cur==='opening'){
             MBP.setState(id,'closed');
             mbpTermLog('⚠ Window closed: '+(MBP.sites.find(s=>s.id===id)?.name||id),'t-warn');
+          } else if(cur==='auto_posting'){
+            const stateAge=Date.now()-(MBP._states[id]?.updatedAt||0);
+            if(stateAge>6000){
+              MBP.setState(id,'closed');
+              mbpTermLog('⚠ Window closed: '+(MBP.sites.find(s=>s.id===id)?.name||id),'t-warn');
+            }
           }
         }
       });
@@ -27085,7 +27095,7 @@ function mbpGenerateBookmarklets(){
 // @author       Backlink Pro
 // @match        *://*/*
 // @grant        none
-// @run-at       document-end
+// @run-at       document-start
 // ==/UserScript==
 (function(){
   'use strict';
@@ -27101,13 +27111,17 @@ function mbpGenerateBookmarklets(){
   var schema=job.schema, data=job.postData, capKey=job.captchaKey||'', siteId=job.siteId||'', siteName=job.siteName||location.hostname;
   console.log('[MBP] Auto-post job received for', siteName, '- fields:', schema&&schema.fields&&schema.fields.length);
 
-  // HUD overlay
-  var hud=document.createElement('div');
-  hud.id='mbp-autopost-hud';
-  hud.style='position:fixed;top:10px;right:10px;background:#660099;color:#fff;padding:10px 14px;font-family:monospace;font-size:11px;z-index:999999;border-radius:4px;box-shadow:0 2px 10px rgba(0,0,0,.5);min-width:240px;max-width:340px';
-  hud.innerHTML='<b>&#x1F916; Backlink Pro Auto-Post</b><br><span id="mbp-ap-st">Starting...</span>';
-  document.body.appendChild(hud);
-  function st(s){ var e=document.getElementById('mbp-ap-st'); if(e)e.textContent=s; console.log('[MBP]',s); }
+  // HUD — must defer to DOMContentLoaded because @run-at document-start means body doesn't exist yet
+  var hud=null;
+  function ensureHud(){
+    if(hud) return;
+    hud=document.createElement('div');
+    hud.id='mbp-autopost-hud';
+    hud.style='position:fixed;top:10px;right:10px;background:#660099;color:#fff;padding:10px 14px;font-family:monospace;font-size:11px;z-index:999999;border-radius:4px;box-shadow:0 2px 10px rgba(0,0,0,.5);min-width:240px;max-width:340px';
+    hud.innerHTML='<b>&#x1F916; Backlink Pro Auto-Post</b><br><span id="mbp-ap-st">Starting...</span>';
+    document.body.appendChild(hud);
+  }
+  function st(s){ if(document.body&&!hud)ensureHud(); var e=document.getElementById('mbp-ap-st'); if(e)e.textContent=s; console.log('[MBP]',s); }
 
   // Send result back to dashboard
   function mbpSend(type,payload){
@@ -27118,9 +27132,12 @@ function mbpGenerateBookmarklets(){
   function done(success,url,error){
     var result={success:success,url:url||location.href,error:error||'',domain:location.hostname,siteId:siteId,siteName:siteName,title:document.title};
     mbpSend('mbp_autopost_result',JSON.stringify(result));
-    hud.style.background=success?'#006600':'#cc0000';
-    hud.innerHTML='<b>'+(success?'SUCCESS':'FAILED')+'</b><br><span style="font-size:9px;word-break:break-all">'+(url||error||'').slice(0,80)+'</span>';
-    setTimeout(function(){if(hud.parentNode)hud.remove();},6000);
+    if(document.body&&!hud)ensureHud();
+    if(hud){
+      hud.style.background=success?'#006600':'#cc0000';
+      hud.innerHTML='<b>'+(success?'SUCCESS':'FAILED')+'</b><br><span style="font-size:9px;word-break:break-all">'+(url||error||'').slice(0,80)+'</span>';
+      setTimeout(function(){if(hud&&hud.parentNode)hud.remove();},6000);
+    }
   }
 
   function fillField(sel,val){
@@ -27186,42 +27203,51 @@ function mbpGenerateBookmarklets(){
     }, 2000);
   }
 
+  // Wait for DOM ready (@run-at document-start fires before body exists)
+  function whenReady(fn){
+    if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',fn);}
+    else{fn();}
+  }
+
   // Solve captcha if needed, then run
-  (async function(){
-    st('Checking for captcha...');
-    var rcEl=document.querySelector('.g-recaptcha');
-    var hcEl=document.querySelector('.h-captcha');
-    if(rcEl||hcEl){
-      if(!capKey){st('Captcha detected - no 2captcha key!');done(false,null,'captcha - no key');return;}
-      var siteKey=(rcEl||hcEl).dataset.sitekey||'';
-      var capType=rcEl?'userrecaptcha':'hcaptcha';
-      st('Solving captcha via 2captcha...');
-      try{
-        var body=new FormData();
-        body.append('key',capKey);body.append('method',capType);body.append('googlekey',siteKey);body.append('pageurl',location.href);body.append('json',1);
-        var r=await fetch('https://2captcha.com/in.php',{method:'POST',body:body});
-        var d=await r.json();
-        if(d.status!==1){st('2captcha submit failed: '+d.request);done(false,null,'captcha submit failed');return;}
-        var taskId=d.request;
-        for(var i=0;i<30;i++){
-          await new Promise(function(res){setTimeout(res,3000);});
-          var pr=await fetch('https://2captcha.com/res.php?key='+capKey+'&action=get&id='+taskId+'&json=1');
-          var pd=await pr.json();
-          if(pd.status===1){
-            var token=pd.request;
-            var ta=document.querySelector('textarea[name=g-recaptcha-response],textarea[name=h-captcha-response]');
-            if(ta){ta.value=token;ta.style.display='block';}
-            st('Captcha solved!');
-            runAutoPost();return;
+  whenReady(function(){
+    ensureHud();
+    (async function(){
+      st('Checking for captcha...');
+      var rcEl=document.querySelector('.g-recaptcha');
+      var hcEl=document.querySelector('.h-captcha');
+      if(rcEl||hcEl){
+        if(!capKey){st('Captcha detected - no 2captcha key!');done(false,null,'captcha - no key');return;}
+        var siteKey=(rcEl||hcEl).dataset.sitekey||'';
+        var capType=rcEl?'userrecaptcha':'hcaptcha';
+        st('Solving captcha via 2captcha...');
+        try{
+          var body=new FormData();
+          body.append('key',capKey);body.append('method',capType);body.append('googlekey',siteKey);body.append('pageurl',location.href);body.append('json',1);
+          var r=await fetch('https://2captcha.com/in.php',{method:'POST',body:body});
+          var d=await r.json();
+          if(d.status!==1){st('2captcha submit failed: '+d.request);done(false,null,'captcha submit failed');return;}
+          var taskId=d.request;
+          for(var i=0;i<30;i++){
+            await new Promise(function(res){setTimeout(res,3000);});
+            var pr=await fetch('https://2captcha.com/res.php?key='+capKey+'&action=get&id='+taskId+'&json=1');
+            var pd=await pr.json();
+            if(pd.status===1){
+              var token=pd.request;
+              var ta=document.querySelector('textarea[name=g-recaptcha-response],textarea[name=h-captcha-response]');
+              if(ta){ta.value=token;ta.style.display='block';}
+              st('Captcha solved!');
+              runAutoPost();return;
+            }
+            if(pd.request!=='CAPCHA_NOT_READY'&&pd.status===0){st('2captcha error: '+pd.request);done(false,null,'captcha error');return;}
           }
-          if(pd.request!=='CAPCHA_NOT_READY'&&pd.status===0){st('2captcha error: '+pd.request);done(false,null,'captcha error');return;}
-        }
-        st('Captcha timeout');done(false,null,'captcha timeout');
-      }catch(e){st('Captcha error: '+e.message);done(false,null,'captcha exception');}
-    } else {
-      runAutoPost();
-    }
-  })();
+          st('Captcha timeout');done(false,null,'captcha timeout');
+        }catch(e){st('Captcha error: '+e.message);done(false,null,'captcha exception');}
+      } else {
+        runAutoPost();
+      }
+    })();
+  });
 })();`;
 
   // Store in global so DOM helper can wire them after innerHTML render
@@ -27962,6 +27988,10 @@ async function mbpBlastStep(){
   const queue=window._mbpBlastQueue;
   const next=queue.find(function(q){return q.status==='pending';});
   if(!next){
+    // Only finish if nothing is still running — prevents premature BLAST COMPLETE
+    // when the window is navigating cross-origin and the result hasn't arrived yet
+    const stillRunning=queue.find(function(q){return q.status==='running';});
+    if(stillRunning) return; // result will arrive via poll/BroadcastChannel, which calls mbpBlastAdvance then mbpBlastStep again
     mbpBlastFinish();
     return;
   }
@@ -28023,14 +28053,9 @@ async function mbpBlastStep(){
     return;
   }
   MBP._popups[site.id]=w;
-  // PRIMARY DELIVERY: window.name persists across cross-origin navigations.
-  // Store job JSON in window.name BEFORE navigating to post URL.
-  // The AUTO-POST bookmarklet reads window.name on the target page.
-  try{
-    w.name = 'mbp_job:'+jobJson;
-  }catch(e){
-    mbpTermLog('   ⚠ Could not set window.name: '+e.message,'t-warn');
-  }
+  // NOTE: window.name was already set by the relay script inside about:blank (same-origin).
+  // Do NOT attempt w.name = here — by this point the window has navigated cross-origin and the
+  // assignment would throw a SecurityError or be silently ignored.
   // Broadcast job every 1s for 30s via BroadcastChannel + postMessage
   var _bcBlast; try{_bcBlast=new BroadcastChannel('mbp_bridge');}catch(e){}
   var _blastN=0,_blastDeliverTimer=setInterval(function(){
@@ -28046,11 +28071,16 @@ async function mbpBlastStep(){
   await new Promise(function(resolve){
     const poll=setInterval(function(){
       const q=window._mbpBlastQueue.find(function(q){return q.siteId===site.id;});
-      if(q&&q.status!=='running'){clearInterval(poll);resolve();return;}
+      if(q&&q.status!=='running'){
+        clearInterval(poll);
+        clearInterval(_blastDeliverTimer);if(_bcBlast)try{_bcBlast.close();}catch(e){}
+        resolve();return;
+      }
       if(Date.now()-started>timeout){
         clearInterval(poll);
+        clearInterval(_blastDeliverTimer);if(_bcBlast)try{_bcBlast.close();}catch(e){}
         if(next.status==='running'){
-          next.status='timeout';next.error='90s timeout';
+          next.status='timeout';next.error='120s timeout';
           MBP.setState(site.id,'failed');
           mbpTermLog('⏱ Timeout: '+site.name,'t-warn');
         }
@@ -28079,6 +28109,9 @@ function mbpBlastAdvance(data){
     mbpTermLog('❌ Blast failed: '+(q.site?.name||data.siteId)+': '+( q.error),'t-warn');
   }
   mbpRefreshBlastUI();
+  // NOTE: do NOT call mbpBlastStep here — the await Promise in mbpBlastStep detects status change
+  // via the internal poll and resolves, then calls mbpBlastStep at the end of the delay. Double-call
+  // would cause double mbpBlastFinish().
 }
 
 function mbpBlastFinish(){

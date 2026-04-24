@@ -26918,28 +26918,41 @@ function mbpGenerateBookmarklets(){
       +'setStatus("Job received! Filling fields…");'
       +'runAutoPost();'
     +'}'
-    // Listen for postMessage from dashboard
+    // ── JOB DELIVERY: 4 channels, first one wins ──────────────────────
+    +'var _jobFired=false;'
+    +'function safeInitJob(j){if(_jobFired)return;_jobFired=true;try{clearInterval(_poll);}catch(e){}initJob(j);}'
+    // CHANNEL 1: BroadcastChannel — same browser, any tab (most reliable)
+    +'try{'
+      +'var _bc=new BroadcastChannel("mbp_bridge");'
+      +'_bc.onmessage=function(evt){'
+        +'if(evt.data&&evt.data.type==="mbp_autopost_job"){'
+          +'try{setStatus("✅ Job via BroadcastChannel!");safeInitJob(JSON.parse(evt.data.payload));}'
+          +'catch(e){setStatus("❌ BC parse: "+e.message);}'
+        +'}'
+      +'};'
+    +'}catch(e){}'
+    // CHANNEL 2: postMessage from opener
     +'window.addEventListener("message",function(evt){'
-      +'if(evt.data&&evt.data.type==="mbp_autopost_job"){try{initJob(JSON.parse(evt.data.payload));}catch(e){setStatus("❌ Job parse error");}}'
+      +'if(evt.data&&evt.data.type==="mbp_autopost_job"){'
+        +'try{setStatus("✅ Job via postMessage!");safeInitJob(JSON.parse(evt.data.payload));}'
+        +'catch(e){setStatus("❌ PM parse: "+e.message);}'
+      +'}'
     +'});'
-    // PRIMARY: read job from window.name (set by relay page before cross-origin nav)
-    +'if(window.name&&window.name.indexOf("mbp_job:")===0){'
-      +'try{'
-        +'setStatus("✅ Job found in window.name ("+window.name.length+" bytes)!");'
-        +'var wn=window.name.slice(8);'
+    // CHANNEL 3: window.name (relay page wrote this before navigation)
+    +'(function(){'
+      +'var wn=window.name||"";'
+      +'if(wn.indexOf("mbp_job:")===0){'
         +'window.name="";'
-        +'initJob(JSON.parse(wn));'
-      +'}catch(e){setStatus("❌ window.name parse error: "+e.message);window.name="";}'
-    +'} else if(window.name&&window.name.length>0){'
-      +'setStatus("window.name has unexpected content: "+window.name.slice(0,40));'
-    +'}'
-    // SECONDARY: poll localStorage (same-origin fallback)
-    +'var pollCount=0;'
-    +'var poll=setInterval(function(){'
-      +'pollCount++;'
+        +'try{setStatus("✅ Job via window.name!");safeInitJob(JSON.parse(wn.slice(8)));}'
+        +'catch(e){setStatus("❌ WN parse: "+e.message);}'
+      +'}'
+    +'})();'
+    // CHANNEL 4: localStorage poll — dashboard writes mbp_autopost_job key
+    +'var _pollCount=0,_poll=setInterval(function(){'
+      +'_pollCount++;'
       +'var raw=localStorage.getItem("mbp_autopost_job");'
-      +'if(raw){clearInterval(poll);localStorage.removeItem("mbp_autopost_job");try{initJob(JSON.parse(raw));}catch(e){setStatus("❌ Job parse error");}}'
-      +'else if(pollCount>30){clearInterval(poll);setStatus("⚠ No job received — click 🤖 AUTO-POST bookmarklet on this page.");}'
+      +'if(raw){localStorage.removeItem("mbp_autopost_job");try{setStatus("✅ Job via localStorage!");safeInitJob(JSON.parse(raw));}catch(e){setStatus("❌ LS parse: "+e.message);}}'
+      +'else if(_pollCount>60){clearInterval(_poll);setStatus("⚠ No job — is dashboard open and logged into Nairaland?");}'
     +'},500);'
     +'function done(success,url,error){'
       +'var result={success:success,url:url||location.href,error:error||"",domain:location.hostname,siteId:siteId,siteName:siteName,title:document.title};'
@@ -26978,6 +26991,26 @@ function mbpGenerateBookmarklets(){
       +'});'
     +'}'
     +'setStatus("Filled "+filled+" fields. Checking captcha…");'
+    // Nairaland direct-fill fallback: if fields not matched by schema, fill by name attr
+    +'(function(){'
+      +'var subj=document.querySelector("input[name=subject],#subject");'
+      +'var body=document.querySelector("textarea[name=body],#body");'
+      +'function nativeFill(el,val){'
+        +'if(!el||!val)return;'
+        +'try{var p=el.tagName==="TEXTAREA"?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;'
+        +'var s=Object.getOwnPropertyDescriptor(p,"value").set;'
+        +'if(s)s.call(el,val);else el.value=val;}catch(e){el.value=val;}'
+        +'["input","change","keyup","focus","blur"].forEach(function(ev){try{el.dispatchEvent(new Event(ev,{bubbles:true}));}catch(e){}});'
+      +'}'
+      +'if(subj&&!subj.value&&data.title){nativeFill(subj,data.title);filled++;setStatus("Nairaland direct: filled subject");}'
+      +'if(body&&!body.value&&data.body){nativeFill(body,data.body);filled++;setStatus("Nairaland direct: filled body");}'
+      +'var ql=document.querySelector(".ql-editor,.ProseMirror,[contenteditable]");'
+      +'if(ql&&data.body&&(!body||!body.value)){'
+        +'ql.focus();'
+        +'try{document.execCommand("selectAll",false,null);document.execCommand("insertText",false,data.body);}catch(e){ql.textContent=data.body;}'
+        +'filled++;setStatus("Nairaland direct: filled rich editor");'
+      +'}'
+    +'})();'
     // Captcha detection and 2captcha solving
     +'async function solveCaptchaIfNeeded(){'
       +'var rcEl=document.querySelector(".g-recaptcha");'
@@ -27059,9 +27092,12 @@ function mbpGenerateBookmarklets(){
   // Check window.name for job from Backlink Pro
   if(!window.name||window.name.indexOf('mbp_job:')!==0) return;
   var raw = window.name.slice(8);
-  window.name = ''; // clear so it doesn't re-fire
+  window.name = ''; // clear after read
   var job;
   try{ job=JSON.parse(raw); }catch(e){ console.error('[MBP] Job parse error',e); return; }
+  // Backup: write job so manual bookmarklet click still finds it
+  try{ localStorage.setItem('mbp_autopost_job', raw); }catch(e){}
+  try{ var _ubc=new BroadcastChannel('mbp_bridge'); _ubc.postMessage({type:'mbp_autopost_job',payload:raw}); setTimeout(function(){_ubc.close();},500); }catch(e){}
   var schema=job.schema, data=job.postData, capKey=job.captchaKey||'', siteId=job.siteId||'', siteName=job.siteName||location.hostname;
   console.log('[MBP] Auto-post job received for', siteName, '- fields:', schema&&schema.fields&&schema.fields.length);
 
@@ -27117,6 +27153,17 @@ function mbpGenerateBookmarklets(){
         else if(/url|website|href|link/.test(n)&&!/image|img|media|avatar/.test(n)) val=data.linkUrl;
         if(val!==null&&f.selector){ if(fillField(f.selector,val)){filled++;} else{ st('Could not fill: '+f.selector); } }
       });
+    }
+    // Nairaland direct-fill fallback
+    var subj2=document.querySelector('input[name=subject],#subject');
+    var body2=document.querySelector('textarea[name=body],#body');
+    if(subj2&&!subj2.value&&data.title){fillField('input[name=subject]',data.title);filled++;}
+    if(body2&&!body2.value&&data.body){fillField('textarea[name=body]',data.body);filled++;}
+    // Rich text editor fallback
+    var ql2=document.querySelector('.ql-editor,.ProseMirror,[contenteditable=true]');
+    if(ql2&&data.body&&(!body2||!body2.value)){
+      try{ql2.focus();document.execCommand('selectAll',false,null);document.execCommand('insertText',false,data.body);}catch(e){ql2.textContent=data.body;}
+      filled++;
     }
     st('Filled '+filled+' field(s). Waiting 2s...');
     setTimeout(function(){
@@ -27820,14 +27867,15 @@ function mbpTriggerAutoPost(id){
     try{w.name='mbp_job:'+jobJson;}catch(e2){}
     w.location.href=site.postUrl;
   }
-  // Also poll postMessage (belt+suspenders if bookmarklet already on page)
-  (function deliverJob(attempts){
-    if(attempts<=0||w.closed) return;
-    setTimeout(function(){
-      try{ w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*'); }catch(e){}
-      if(!w.closed) deliverJob(attempts-1);
-    }, attempts===15 ? 3000 : 1500);
-  })(15);
+  // Broadcast job every 1s for 60s via BroadcastChannel + postMessage
+  var _bcTrig; try{_bcTrig=new BroadcastChannel('mbp_bridge');}catch(e){}
+  var _trigN=0,_trigTimer=setInterval(function(){
+    _trigN++;
+    if(_trigN>60||!w||w.closed){clearInterval(_trigTimer);if(_bcTrig)try{_bcTrig.close();}catch(e){}return;}
+    if(_bcTrig)try{_bcTrig.postMessage({type:'mbp_autopost_job',payload:jobJson});}catch(e){}
+    try{w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*');}catch(e){}
+  },1000);
+  window._mbpLastJobJson=jobJson;
   toast('\U0001f916 Auto-post started for '+site.name+' \u2014 AUTO-POST bookmarklet fires automatically on the post page','i',6000);
   mbpTermLog('   \u2139 If it does not auto-fire, click the \U0001f916 AUTO-POST bookmarklet manually on the post page','t-info');
   mbpSubTab(0);
@@ -27899,6 +27947,15 @@ function mbpStartBlast(){
   mbpTermLog('\uD83D\uDCA5 BLAST STARTED: '+queue.length+' sites ('+poolOk+' windows opened)','t-accent');
   mbpSubTab(3);
   setTimeout(mbpBlastStep, 600);
+}
+
+async function mbpResendLastJob(){
+  var j=window._mbpLastJobJson;
+  if(!j){toast('No recent job to resend','w');return;}
+  var n=0;
+  try{var bc=new BroadcastChannel('mbp_bridge');bc.postMessage({type:'mbp_autopost_job',payload:j});setTimeout(function(){bc.close();},500);n++;}catch(e){}
+  toast('📡 Resent job to '+n+' channel(s)','i');
+  mbpTermLog('📡 Resent last job via BroadcastChannel','t-info');
 }
 
 async function mbpBlastStep(){
@@ -27974,14 +28031,15 @@ async function mbpBlastStep(){
   }catch(e){
     mbpTermLog('   ⚠ Could not set window.name: '+e.message,'t-warn');
   }
-  // Also deliver via postMessage every second (catches bookmarklet already on page)
-  (function deliverJob(attempts){
-    if(attempts<=0||w.closed) return;
-    setTimeout(function(){
-      try{ w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*'); }catch(e){}
-      if(!w.closed) deliverJob(attempts-1);
-    }, attempts===15 ? 2000 : 1000);
-  })(15);
+  // Broadcast job every 1s for 30s via BroadcastChannel + postMessage
+  var _bcBlast; try{_bcBlast=new BroadcastChannel('mbp_bridge');}catch(e){}
+  var _blastN=0,_blastDeliverTimer=setInterval(function(){
+    _blastN++;
+    if(_blastN>30||!w||w.closed){clearInterval(_blastDeliverTimer);if(_bcBlast)try{_bcBlast.close();}catch(e){}return;}
+    if(_bcBlast)try{_bcBlast.postMessage({type:'mbp_autopost_job',payload:jobJson});}catch(e){}
+    try{w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*');}catch(e){}
+  },1000);
+  window._mbpLastJobJson=jobJson;
   // Wait for result with timeout
   const timeout=120000; // 120s per site (covers 30s post-fill + 30s redirect watch + buffer)
   const started=Date.now();

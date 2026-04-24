@@ -26922,13 +26922,16 @@ function mbpGenerateBookmarklets(){
     +'window.addEventListener("message",function(evt){'
       +'if(evt.data&&evt.data.type==="mbp_autopost_job"){try{initJob(JSON.parse(evt.data.payload));}catch(e){setStatus("❌ Job parse error");}}'
     +'});'
-    // PRIMARY: read job from window.name (persists cross-origin, set by dashboard before navigation)
+    // PRIMARY: read job from window.name (set by relay page before cross-origin nav)
     +'if(window.name&&window.name.indexOf("mbp_job:")===0){'
       +'try{'
+        +'setStatus("✅ Job found in window.name ("+window.name.length+" bytes)!");'
         +'var wn=window.name.slice(8);'
-        +'window.name=""; /* clear so it does not re-fire on redirect */'
+        +'window.name="";'
         +'initJob(JSON.parse(wn));'
-      +'}catch(e){setStatus("❌ window.name parse error: "+e.message);}'
+      +'}catch(e){setStatus("❌ window.name parse error: "+e.message);window.name="";}'
+    +'} else if(window.name&&window.name.length>0){'
+      +'setStatus("window.name has unexpected content: "+window.name.slice(0,40));'
     +'}'
     // SECONDARY: poll localStorage (same-origin fallback)
     +'var pollCount=0;'
@@ -27038,9 +27041,168 @@ function mbpGenerateBookmarklets(){
     +'})();'
   +'})();';
 
+  // ── TAMPERMONKEY USERSCRIPT ─────────────────────────────────────────────────
+  // This runs on ALL pages automatically. Checks window.name for mbp_job payload
+  // and auto-fills + submits the form without any user interaction.
+  const userscript = `// ==UserScript==
+// @name         Backlink Pro Auto-Post
+// @namespace    https://seoprotoolz.vercel.app
+// @version      3.0
+// @description  Auto-fills and submits post forms when triggered by Backlink Pro blast engine
+// @author       Backlink Pro
+// @match        *://*/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+(function(){
+  'use strict';
+  // Check window.name for job from Backlink Pro
+  if(!window.name||window.name.indexOf('mbp_job:')!==0) return;
+  var raw = window.name.slice(8);
+  window.name = ''; // clear so it doesn't re-fire
+  var job;
+  try{ job=JSON.parse(raw); }catch(e){ console.error('[MBP] Job parse error',e); return; }
+  var schema=job.schema, data=job.postData, capKey=job.captchaKey||'', siteId=job.siteId||'', siteName=job.siteName||location.hostname;
+  console.log('[MBP] Auto-post job received for', siteName, '- fields:', schema&&schema.fields&&schema.fields.length);
+
+  // HUD overlay
+  var hud=document.createElement('div');
+  hud.id='mbp-autopost-hud';
+  hud.style='position:fixed;top:10px;right:10px;background:#660099;color:#fff;padding:10px 14px;font-family:monospace;font-size:11px;z-index:999999;border-radius:4px;box-shadow:0 2px 10px rgba(0,0,0,.5);min-width:240px;max-width:340px';
+  hud.innerHTML='<b>&#x1F916; Backlink Pro Auto-Post</b><br><span id="mbp-ap-st">Starting...</span>';
+  document.body.appendChild(hud);
+  function st(s){ var e=document.getElementById('mbp-ap-st'); if(e)e.textContent=s; console.log('[MBP]',s); }
+
+  // Send result back to dashboard
+  function mbpSend(type,payload){
+    try{if(window.opener&&!window.opener.closed){window.opener.postMessage({type:type,payload:payload},'*');}}catch(e){}
+    try{var bc=new BroadcastChannel('mbp_bridge');bc.postMessage({type:type,payload:payload});bc.close();}catch(e){}
+    try{var km={'mbp_autopost_result':'mbp_autopost_result'};if(km[type])localStorage.setItem(km[type],payload);}catch(e){}
+  }
+  function done(success,url,error){
+    var result={success:success,url:url||location.href,error:error||'',domain:location.hostname,siteId:siteId,siteName:siteName,title:document.title};
+    mbpSend('mbp_autopost_result',JSON.stringify(result));
+    hud.style.background=success?'#006600':'#cc0000';
+    hud.innerHTML='<b>'+(success?'SUCCESS':'FAILED')+'</b><br><span style="font-size:9px;word-break:break-all">'+(url||error||'').slice(0,80)+'</span>';
+    setTimeout(function(){if(hud.parentNode)hud.remove();},6000);
+  }
+
+  function fillField(sel,val){
+    var el=document.querySelector(sel);
+    if(!el) return false;
+    if(el.tagName==='SELECT'){
+      var opt=Array.from(el.options).find(function(o){return o.text.toLowerCase()===String(val).toLowerCase()||o.value===String(val);});
+      if(opt)el.value=opt.value;
+    } else {
+      try{
+        var proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+        var setter=Object.getOwnPropertyDescriptor(proto,'value').set;
+        if(setter){setter.call(el,val);}else{el.value=val;}
+      }catch(e2){el.value=val;}
+    }
+    ['input','change','keyup'].forEach(function(ev){try{el.dispatchEvent(new Event(ev,{bubbles:true}));}catch(e){}});
+    return !!document.querySelector(sel);
+  }
+
+  function runAutoPost(){
+    var filled=0;
+    if(schema&&schema.fields){
+      schema.fields.forEach(function(f){
+        var val=null;
+        var n=(f.name+'|'+f.id+'|'+f.label+'|'+f.placeholder).toLowerCase();
+        if(/title|subject|headline|topic/.test(n)) val=data.title;
+        else if(/\bbody\b|content|message|post_body|description/.test(n)) val=data.body;
+        else if(/tag|keyword|categor/.test(n)) val=data.tags;
+        else if(/anchor|link.?text|backlink/.test(n)) val=data.anchor;
+        else if(/url|website|href|link/.test(n)&&!/image|img|media|avatar/.test(n)) val=data.linkUrl;
+        if(val!==null&&f.selector){ if(fillField(f.selector,val)){filled++;} else{ st('Could not fill: '+f.selector); } }
+      });
+    }
+    st('Filled '+filled+' field(s). Waiting 2s...');
+    setTimeout(function(){
+      var submitBtn=document.querySelector('input[type=submit]')
+        ||document.querySelector('button[type=submit]')
+        ||document.querySelector('[type=submit]')
+        ||document.querySelector('[name=submit]')
+        ||Array.from(document.querySelectorAll('button,input[type=button]')).find(function(b){return /post|submit|publish|send/i.test(b.value||b.textContent);});
+      st('Submit: '+(submitBtn?(submitBtn.tagName+' val='+(submitBtn.value||submitBtn.textContent).slice(0,20)):'NOT FOUND'));
+      if(!submitBtn){ done(false,null,'no submit button found'); return; }
+      submitBtn.click();
+      var startUrl=location.href, deadline=Date.now()+30000;
+      var watch=setInterval(function(){
+        if(location.href!==startUrl||Date.now()>deadline){
+          clearInterval(watch);
+          if(location.href!==startUrl){done(true,location.href,null);}
+          else{done(false,null,'no redirect after submit');}
+        }
+      },600);
+    }, 2000);
+  }
+
+  // Solve captcha if needed, then run
+  (async function(){
+    st('Checking for captcha...');
+    var rcEl=document.querySelector('.g-recaptcha');
+    var hcEl=document.querySelector('.h-captcha');
+    if(rcEl||hcEl){
+      if(!capKey){st('Captcha detected - no 2captcha key!');done(false,null,'captcha - no key');return;}
+      var siteKey=(rcEl||hcEl).dataset.sitekey||'';
+      var capType=rcEl?'userrecaptcha':'hcaptcha';
+      st('Solving captcha via 2captcha...');
+      try{
+        var body=new FormData();
+        body.append('key',capKey);body.append('method',capType);body.append('googlekey',siteKey);body.append('pageurl',location.href);body.append('json',1);
+        var r=await fetch('https://2captcha.com/in.php',{method:'POST',body:body});
+        var d=await r.json();
+        if(d.status!==1){st('2captcha submit failed: '+d.request);done(false,null,'captcha submit failed');return;}
+        var taskId=d.request;
+        for(var i=0;i<30;i++){
+          await new Promise(function(res){setTimeout(res,3000);});
+          var pr=await fetch('https://2captcha.com/res.php?key='+capKey+'&action=get&id='+taskId+'&json=1');
+          var pd=await pr.json();
+          if(pd.status===1){
+            var token=pd.request;
+            var ta=document.querySelector('textarea[name=g-recaptcha-response],textarea[name=h-captcha-response]');
+            if(ta){ta.value=token;ta.style.display='block';}
+            st('Captcha solved!');
+            runAutoPost();return;
+          }
+          if(pd.request!=='CAPCHA_NOT_READY'&&pd.status===0){st('2captcha error: '+pd.request);done(false,null,'captcha error');return;}
+        }
+        st('Captcha timeout');done(false,null,'captcha timeout');
+      }catch(e){st('Captcha error: '+e.message);done(false,null,'captcha exception');}
+    } else {
+      runAutoPost();
+    }
+  })();
+})();`;
+
   // Store in global so DOM helper can wire them after innerHTML render
-  window._mbpBM = {captureCode, autofillCode, recordCode, autopostCode};
+  window._mbpBM = {captureCode, autofillCode, recordCode, autopostCode, userscript};
   return window._mbpBM;
+}
+
+function mbpCopyUserscript(){
+  const bm=window._mbpBM;
+  if(!bm||!bm.userscript){
+    mbpGenerateBookmarklets();
+    if(!window._mbpBM||!window._mbpBM.userscript){toast('Regenerate bookmarklets first','w');return;}
+  }
+  const us=window._mbpBM.userscript;
+  // Show in textarea
+  const ta=document.getElementById('mbp-userscript-ta');
+  if(ta) ta.value=us;
+  // Copy to clipboard
+  if(navigator.clipboard){
+    navigator.clipboard.writeText(us).then(function(){
+      const el=document.getElementById('mbp-us-copied');
+      if(el){el.style.display='inline';setTimeout(function(){el.style.display='none';},5000);}
+      toast('Userscript copied! Paste into Tampermonkey New Script','s',5000);
+    });
+  } else {
+    if(ta){ta.select();document.execCommand('copy');}
+    toast('Userscript copied!','s');
+  }
 }
 
 // Called after the bookmarklet tab renders — sets real href on each <a> via DOM (bypasses esc() issues)
@@ -27213,7 +27375,23 @@ function blpRenderManualBrowser(){
 
   // AUTO-POST
   html+='<div class="card" style="border-color:#c47a00">';
-  html+='<div class="card-title" style="background:linear-gradient(to right,#7a4a00,#c47a00)">🤖 AUTO-POST — Execute Queued Job</div>';
+  // ── TAMPERMONKEY USERSCRIPT SECTION ────────────────────────────────────────
+  html+='<div class="card" style="border:2px solid #006600;margin-bottom:10px">';
+  html+='<div class="card-title" style="background:linear-gradient(to right,#004400,#006600)">🦊 TAMPERMONKEY USERSCRIPT — Required for Zero-Click Auto-Post</div>';
+  html+='<div style="padding:10px;font-size:10px">';
+  html+='<div class="notice notice-warn" style="margin-bottom:8px">⚡ <strong>Install this ONCE</strong> in Tampermonkey or Violentmonkey. After that, Blast All will auto-fill and submit forms on every site automatically — no bookmarklet click needed.</div>';
+  html+='<ol style="margin:0 0 8px 16px;padding:0;font-size:10px;line-height:1.7">';
+  html+='<li>Install <a href="https://www.tampermonkey.net/" target="_blank" style="color:var(--accent)">Tampermonkey</a> extension (Chrome/Edge/Firefox)</li>';
+  html+='<li>Click <strong>Copy Userscript</strong> below</li>';
+  html+='<li>Open Tampermonkey dashboard → <strong>New Script</strong> → paste → Save</li>';
+  html+='<li>That\'s it — Blast All now works fully automatically!</li>';
+  html+='</ol>';
+  html+='<button class="btn btn-primary" onclick="mbpCopyUserscript()" style="background:linear-gradient(to right,#004400,#006600);border-color:#006600">📋 Copy Userscript</button>';
+  html+='<span id="mbp-us-copied" style="margin-left:8px;font-size:9px;color:#00cc44;display:none">✅ Copied! Now paste into Tampermonkey New Script.</span>';
+  html+='<textarea id="mbp-userscript-ta" style="width:100%;height:80px;font-family:var(--mono);font-size:8px;margin-top:6px;background:var(--win-dark);color:#00cc44;border:1px solid #006600;resize:vertical" readonly></textarea>';
+  html+='</div></div>';
+
+  html+='<div class="card-title" style="background:linear-gradient(to right,#7a4a00,#c47a00)">🤖 AUTO-POST — Execute Queued Job (manual fallback)</div>';
   html+='<div style="font-size:10px;line-height:1.7;margin-bottom:8px">Used by the Blast All engine. When a job is queued, open the post URL and click this — fills the form via learned schema, solves captcha via 2captcha, submits, returns success URL.</div>';
   html+='<div style="text-align:center;padding:10px;background:var(--win-dark);margin-bottom:8px">';
   html+='<a id="bm-autopost" href="#" style="display:inline-block;background:linear-gradient(to right,#7a4a00,#c47a00);color:#fff;padding:10px 24px;font-weight:700;font-family:var(--mono);font-size:13px;text-decoration:none;border:2px solid #3d2500;cursor:grab;letter-spacing:.03em" title="Drag me to your bookmarks bar!">🤖 AUTO-POST</a>';
@@ -27622,23 +27800,33 @@ function mbpTriggerAutoPost(id){
   MBP.setState(id,'auto_posting');
   mbpTermLog('🤖 Auto-post queued for: '+site.name,'t-accent');
   mbpTermLog('   Opening post URL: '+site.postUrl,'t-info');
-  // This is a direct user click — window.open won't be blocked
-  const w=window.open(site.postUrl,'mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+  // Open about:blank first (synchronous), then write relay script that navigates to postUrl
+  const w=window.open('about:blank','mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
   if(!w){
     toast('\u26a0 Popup blocked! Click the popup icon in the address bar \u2192 Allow popups \u2192 then retry','e',10000);
     mbpTermLog('\u274c Popup blocked for '+site.name+' \u2014 allow popups in browser settings then try again','t-warn');
     MBP.setState(id,'idle');return;
   }
   MBP._popups[id]=w;
-  // PRIMARY: window.name persists cross-origin. Set BEFORE page navigation.
-  try{ w.name='mbp_job:'+jobJson; }catch(e){}
-  // SECONDARY: postMessage polling (works if bookmarklet already on page)
+  // Inject relay script into about:blank window — sets window.name then navigates cross-origin.
+  // window.name survives the cross-origin navigation so AUTO-POST bookmarklet can read the job.
+  try{
+    var jobEscT = jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
+    w.document.write('<script>window.name="mbp_job:'+jobEscT+'";location.replace("'+site.postUrl.replace(/"/g,'%22')+'")<\/script>');
+    w.document.close();
+    mbpTermLog('   \u2705 Relay injected \u2014 window navigating to post URL','t-info');
+  }catch(e){
+    mbpTermLog('   \u26a0 Relay inject failed: '+e+' \u2014 trying direct nav','t-warn');
+    try{w.name='mbp_job:'+jobJson;}catch(e2){}
+    w.location.href=site.postUrl;
+  }
+  // Also poll postMessage (belt+suspenders if bookmarklet already on page)
   (function deliverJob(attempts){
     if(attempts<=0||w.closed) return;
     setTimeout(function(){
       try{ w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*'); }catch(e){}
       if(!w.closed) deliverJob(attempts-1);
-    }, attempts===15 ? 2000 : 1000);
+    }, attempts===15 ? 3000 : 1500);
   })(15);
   toast('\U0001f916 Auto-post started for '+site.name+' \u2014 AUTO-POST bookmarklet fires automatically on the post page','i',6000);
   mbpTermLog('   \u2139 If it does not auto-fire, click the \U0001f916 AUTO-POST bookmarklet manually on the post page','t-info');
@@ -27685,13 +27873,21 @@ function mbpStartBlast(){
       window._mbpBlastWindowPool[q.siteId] = w;
       poolOk++;
       try{
-        // Write a placeholder — window.name will be set later when job is dispatched
-        w.document.write('<html><body style="background:#0a0f0a;color:#00cc44;font-family:monospace;'+
-          'display:flex;align-items:center;justify-content:center;height:100vh;margin:0">'+
-          '<div style="text-align:center"><div style="font-size:28px;margin-bottom:10px">&#x1F916;</div>'+
-          '<div style="font-size:15px;font-weight:bold">Backlink Pro</div>'+
-          '<div style="font-size:12px;opacity:.7;margin-top:6px">Loading: '+q.site.name+'&hellip;</div>'+
-          '<div style="font-size:10px;opacity:.5;margin-top:4px">Preparing job delivery via window.name&hellip;</div></div></body></html>');
+        w.document.write([
+          '<!DOCTYPE html><html><head><meta charset=utf-8>',
+          '<title>&#x1F916; Backlink Pro Loading \u2014 '+q.site.name+'</title>',
+          '<style>body{background:#0a0f0a;color:#00cc44;font-family:monospace;',
+          'display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;}',
+          '.ico{font-size:40px;} .name{font-size:16px;font-weight:bold;color:#fff;}',
+          '.msg{font-size:11px;opacity:.6;} .bar{width:200px;height:3px;background:#003300;border-radius:2px;margin-top:8px;}',
+          '.fill{height:100%;background:#00cc44;border-radius:2px;animation:grow 1.2s ease-out forwards;}',
+          '@keyframes grow{from{width:0}to{width:100%}}</style></head>',
+          '<body><div class=ico>&#x1F916;</div>',
+          '<div class=name>'+q.site.name+'</div>',
+          '<div class=msg>Job queued \u2014 navigating to post page&hellip;</div>',
+          '<div class=bar><div class=fill></div></div>',
+          '</body></html>'
+        ].join(''));
         w.document.close();
       }catch(e){}
     } else { poolFail++; }
@@ -27733,12 +27929,32 @@ async function mbpBlastStep(){
   var w = window._mbpBlastWindowPool && window._mbpBlastWindowPool[site.id];
   if(!w||w.closed){
     // Fallback: try window.open now (may be blocked in some browsers)
-    w=window.open(site.postUrl,'mbp_blast_'+site.id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+    w=window.open('about:blank','mbp_blast_'+site.id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+    if(w){
+      // Write relay script into fresh window immediately (same-origin about:blank)
+      try{
+        var jobEsc2 = jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
+        w.document.write('<script>window.name="mbp_job:'+jobEsc2+'";location.replace("'+site.postUrl.replace(/"/g,'%22')+'")<\/script>');
+        w.document.close();
+      }catch(e2){
+        // If that fails, set name and navigate directly
+        try{w.name='mbp_job:'+jobJson;}catch(e3){}
+        w.location.href=site.postUrl;
+      }
+    }
   } else {
-    // Set window.name with job data BEFORE navigating (window.name survives cross-origin navigation)
-    try{ w.name='mbp_job:'+jobJson; }catch(e){ mbpTermLog('   ⚠ window.name set failed: '+e,'t-warn'); }
-    // Navigate the pre-opened window to the post URL
-    try{ w.location.href=site.postUrl; }catch(e){ mbpTermLog('   ⚠ navigation error: '+e,'t-warn'); }
+    // Write relay script into pool window (about:blank same-origin) — sets window.name then navigates.
+    // window.name persists across the cross-origin navigation to the target site.
+    try{
+      var jobEsc = jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
+      w.document.write('<script>window.name="mbp_job:'+jobEsc+'";location.replace("'+site.postUrl.replace(/"/g,'%22')+'")<\/script>');
+      w.document.close();
+      mbpTermLog('   ✅ Relay injected ('+jobJson.length+' bytes in window.name) — navigating to post URL','t-info');
+    }catch(e){
+      mbpTermLog('   ⚠ Relay inject failed: '+e+' — direct nav fallback','t-warn');
+      try{w.name='mbp_job:'+jobJson;}catch(e2){}
+      try{w.location.href=site.postUrl;}catch(e3){}
+    }
   }
   if(!w){
     next.status='failed';next.error='popup blocked';

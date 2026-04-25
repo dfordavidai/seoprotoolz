@@ -15928,6 +15928,7 @@ async function uacRunCreation(){
   const customPw      = document.getElementById('uac-custom-pw')?.value?.trim()||'';
   const proxyStr      = document.getElementById('uac-proxy')?.value?.trim()||'';
   const headless      = document.getElementById('uac-headless')?.checked !== false;
+  const forceLearn    = document.getElementById('uac-force-learn')?.checked === true;
 
   UAC_STATE.running = true; UAC_STATE.stopFlag = false;
   const runBtn  = document.getElementById('uac-run-btn');  if(runBtn)  runBtn.disabled=true;
@@ -15987,6 +15988,7 @@ async function uacRunCreation(){
             proxy:      proxyStr||'',
             headless:   headless,
             autoVerify: autoVerify && !!mailTmToken, // server does its own verify only if we also poll
+            forceLearn: forceLearn,
           });
         } catch(e){
           uacLog(`  [${i+1}] ❌ Backend error: ${e.message}`, 't-err');
@@ -16049,6 +16051,7 @@ async function uacRunCreation(){
         uacLog(`  [${i+1}] ${statusIcon} ${job.siteName} · ${profile.username} → ${result.ok?'LIVE':'FAILED'}`, result.ok?'t-info':'t-warn');
         if(result.formFields?.length) uacLog(`    ↳ Fields filled: ${result.formFields.join(', ')}`, 'tm');
         if(result.captchaSolved) uacLog(`    ↳ 🧩 CAPTCHA solved via 2captcha`, 't-accent');
+        if(result.schemaMode) uacLog(`    ↳ 🧠 Schema: ${result.schemaMode==='replay'?'REPLAY (learned selectors)':result.schemaMode==='learn'?'LEARN (first run — schema saved)':'REPLAY+RELEARN (schema refreshed)'}`, 'tm');
         uacLog(`    ↳ ${result.note||''}`, 'tm');
 
         if(i < countPerSite-1) await sleep(1500 + Math.random()*1000);
@@ -16103,6 +16106,46 @@ function uacExportCSV(){
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([h+rows],{type:'text/csv'}));
   a.download='universal-accounts.csv'; a.click();
+}
+
+async function uacCheckSchemas(){
+  const panel = document.getElementById('uac-schema-status');
+  if(!panel) return;
+  const urls = (document.getElementById('uac-urls')?.value||'').split('\n').map(u=>u.trim()).filter(u=>u.startsWith('http'));
+  if(!urls.length){ panel.innerHTML='<span style="color:var(--muted2)">Paste URLs on the left first.</span>'; return; }
+  const base   = uacGetVercelBase();
+  const secret = settingGet('vercel_secret')||'';
+  if(!base){ panel.innerHTML='<span style="color:#f66">⚠ Vercel backend URL not set in Settings.</span>'; return; }
+  panel.innerHTML='<span class="tm">Checking schemas…</span>';
+  const results = await Promise.all(urls.map(async url => {
+    const host = (()=>{ try{return new URL(url).hostname.replace('www.','');}catch{return url.slice(0,40);}})();
+    try {
+      const r = await fetch(`${base}/api/universal-register`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json',...(secret?{'X-API-Key':secret}:{})},
+        body:JSON.stringify({url,_checkSchema:true}),
+        signal:AbortSignal.timeout(8000),
+      });
+      const d = await r.json().catch(()=>({}));
+      return {host,url,hasSchema:d.schemaExists,fields:d.fieldCount||0};
+    } catch(e){ return {host,url,hasSchema:false,err:e.message}; }
+  }));
+  panel.innerHTML = results.map(r=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px dotted var(--win-border)">
+      ${r.hasSchema
+        ?'<span class="badge badge-g" style="font-size:9px">✔ LEARNED</span>'
+        :'<span class="badge" style="background:#555;color:#ccc;font-size:9px">NOT YET</span>'}
+      <span class="mono xs">${r.host}</span>
+      <span class="xs" style="color:var(--muted2)">${r.hasSchema?`→ ${r.fields} fields saved, will REPLAY`:'→ will LEARN on first run'}</span>
+    </div>`).join('');
+}
+
+function uacForceRelearn(){
+  const cb = document.getElementById('uac-force-learn');
+  if(cb){ cb.checked=true; }
+  const panel = document.getElementById('uac-schema-status');
+  if(panel) panel.innerHTML='<span style="color:#ffa500">🔄 Force Re-learn is ON — next run will re-scan all site forms and overwrite saved schemas.</span>';
+  uacLog('🔄 Force Re-learn enabled — schemas will be refreshed on next run','t-warn');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -16595,6 +16638,9 @@ function renderAccountCreator(el){
             <div style="display:flex;align-items:center;gap:10px;padding:8px;background:rgba(0,87,255,0.05);border:1px solid rgba(0,87,255,0.15)">
               <input type="checkbox" id="uac-headless" style="width:auto" checked />
               <label for="uac-headless" class="mono xs" style="cursor:pointer;color:var(--accent)">👻 Headless mode (uncheck to see browser — for debugging)</label></div>
+            <div style="display:flex;align-items:center;gap:10px;padding:8px;background:rgba(255,160,0,0.06);border:1px solid rgba(255,160,0,0.25)">
+              <input type="checkbox" id="uac-force-learn" style="width:auto" />
+              <label for="uac-force-learn" class="mono xs" style="cursor:pointer;color:#ffa500">🔄 Force Re-learn schema (use if site changed its form)</label></div>
           </div>
           <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
             <button id="uac-run-btn" class="btn btn-primary" style="flex:1;font-size:12px;padding:8px" onclick="uacRunCreation()">🚀 LAUNCH UNIVERSAL CREATOR</button>
@@ -16637,6 +16683,16 @@ function renderAccountCreator(el){
 
       <!-- RIGHT COLUMN: Terminal + Results -->
       <div>
+        <div class="card" id="uac-schema-panel" style="margin-bottom:10px">
+          <div class="card-title" style="display:flex;align-items:center;gap:8px">
+            🧠 Schema Store — Learned Sites
+            <button class="btn btn-ghost btn-xs" onclick="uacCheckSchemas()" style="margin-left:auto">Refresh</button>
+            <button class="btn btn-danger btn-xs" onclick="uacForceRelearn()">Force Re-learn All</button>
+          </div>
+          <div id="uac-schema-status" class="mono xs" style="padding:6px 0;color:var(--muted2)">
+            Paste URLs and run — learned schemas appear here. <span style="color:#ffa500">🟡 First run = LEARN. All after = REPLAY (fast + 100% accurate).</span>
+          </div>
+        </div>
         <div class="card">
           <div class="card-title">🖥 Universal Creator Log — Live Output</div>
           <div class="terminal" id="uac-terminal" style="height:320px">

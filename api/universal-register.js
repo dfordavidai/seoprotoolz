@@ -392,6 +392,8 @@ export default async function handler(req, res) {
     profile: profileOverride = {},
     forceLearn      = false,
     _checkSchema    = false,
+    _learnOnly      = false,
+    schema:  clientSchema   = null,
   } = req.body || {};
 
   if (!url) return res.status(400).json({ error: 'url is required' });
@@ -406,6 +408,31 @@ export default async function handler(req, res) {
       fieldCount: schema?.fields?.length || 0,
       learnedAt: schema?.learnedAt || null,
     });
+  }
+
+  // Learn-only mode: open site, scan the form DOM, save schema — no registration
+  if (_learnOnly) {
+    let browser2, context2, page2;
+    try {
+      browser2 = await launchBrowser({ proxy });
+      context2 = await createContext(browser2);
+      page2    = await context2.newPage();
+      const L2 = () => {};
+      await navigateToRegPage(page2, url, L2);
+      await page2.waitForTimeout(2500);
+      const schema = await page2.evaluate(new Function('return ' + LEARN_SCRIPT)()).catch(async () => {
+        return await page2.evaluate(LEARN_SCRIPT).catch(() => null);
+      });
+      if (schema && schema.fields && schema.fields.length > 0) {
+        const key = siteKey(url);
+        await schemaSave(key, schema);
+      }
+      return res.status(200).json({ ok: true, schema: schema || null });
+    } catch(e) {
+      return res.status(200).json({ ok: false, schema: null, error: e.message });
+    } finally {
+      await browser2?.close().catch(() => {});
+    }
   }
 
   const log = [];
@@ -434,9 +461,15 @@ export default async function handler(req, res) {
 
     // ── 2. Check for existing schema ─────────────────────────────────────────
     const key = siteKey(url);
-    let schema = forceLearn ? null : await schemaGet(key);
+    // clientSchema: pre-learned schema sent directly from the Learn & Register frontend tab
+    let schema = clientSchema || (forceLearn ? null : await schemaGet(key));
 
-    if (schema) {
+    if (clientSchema) {
+      L(`📋 CLIENT SCHEMA — Using schema sent from Learn tab (${clientSchema.fields.length} fields)`, 't-accent');
+      result.schemaMode = 'client';
+      // Persist it so future runs can replay without re-learning
+      await schemaSave(key, clientSchema);
+    } else if (schema) {
       L(`📖 REPLAY MODE — Using saved schema (${schema.fields.length} fields learned ${new Date(schema.learnedAt).toLocaleDateString()})`, 't-accent');
       result.schemaMode = 'replay';
     } else {

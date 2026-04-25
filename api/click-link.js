@@ -1,33 +1,40 @@
 /**
- * click-link.js — Vercel serverless (ESM, playwright-core + @sparticuz/chromium)
+ * click-link.js — Vercel serverless (ESM)
+ *
+ * FIX: Switched from @sparticuz/chromium  →  @sparticuz/chromium-min
+ *
+ * Why: @sparticuz/chromium bundles a Chromium binary that links against libns3.so,
+ * which does not exist in Vercel's Amazon Linux 2 Lambda runtime.
+ * chromium-min downloads the binary at cold-start from a GitHub release URL,
+ * which ships its own bundled libs — no host dependency issues.
  *
  * Actions:
- *   visit    — CTR simulator
- *   autopost — Login + smart form fill + submit
+ *   visit    — CTR simulator (scroll, dwell, click internal links)
+ *   autopost — Login + smart field fill + captcha + submit
  *
  * Auth: X-API-Key header must match VERCEL_API_KEY env var
- *
- * THE BUG THIS FIXES:
- *   chromiumExec.executablePath is not a function
- *   → In @sparticuz/chromium v110+, executablePath is an async function.
- *     You MUST await chromium.executablePath() — not read it as a property.
  */
 
-import chromium from '@sparticuz/chromium';
+import chromium from '@sparticuz/chromium-min';
 import { chromium as playwrightChromium } from 'playwright-core';
+
+// chromium-min does NOT bundle Chromium. It downloads at cold-start from this URL.
+// Pin to a specific release so it is stable and reproducible.
+const CHROMIUM_URL =
+  'https://github.com/Sparticuz/chromium/releases/download/v131.0.1/chromium-v131.0.1-pack.tar';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function checkAuth(req) {
   const key      = (req.headers['x-api-key'] || '').trim();
   const expected = (process.env.VERCEL_API_KEY || process.env.API_KEY || '').trim();
-  if (!expected) return true; // no key set → open
+  if (!expected) return true;
   return key === expected;
 }
 
 // ── Browser factory ───────────────────────────────────────────────────────────
 async function launchBrowser() {
-  // executablePath MUST be called as a function and awaited — it is async in v110+
-  const executablePath = await chromium.executablePath();
+  // executablePath() is async in chromium-min — must be awaited, not read as property
+  const executablePath = await chromium.executablePath(CHROMIUM_URL);
 
   return playwrightChromium.launch({
     args:           chromium.args,
@@ -57,14 +64,14 @@ async function actionVisit(body) {
   const browser = await launchBrowser();
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       extraHTTPHeaders: { Referer: referer },
     });
     const page = await context.newPage();
 
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
 
-    // Smooth scroll to scrollDepth %
+    // Smooth scroll
     await page.evaluate(async (depth) => {
       const total  = document.body.scrollHeight;
       const target = total * (depth / 100);
@@ -95,7 +102,7 @@ async function actionVisit(body) {
           await page.goto(link, { waitUntil: 'networkidle', timeout: 20000 });
           await sleep(rnd(3000, 8000));
           clicked++;
-        } catch (_) { /* ignore dead links */ }
+        } catch (_) {}
       }
     }
 
@@ -124,7 +131,7 @@ async function actionAutopost(body) {
 
   const browser = await launchBrowser();
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     viewport:  { width: 1280, height: 800 },
     ignoreHTTPSErrors: true,
   });
@@ -149,11 +156,11 @@ async function actionAutopost(body) {
       const userField = await page.$(
         'input[type="text"], input[type="email"], input[name*="user"], input[name*="login"], input[id*="user"], input[id*="login"], input[name*="name"]'
       );
-      if (!userField) return await fail('No username field on login page');
+      if (!userField) return await fail('No username field found on login page');
       await userField.fill(credentials.username);
 
       const passField = await page.$('input[type="password"]');
-      if (!passField) return await fail('No password field on login page');
+      if (!passField) return await fail('No password field found on login page');
       await passField.fill(credentials.password);
 
       const submitBtn = await page.$('button[type="submit"], input[type="submit"], button:not([type="button"])');
@@ -179,25 +186,22 @@ async function actionAutopost(body) {
     await sleep(1000);
 
     // ── Step 3: Smart field fill ──────────────────────────────────────────────
-    // Each entry: { value, keys (attr substrings to score against), preferTextarea }
     const fieldDefs = [
-      { value: fields.subject || '', keys: ['subject', 'title', 'headline', 'topic', 'heading'],                       preferTextarea: false },
-      { value: fields.body    || '', keys: ['body', 'content', 'message', 'post', 'description', 'text', 'comment'],   preferTextarea: true  },
-      { value: fields.tags    || '', keys: ['tag', 'keyword', 'category', 'label'],                                    preferTextarea: false },
-      { value: fields.linkUrl || '', keys: ['url', 'link', 'website', 'href', 'source'],                               preferTextarea: false },
-      { value: fields.anchor  || '', keys: ['anchor', 'link_text', 'link-text', 'linktext'],                           preferTextarea: false },
+      { value: fields.subject || '', keys: ['subject', 'title', 'headline', 'topic', 'heading'],                     preferTextarea: false },
+      { value: fields.body    || '', keys: ['body', 'content', 'message', 'post', 'description', 'text', 'comment'], preferTextarea: true  },
+      { value: fields.tags    || '', keys: ['tag', 'keyword', 'category', 'label'],                                  preferTextarea: false },
+      { value: fields.linkUrl || '', keys: ['url', 'link', 'website', 'href', 'source'],                             preferTextarea: false },
+      { value: fields.anchor  || '', keys: ['anchor', 'link_text', 'link-text', 'linktext'],                         preferTextarea: false },
     ];
 
     for (const fd of fieldDefs) {
       if (!fd.value) continue;
-
       await page.evaluate((fd) => {
         const inputs = Array.from(
           document.querySelectorAll(
             'input:not([type="hidden"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="file"]), textarea'
           )
         );
-
         let best = null, bestScore = -Infinity;
         for (const el of inputs) {
           const attrs = [el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.className]
@@ -208,17 +212,14 @@ async function actionAutopost(body) {
           if (fd.preferTextarea && el.tagName === 'TEXTAREA') score += 5;
           if (score > bestScore) { bestScore = score; best = el; }
         }
-
-        if (!best) return;
-        if (best.value && best.value.length > 2) return; // already populated
-
+        if (!best || (best.value && best.value.length > 2)) return;
         best.value = fd.value;
         best.dispatchEvent(new Event('input',  { bubbles: true }));
         best.dispatchEvent(new Event('change', { bubbles: true }));
       }, fd);
     }
 
-    // ── Step 4: reCAPTCHA v2 via 2captcha (optional) ─────────────────────────
+    // ── Step 4: reCAPTCHA v2 via 2captcha ────────────────────────────────────
     if (captchaKey) {
       const sitekey = await page.evaluate(
         () => document.querySelector('[data-sitekey]')?.getAttribute('data-sitekey') ?? null
@@ -227,20 +228,19 @@ async function actionAutopost(body) {
       if (sitekey) {
         try {
           const pageUrl = page.url();
-          const inRes   = await fetch(
+          const inData  = await (await fetch(
             `https://2captcha.com/in.php?key=${captchaKey}&method=userrecaptcha&googlekey=${encodeURIComponent(sitekey)}&pageurl=${encodeURIComponent(pageUrl)}&json=1`
-          );
-          const inData = await inRes.json();
+          )).json();
           if (inData.status !== 1) throw new Error('2captcha submit: ' + inData.request);
 
           let token = null;
           for (let i = 0; i < 30; i++) {
             await sleep(3000);
-            const pollData = await (
-              await fetch(`https://2captcha.com/res.php?key=${captchaKey}&action=get&id=${inData.request}&json=1`)
-            ).json();
-            if (pollData.status === 1) { token = pollData.request; break; }
-            if (pollData.request !== 'CAPCHA_NOT_READY') throw new Error('2captcha poll: ' + pollData.request);
+            const poll = await (await fetch(
+              `https://2captcha.com/res.php?key=${captchaKey}&action=get&id=${inData.request}&json=1`
+            )).json();
+            if (poll.status === 1) { token = poll.request; break; }
+            if (poll.request !== 'CAPCHA_NOT_READY') throw new Error('2captcha poll: ' + poll.request);
           }
 
           if (token) {
@@ -248,8 +248,7 @@ async function actionAutopost(body) {
               const ta = document.querySelector('#g-recaptcha-response, textarea[name="g-recaptcha-response"]');
               if (ta) { ta.style.display = 'block'; ta.value = t; }
               try {
-                const clients = Object.values(window.___grecaptcha_cfg?.clients || {});
-                for (const c of clients) {
+                for (const c of Object.values(window.___grecaptcha_cfg?.clients || {})) {
                   for (const v of Object.values(c)) {
                     if (v && typeof v.callback === 'function') v.callback(t);
                   }
@@ -259,14 +258,15 @@ async function actionAutopost(body) {
             await sleep(500);
           }
         } catch (capErr) {
-          console.warn('[autopost] captcha error (continuing):', capErr.message);
+          console.warn('[autopost] captcha skipped:', capErr.message);
         }
       }
     }
 
     // ── Step 5: Submit ────────────────────────────────────────────────────────
-    const submitSel = 'button[type="submit"], input[type="submit"], button.submit, button.post, [class*="submit-btn"], [class*="post-btn"]';
-    const submitEl  = await page.$(submitSel);
+    const submitEl = await page.$(
+      'button[type="submit"], input[type="submit"], button.submit, button.post, [class*="submit-btn"], [class*="post-btn"]'
+    );
 
     if (submitEl) {
       await submitEl.click();
@@ -300,7 +300,7 @@ async function actionAutopost(body) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Vercel handler (ESM default export)
+// Vercel handler
 // ─────────────────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin',  '*');
@@ -308,8 +308,8 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,X-API-Key,Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  if (!checkAuth(req))          return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  if (req.method !== 'POST')    return res.status(405).json({ ok: false, error: 'POST required' });
+  if (!checkAuth(req))       return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'POST required' });
 
   const body   = req.body || {};
   const action = (body.action || 'visit').trim();

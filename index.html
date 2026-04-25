@@ -16097,10 +16097,295 @@ function uacRenderTable(){
 }
 
 // ══════════════════════════════════════════════════════════════
-// LEARN & REGISTER ENGINE
+// ══════════════════════════════════════════════════════════════
+// BOOKMARKLET ENGINE
 // ══════════════════════════════════════════════════════════════
 
-const UAC_LEARN_STATE = { popup: null, schema: null, jobs: [] };
+(function() {
+  // ── Build the bookmarklet href and wire the drag link ──────────
+  // The bookmarklet:
+  //   1. Scans the current page for form fields + next/submit buttons + captcha
+  //   2. Encodes the schema as base64 JSON
+  //   3. Opens a tiny 1×1 popup window pointing at THIS app's URL with #uac_step=<data> in the hash
+  //   4. The popup is on the same origin as this app, so it can write to localStorage
+  //   5. It writes {type:'uac_step', schema} to localStorage key 'uac_bm_incoming'
+  //   6. The storage event fires in THIS tab — we receive and process it
+  //   7. The popup closes itself immediately
+
+  function buildBookmarklet(appUrl) {
+    // Strip hash/query from app URL
+    var base = appUrl.replace(/#.*$/, '').replace(/\?.*$/, '').replace(/\/+$/, '');
+
+    // This is the code that will run on the target site when the bookmark is clicked
+    var scanCode = [
+      '(function(){',
+        // Scanner — identical to UAC_FORM_SCANNER_SRC but self-contained
+        'var fields=[],seen={};',
+        'var els=document.querySelectorAll("input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image]):not([type=reset]):not([type=file]),textarea,select");',
+        'els.forEach(function(el){',
+          'var r=el.getBoundingClientRect();',
+          'if(r.width===0&&r.height===0)return;',
+          'var st=window.getComputedStyle(el);',
+          'if(st.display==="none"||st.visibility==="hidden")return;',
+          'var id=el.id||"",nm=el.name||"",ph=el.placeholder||"";',
+          'var tp=(el.type||el.tagName).toLowerCase();',
+          'var lb="";',
+          'if(id){var l=document.querySelector("label[for=\\""+id+"\\"]");if(l)lb=l.innerText.trim();}',
+          'if(!lb){var p=el.closest("label");if(p)lb=p.innerText.slice(0,60);}',
+          'var sel=id?"#"+id:(nm?"[name=\\""+nm+"\\"]":"");',
+          'if(!sel||seen[sel])return;',
+          'seen[sel]=1;',
+          'fields.push({tag:el.tagName.toLowerCase(),type:tp,name:nm,id:id,placeholder:ph,label:lb,selector:sel,value:el.value||""});',
+        '});',
+        // Detect next/submit buttons
+        'var allBtns=Array.from(document.querySelectorAll("button,input[type=submit],input[type=button],[role=button]"));',
+        'var nxtBtn=allBtns.find(function(b){return /next|continue|weiter|siguiente|proceed|forward/i.test(b.innerText||b.value||"");});',
+        'var subBtn=document.querySelector("button[type=submit],input[type=submit]");',
+        'function mksel(e){if(!e)return null;if(e.id)return"#"+e.id;if(e.name)return"[name=\\""+e.name+"\\"]";var t=(e.innerText||e.value||"").trim().slice(0,30);return t?"button:has-text(\\""+t+"\\")":"button[type=submit]";}',
+        'var cap=document.querySelector(".g-recaptcha,[data-sitekey],.h-captcha,iframe[src*=recaptcha],iframe[src*=hcaptcha]")?"detected":"none";',
+        'var schema={domain:location.hostname,url:location.href,fields:fields,nextSel:mksel(nxtBtn),submitSel:mksel(subBtn)||"button[type=submit]",captcha:cap,ts:Date.now()};',
+        // Encode and open receiver popup
+        'var enc=btoa(unescape(encodeURIComponent(JSON.stringify(schema))));',
+        'var rx=window.open("' + base + '#uac_step="+enc,"uac_bm_rx","width=1,height=1,left=-9999,top=-9999");',
+        'if(!rx){alert("Bookmarklet: popup blocked. Allow popups for this site then try again.");}',
+        'else{',
+          // Give popup time to load and post back, then close
+          'setTimeout(function(){try{rx.close();}catch(e){}},3500);',
+          // Show quick feedback overlay on the target site
+          'var d=document.createElement("div");',
+          'd.style.cssText="position:fixed;top:16px;right:16px;z-index=999999;background:#003087;color:#fff;font:bold 13px monospace;padding:10px 18px;border-radius:4px;box-shadow:0 4px 20px rgba(0,0,0,0.4)";',
+          'd.textContent="📎 Form captured! Go back to DaveAI tab.";',
+          'document.body.appendChild(d);',
+          'setTimeout(function(){d.remove();},3000);',
+        '}',
+      '})();'
+    ].join('');
+
+    return 'javascript:' + scanCode;
+  }
+
+  function uacBmInit() {
+    var appUrl = location.href;
+    var link = document.getElementById('uac-bookmarklet-link');
+    if (link) {
+      link.href = buildBookmarklet(appUrl);
+      // Prevent accidental click-navigation
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        toast('Drag this button to your bookmarks bar — don\'t click it here', 'i', 4000);
+      });
+    }
+
+    // ── Hash-based receiver: fires when our tiny popup loads this page with #uac_step=... ──
+    function processHash() {
+      var hash = location.hash;
+      if (!hash.startsWith('#uac_step=')) return;
+      // Clear the hash immediately so it doesn't re-trigger
+      history.replaceState(null, '', location.pathname + location.search);
+      var enc = hash.slice('#uac_step='.length);
+      try {
+        var schema = JSON.parse(decodeURIComponent(escape(atob(enc))));
+        uacBmReceive(schema);
+      } catch(e) {
+        uacLearnLog('⚠ Bookmarklet: failed to decode incoming schema: ' + e.message, 't-warn');
+      }
+    }
+
+    // ── localStorage receiver: fires when popup (same origin) writes the key ──
+    window.addEventListener('storage', function(e) {
+      if (e.key !== 'uac_bm_incoming' || !e.newValue) return;
+      try {
+        var payload = JSON.parse(e.newValue);
+        if (payload && payload.type === 'uac_step' && payload.schema) {
+          localStorage.removeItem('uac_bm_incoming');
+          uacBmReceive(payload.schema);
+        }
+      } catch(err) {}
+    });
+
+    // Check on page load (in case this tab IS the receiver popup)
+    processHash();
+    window.addEventListener('hashchange', processHash);
+  }
+
+  // Called whenever a step arrives (from storage event or hash)
+  function uacBmReceive(schema) {
+    if (!schema || !schema.fields || !schema.fields.length) {
+      uacLearnLog('⚠ Bookmarklet capture: no form fields found on that page.', 't-warn');
+      toast('No form fields found on that page', 'w', 4000);
+      return;
+    }
+
+    // Accumulate steps
+    UAC_LEARN_STATE.bmSteps = UAC_LEARN_STATE.bmSteps || [];
+    var stepIdx = UAC_LEARN_STATE.bmSteps.length;
+    var isLikelyFinal = !schema.nextSel;
+    var step = {
+      stepIndex: stepIdx,
+      label: 'Step ' + (stepIdx + 1) + (isLikelyFinal ? ' (Final)' : ''),
+      fields: schema.fields,
+      nextSel: schema.nextSel || schema.submitSel || 'button[type=submit]',
+      captcha: schema.captcha,
+      waitFor: 'navigation',
+      pageUrl: schema.url,
+    };
+    UAC_LEARN_STATE.bmSteps.push(step);
+
+    // Update counter badge
+    var cnt = document.getElementById('uac-bm-rx-count');
+    if (cnt) cnt.textContent = UAC_LEARN_STATE.bmSteps.length;
+    var badge = document.getElementById('uac-bm-mode-badge');
+    if (badge) { badge.textContent = UAC_LEARN_STATE.bmSteps.length > 1 ? 'MULTI-STEP' : 'SINGLE'; badge.style.background = 'var(--win-sel)'; badge.style.color = '#fff'; }
+
+    uacLearnLog('📎 Bookmarklet captured Step ' + (stepIdx + 1) + ' from ' + schema.domain + ' — ' + schema.fields.length + ' fields', 't-accent');
+    schema.fields.forEach(function(f) {
+      uacLearnLog('   ' + f.selector + ' → ' + (f.label || f.placeholder || f.name || f.type), 'tm');
+    });
+    if (schema.captcha === 'detected') uacLearnLog('   ⚠ CAPTCHA detected', 't-warn');
+
+    // Set URL field if not set
+    var urlEl = document.getElementById('uac-learn-url');
+    if (urlEl && !urlEl.value.trim()) urlEl.value = schema.url;
+
+    if (UAC_LEARN_STATE.bmSteps.length === 1) {
+      // First step — show status panel, update instructions
+      var statusEl = document.getElementById('uac-bm-step-status');
+      if (statusEl) statusEl.style.display = '';
+      uacLearnLog('ℹ  If this is a multi-step form: go to the site, click NEXT, then click the bookmark again.', 'tm');
+      uacLearnLog('   When all steps captured, click "✅ Save as Multi-Step Schema".', 'tm');
+      uacLearnLog('   If single-page form: click "💾 Save as Single-Step".', 'tm');
+      toast('Step 1 captured from ' + schema.domain + '! Multi-step? Click Next on site then bookmark again. Single-step? Click Save.', 's', 7000);
+    } else {
+      toast('Step ' + (stepIdx + 1) + ' captured! ' + (isLikelyFinal ? 'Looks like the last step.' : 'Continue if more steps.'), 's', 5000);
+    }
+    uacBmUpdateStepPills();
+  }
+
+  function uacBmUpdateStepPills() {
+    var steps = UAC_LEARN_STATE.bmSteps || [];
+    var pills = document.getElementById('uac-bm-step-pills');
+    var countEl = document.getElementById('uac-bm-step-count');
+    if (countEl) countEl.textContent = steps.length + ' step' + (steps.length !== 1 ? 's' : '');
+    if (!pills) return;
+    pills.innerHTML = steps.map(function(s) {
+      return '<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:var(--win-sel);color:#fff;font-family:var(--mono);font-size:9px">'
+        + '✓ ' + s.label + ' (' + s.fields.length + ' fields)' + '</span>';
+    }).join('');
+  }
+
+  // Save as multi-step schema
+  window.uacBmSaveMultiStep = function() {
+    var steps = UAC_LEARN_STATE.bmSteps || [];
+    if (!steps.length) { toast('No steps captured yet', 'w'); return; }
+    var learnUrl = document.getElementById('uac-learn-url')?.value?.trim() || steps[0].pageUrl;
+    var domain = '';
+    try { domain = new URL(learnUrl).hostname; } catch {}
+    if (!domain) { try { domain = new URL(steps[0].pageUrl).hostname; } catch {} }
+    if (!domain) { toast('Could not determine domain', 'w'); return; }
+
+    var allFields = [];
+    steps.forEach(function(s) { allFields = allFields.concat(s.fields); });
+    var lastStep = steps[steps.length - 1];
+
+    var schema = {
+      domain: domain,
+      url: learnUrl || steps[0].pageUrl,
+      multiStep: steps.length > 1,
+      steps: steps,
+      fields: allFields,
+      submitSel: lastStep.nextSel,
+      captcha: steps.some(function(s) { return s.captcha === 'detected'; }) ? 'detected' : 'none',
+      learnedAt: Date.now(),
+    };
+
+    UAC_LEARN_STATE.schema = schema;
+    var all = uacLearnSchemasGet();
+    all[domain] = schema;
+    uacLearnSchemasSave(all);
+
+    uacLearnLog('\n✅ MULTI-STEP SCHEMA SAVED: ' + domain + ' — ' + steps.length + ' steps, ' + allFields.length + ' total fields', 't-accent');
+    steps.forEach(function(s) {
+      uacLearnLog('   ' + s.label + ': ' + s.fields.length + ' fields → ' + s.nextSel + (s.captcha==='detected'?' ⚠CAPTCHA':''), 'tm');
+    });
+
+    uacLearnRenderSchemaDisplay(schema);
+    var card = document.getElementById('uac-learn-schema-card');
+    if (card) card.style.display = '';
+    var regCard = document.getElementById('uac-register-card');
+    if (regCard) regCard.style.display = '';
+
+    uacBmResetSession();
+    uacSchemaListRefresh();
+    toast('✅ ' + (steps.length > 1 ? steps.length + '-step' : 'Single-step') + ' schema saved for ' + domain + '!', 's', 5000);
+  };
+
+  // Save only the most recent captured step as a single-step schema
+  window.uacBmSaveSingleStep = function() {
+    var steps = UAC_LEARN_STATE.bmSteps || [];
+    if (!steps.length) { toast('No steps captured', 'w'); return; }
+    var step = steps[steps.length - 1];
+    var schema = {
+      domain: step.pageUrl ? new URL(step.pageUrl).hostname : 'unknown',
+      url: step.pageUrl || '',
+      fields: step.fields,
+      submitSel: step.nextSel,
+      captcha: step.captcha,
+      learnedAt: Date.now(),
+    };
+    try { schema.domain = new URL(step.pageUrl).hostname; } catch {}
+    uacLearnApplySchema(schema);
+    uacBmResetSession();
+  };
+
+  // Reset the bookmarklet session (clear accumulated steps)
+  window.uacBmResetSession = function() {
+    UAC_LEARN_STATE.bmSteps = [];
+    var statusEl = document.getElementById('uac-bm-step-status');
+    if (statusEl) statusEl.style.display = 'none';
+    var cnt = document.getElementById('uac-bm-rx-count');
+    if (cnt) cnt.textContent = '0';
+    var badge = document.getElementById('uac-bm-mode-badge');
+    if (badge) { badge.textContent = 'IDLE'; badge.style.background = 'var(--win-dark)'; badge.style.color = 'var(--muted2)'; }
+    uacBmUpdateStepPills();
+  };
+
+  // Init after DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', uacBmInit);
+  } else {
+    uacBmInit();
+  }
+})();
+
+// ══════════════════════════════════════════════════════════════
+// BOOKMARKLET RECEIVER — runs when this page is opened as the tiny popup
+// Writes incoming schema to localStorage so the main tab receives it via storage event
+// ══════════════════════════════════════════════════════════════
+(function() {
+  var hash = location.hash;
+  if (!hash.startsWith('#uac_step=')) return;
+  // We are the receiver popup — write to localStorage and close
+  var enc = hash.slice('#uac_step='.length);
+  try {
+    var schema = JSON.parse(decodeURIComponent(escape(atob(enc))));
+    localStorage.setItem('uac_bm_incoming', JSON.stringify({ type: 'uac_step', schema: schema }));
+    // Remove immediately so it can fire again next time
+    setTimeout(function() { localStorage.removeItem('uac_bm_incoming'); }, 500);
+  } catch(e) {}
+  // Close this popup
+  window.close();
+})();
+
+
+
+const UAC_LEARN_STATE = {
+  popup: null,
+  schema: null,
+  jobs: [],
+  // multi-step recording state
+  multiStepMode: false,
+  pendingSteps: [],   // array of captured step objects before final save
+};
 const UAC_LEARN_STORE_KEY = 'uac_learned_schemas';
 const uacLearnLog = (m, c='t-info') => termLog('uac-learn-terminal', m, c);
 
@@ -16114,7 +16399,63 @@ function uacLearnSchemaFor(domain) {
   return uacLearnSchemasGet()[domain] || null;
 }
 
-// Step 1a: Open the site in a popup window
+// ── Core DOM scanner — runs inside the popup tab via eval ──
+// Returns { fields, submitSel, nextSel, captcha, url, domain }
+const UAC_FORM_SCANNER_SRC = function() {
+  var fields = [];
+  var seen = {};
+  var inputs = document.querySelectorAll(
+    'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image]):not([type=reset]):not([type=file]),textarea,select'
+  );
+  inputs.forEach(function(el) {
+    var rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+    var st = window.getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden') return;
+    var name = el.name || el.id || '';
+    var id   = el.id || '';
+    var ph   = el.placeholder || '';
+    var type = (el.type || el.tagName).toLowerCase();
+    var labelText = '';
+    if (id) { var lbl = document.querySelector('label[for="' + id + '"]'); if (lbl) labelText = lbl.innerText.trim(); }
+    if (!labelText) { var p = el.closest('label'); if (p) labelText = p.innerText.slice(0, 60); }
+    var selector = id ? '#' + id : (name ? '[name="' + name + '"]' : '');
+    if (!selector) return;
+    if (seen[selector]) return;
+    seen[selector] = true;
+    fields.push({ tag: el.tagName.toLowerCase(), type: type, name: name, id: id,
+      placeholder: ph, label: labelText, selector: selector, value: el.value || '' });
+  });
+  // Best submit/next button — prefer buttons with "next","continue" text first, then submit
+  var allBtns = Array.from(document.querySelectorAll('button,input[type=submit],input[type=button],[role=button]'));
+  var nextBtn = allBtns.find(function(b) {
+    var t = (b.innerText || b.value || '').toLowerCase();
+    return /next|continue|weiter|siguiente|proceed|forward/.test(t);
+  });
+  var submitBtn = document.querySelector('button[type=submit],input[type=submit]');
+  function mkSel(el) {
+    if (!el) return null;
+    if (el.id) return '#' + el.id;
+    if (el.name) return '[name="' + el.name + '"]';
+    var t = (el.innerText || el.value || '').trim().slice(0,30);
+    return t ? ('button:contains(' + t + ')') : 'button[type=submit]';
+  }
+  var captcha = document.querySelector('.g-recaptcha,[data-sitekey],.h-captcha,iframe[src*=recaptcha],iframe[src*=hcaptcha]') ? 'detected' : 'none';
+  return {
+    domain: location.hostname,
+    url: location.href,
+    fields: fields,
+    nextSel: mkSel(nextBtn),
+    submitSel: mkSel(submitBtn) || 'button[type=submit]',
+    captcha: captcha
+  };
+}.toString();
+
+function uacRunScanner(popup) {
+  return popup.eval('(' + UAC_FORM_SCANNER_SRC + ')()');
+}
+
+// ── Open popup ──
 function uacLearnOpen() {
   const url = document.getElementById('uac-learn-url')?.value?.trim();
   if (!url || !url.startsWith('http')) { toast('Paste a valid URL first', 'w'); return; }
@@ -16127,77 +16468,174 @@ function uacLearnOpen() {
   }
 }
 
-// Step 1b: Capture form from the open popup tab
+// ── Single-step capture (normal, non-wizard forms) ──
 function uacLearnCapture() {
+  if (UAC_LEARN_STATE.multiStepMode) {
+    // In multi-step mode redirect to step capture
+    uacLearnCaptureStep();
+    return;
+  }
   const learnUrl = document.getElementById('uac-learn-url')?.value?.trim();
   if (!learnUrl) { toast('Paste the signup URL first', 'w'); return; }
-
-  // The form scanner — same logic as RECORD FORM bookmarklet but richer
-  const SCANNER = function() {
-    var fields = [];
-    var seen = {};
-    var inputs = document.querySelectorAll(
-      'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image]):not([type=reset]):not([type=file]),textarea,select'
-    );
-    inputs.forEach(function(el) {
-      var rect = el.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return;
-      var st = window.getComputedStyle(el);
-      if (st.display === 'none' || st.visibility === 'hidden') return;
-      var name = el.name || el.id || '';
-      var id   = el.id || '';
-      var ph   = el.placeholder || '';
-      var type = (el.type || el.tagName).toLowerCase();
-      var labelText = '';
-      if (id) { var lbl = document.querySelector('label[for="' + id + '"]'); if (lbl) labelText = lbl.innerText.trim(); }
-      if (!labelText) { var p = el.closest('label'); if (p) labelText = p.innerText.slice(0, 60); }
-      var selector = id ? '#' + id : (name ? '[name="' + name + '"]' : '');
-      if (!selector) return;
-      var dedup = selector;
-      if (seen[dedup]) return;
-      seen[dedup] = true;
-      fields.push({
-        tag: el.tagName.toLowerCase(),
-        type: type,
-        name: name,
-        id: id,
-        placeholder: ph,
-        label: labelText,
-        selector: selector,
-        value: el.value || ''
-      });
-    });
-    var submitEl = document.querySelector('button[type=submit],input[type=submit]');
-    var submitSel = submitEl ? (submitEl.id ? '#' + submitEl.id : (submitEl.name ? '[name="' + submitEl.name + '"]' : 'button[type=submit]')) : 'button[type=submit]';
-    var captcha = document.querySelector('.g-recaptcha,[data-sitekey],.h-captcha,iframe[src*=recaptcha],iframe[src*=hcaptcha]') ? 'detected' : 'none';
-    return {
-      domain: location.hostname,
-      url: location.href,
-      fields: fields,
-      submitSel: submitSel,
-      captcha: captcha,
-      learnedAt: Date.now()
-    };
-  };
-
-  // Try to run in the popup
   try {
     if (UAC_LEARN_STATE.popup && !UAC_LEARN_STATE.popup.closed) {
-      var schema = UAC_LEARN_STATE.popup.eval('(' + SCANNER.toString() + ')()');
-      uacLearnApplySchema(schema);
+      var raw = uacRunScanner(UAC_LEARN_STATE.popup);
+      raw.learnedAt = Date.now();
+      uacLearnApplySchema(raw);
     } else {
-      // Popup closed or not opened — try same-origin via proxy approach
       uacLearnLog('⚠ Popup not open. Click "Open & Learn" first, navigate to the form, then click Capture.', 't-warn');
     }
   } catch(e) {
-    // Cross-origin block — inject script via backend proxy
     uacLearnLog('⚠ Cross-origin block (' + e.message.slice(0,60) + ')', 't-warn');
     uacLearnLog('   Trying backend-assisted capture...', 'tm');
     uacLearnCaptureViaBackend(learnUrl);
   }
 }
 
-// Backend-assisted capture for cross-origin sites
+// ── Activate multi-step recording mode ──
+function uacLearnActivateMultiStep() {
+  UAC_LEARN_STATE.multiStepMode = true;
+  UAC_LEARN_STATE.pendingSteps = [];
+  var bar = document.getElementById('uac-multistep-bar');
+  if (bar) bar.style.display = '';
+  uacLearnLog('🔀 Multi-Step Mode activated.', 't-accent');
+  uacLearnLog('   1. Make sure the popup is on step 1 of the form', 'tm');
+  uacLearnLog('   2. Click "📸 Capture This Step"', 'tm');
+  uacLearnLog('   3. Click NEXT in the popup tab to go to step 2', 'tm');
+  uacLearnLog('   4. Come back and capture step 2, repeat for all steps', 'tm');
+  uacLearnLog('   5. Click "✅ Save & Done" when all steps are captured', 'tm');
+  uacLearnUpdateStepUI();
+  toast('Multi-step mode ON — capture each step then click Save & Done', 'i', 5000);
+}
+
+// ── Capture one step in multi-step mode ──
+function uacLearnCaptureStep() {
+  if (!UAC_LEARN_STATE.popup || UAC_LEARN_STATE.popup.closed) {
+    uacLearnLog('⚠ Popup not open. Click "Open & Learn" first.', 't-warn');
+    toast('Open the site first', 'w'); return;
+  }
+  var stepIdx = UAC_LEARN_STATE.pendingSteps.length;
+  try {
+    var raw = uacRunScanner(UAC_LEARN_STATE.popup);
+    if (!raw.fields || !raw.fields.length) {
+      uacLearnLog('⚠ No visible form fields found on this page of the popup.', 't-warn');
+      toast('No fields found — make sure the form is visible', 'w'); return;
+    }
+
+    // Determine if this step has a "next" button or submit button
+    // nextSel = the button to click to advance; if no next-pattern found, assume it's submit
+    var isLikelyFinal = !raw.nextSel;
+
+    var step = {
+      stepIndex: stepIdx,
+      label: 'Step ' + (stepIdx + 1) + (isLikelyFinal ? ' (Final/Submit)' : ''),
+      fields: raw.fields,
+      nextSel: raw.nextSel || raw.submitSel || 'button[type=submit]',
+      captcha: raw.captcha,
+      waitFor: 'navigation',  // backend default; fine-tuned if needed
+      pageUrl: raw.url,
+    };
+
+    UAC_LEARN_STATE.pendingSteps.push(step);
+    uacLearnLog('✅ Step ' + (stepIdx + 1) + ' captured — ' + step.fields.length + ' fields · next: ' + step.nextSel, 't-accent');
+    step.fields.forEach(function(f) {
+      uacLearnLog('   ' + f.selector + ' → ' + (f.label || f.placeholder || f.name || f.type), 'tm');
+    });
+    if (step.captcha === 'detected') uacLearnLog('   ⚠ CAPTCHA detected on this step', 't-warn');
+    uacLearnUpdateStepUI();
+
+    if (isLikelyFinal) {
+      uacLearnLog('ℹ  No "Next" button detected — looks like the final step.', 'tm');
+      uacLearnLog('   Click "✅ Save & Done" if all steps are captured.', 'tm');
+      toast('Step ' + (stepIdx+1) + ' captured (looks like final). Click Save & Done.', 's', 4000);
+    } else {
+      toast('Step ' + (stepIdx+1) + ' captured! Now click NEXT in the popup, then capture next step.', 's', 5000);
+      uacLearnLog('→ Now click the NEXT button inside the popup tab, then come back and capture the next step.', 'tm');
+    }
+  } catch(e) {
+    uacLearnLog('⚠ Cross-origin block on step capture: ' + e.message.slice(0,80), 't-warn');
+    uacLearnLog('   Backend-assisted step capture not supported for multi-step yet — use same-origin sites or allow popup eval.', 't-warn');
+    toast('Cross-origin block — see log', 'w');
+  }
+}
+
+// ── Update step pill UI ──
+function uacLearnUpdateStepUI() {
+  var pills = document.getElementById('uac-step-pills');
+  var counter = document.getElementById('uac-step-counter');
+  var steps = UAC_LEARN_STATE.pendingSteps;
+  if (counter) counter.textContent = steps.length + ' step' + (steps.length !== 1 ? 's' : '') + ' recorded';
+  if (!pills) return;
+  pills.innerHTML = steps.map(function(s, i) {
+    return '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:var(--win-sel);color:#fff;font-family:var(--mono);font-size:9px">'
+      + '✓ ' + s.label + ' (' + s.fields.length + ' fields)'
+      + '</span>';
+  }).join('');
+}
+
+// ── Save multi-step schema as a single schema object ──
+function uacLearnSaveMultiStep() {
+  var steps = UAC_LEARN_STATE.pendingSteps;
+  if (!steps.length) { toast('No steps captured yet', 'w'); return; }
+  var learnUrl = document.getElementById('uac-learn-url')?.value?.trim();
+  var domain = '';
+  try { domain = new URL(steps[0].pageUrl || learnUrl).hostname; } catch {}
+  if (!domain) { toast('Could not determine domain', 'w'); return; }
+
+  // Build unified schema — multiStep:true, steps array, plus flattened fields for backward compat display
+  var allFields = [];
+  steps.forEach(function(s) { allFields = allFields.concat(s.fields); });
+  var lastStep = steps[steps.length - 1];
+
+  var schema = {
+    domain: domain,
+    url: learnUrl || steps[0].pageUrl,
+    multiStep: true,
+    steps: steps,
+    // Backward-compat flattened fields (used in display and by older backend code path)
+    fields: allFields,
+    submitSel: lastStep.nextSel,
+    captcha: steps.some(function(s) { return s.captcha === 'detected'; }) ? 'detected' : 'none',
+    learnedAt: Date.now(),
+  };
+
+  UAC_LEARN_STATE.schema = schema;
+  var all = uacLearnSchemasGet();
+  all[domain] = schema;
+  uacLearnSchemasSave(all);
+
+  // Reset multi-step mode UI
+  UAC_LEARN_STATE.multiStepMode = false;
+  UAC_LEARN_STATE.pendingSteps = [];
+  var bar = document.getElementById('uac-multistep-bar');
+  if (bar) bar.style.display = 'none';
+
+  uacLearnLog('\n✅ MULTI-STEP SCHEMA SAVED: ' + domain + ' — ' + steps.length + ' steps, ' + allFields.length + ' total fields', 't-accent');
+  steps.forEach(function(s) {
+    uacLearnLog('   ' + s.label + ': ' + s.fields.length + ' fields → ' + s.nextSel + (s.captcha==='detected'?' ⚠CAPTCHA':''), 'tm');
+  });
+
+  uacLearnRenderSchemaDisplay(schema);
+  var card = document.getElementById('uac-learn-schema-card');
+  if (card) card.style.display = '';
+  var regCard = document.getElementById('uac-register-card');
+  if (regCard) regCard.style.display = '';
+  uacSchemaListRefresh();
+  toast('✅ Multi-step schema saved — ' + steps.length + ' steps!', 's', 5000);
+}
+
+// ── Reset multi-step recording ──
+function uacLearnResetSteps() {
+  UAC_LEARN_STATE.pendingSteps = [];
+  UAC_LEARN_STATE.multiStepMode = false;
+  var bar = document.getElementById('uac-multistep-bar');
+  if (bar) bar.style.display = 'none';
+  uacLearnUpdateStepUI();
+  uacLearnLog('🗑 Multi-step recording reset', 't-warn');
+  toast('Multi-step reset', 'w');
+}
+
+// ── Backend-assisted capture for cross-origin single-step sites ──
 async function uacLearnCaptureViaBackend(url) {
   const base = uacGetVercelBase();
   if (!base) { uacLearnLog('❌ Vercel backend URL not set in Settings', 't-err'); return; }
@@ -16212,6 +16650,7 @@ async function uacLearnCaptureViaBackend(url) {
     });
     const data = await resp.json().catch(() => ({}));
     if (data.schema && data.schema.fields) {
+      data.schema.learnedAt = Date.now();
       uacLearnApplySchema(data.schema);
     } else {
       uacLearnLog('⚠ Backend could not find form fields. Try opening the site manually.', 't-warn');
@@ -16221,14 +16660,13 @@ async function uacLearnCaptureViaBackend(url) {
   }
 }
 
+// ── Apply a (single-step) schema from capture or load ──
 function uacLearnApplySchema(schema) {
   if (!schema || !schema.fields || !schema.fields.length) {
     uacLearnLog('⚠ No form fields found on this page. Navigate to the signup form first.', 't-warn');
     return;
   }
   UAC_LEARN_STATE.schema = schema;
-
-  // Save to localStorage keyed by domain
   var all = uacLearnSchemasGet();
   all[schema.domain] = schema;
   uacLearnSchemasSave(all);
@@ -16239,28 +16677,50 @@ function uacLearnApplySchema(schema) {
   });
   if (schema.captcha === 'detected') uacLearnLog('   ⚠ CAPTCHA detected on this form', 't-warn');
 
-  // Show schema card and register card
+  uacLearnRenderSchemaDisplay(schema);
   var card = document.getElementById('uac-learn-schema-card');
-  if (card) { card.style.display = ''; }
+  if (card) card.style.display = '';
   var regCard = document.getElementById('uac-register-card');
-  if (regCard) { regCard.style.display = ''; }
-
-  var display = document.getElementById('uac-learn-schema-display');
-  if (display) {
-    display.innerHTML = '<div style="color:var(--accent);margin-bottom:4px">📍 ' + schema.url + '</div>'
-      + schema.fields.map(function(f) {
-          return '<div style="padding:2px 0;border-bottom:1px dotted var(--win-border)">'
-            + '<span style="color:#ffa500">' + (f.label || f.placeholder || f.name || f.type) + '</span>'
-            + ' <span style="color:var(--muted2)">→ ' + f.selector + '</span>'
-            + '</div>';
-        }).join('')
-      + '<div style="margin-top:6px;color:var(--muted2)">Submit: ' + (schema.submitSel||'auto') + ' · CAPTCHA: ' + schema.captcha + '</div>';
-  }
+  if (regCard) regCard.style.display = '';
   uacSchemaListRefresh();
   toast('✅ Form learned — ' + schema.fields.length + ' fields!', 's', 4000);
 }
 
-// Step 2: Register using learned schema
+// ── Render schema display card ──
+function uacLearnRenderSchemaDisplay(schema) {
+  var display = document.getElementById('uac-learn-schema-display');
+  if (!display) return;
+  var html = '<div style="color:var(--accent);margin-bottom:4px">📍 ' + (schema.url || schema.domain) + '</div>';
+
+  if (schema.multiStep && schema.steps) {
+    // Multi-step display — collapsible per step
+    html += '<div style="color:var(--term-accent);margin-bottom:6px;font-size:10px">🔀 Multi-Step Form — ' + schema.steps.length + ' steps</div>';
+    schema.steps.forEach(function(step) {
+      html += '<div style="margin-bottom:6px;padding:4px 6px;border:1px solid rgba(10,77,196,0.3);background:rgba(10,77,196,0.04)">'
+        + '<div style="color:var(--accent);font-weight:bold;margin-bottom:3px">' + step.label + ' · ' + step.fields.length + ' fields</div>'
+        + step.fields.map(function(f) {
+            return '<div style="padding:1px 0;border-bottom:1px dotted var(--win-border)">'
+              + '<span style="color:#ffa500">' + (f.label || f.placeholder || f.name || f.type) + '</span>'
+              + ' <span style="color:var(--muted2)">→ ' + f.selector + '</span>'
+              + '</div>';
+          }).join('')
+        + '<div style="margin-top:3px;color:var(--muted2);font-size:9px">Next: ' + step.nextSel + ' · CAPTCHA: ' + step.captcha + '</div>'
+        + '</div>';
+    });
+  } else {
+    // Single-step display
+    html += schema.fields.map(function(f) {
+        return '<div style="padding:2px 0;border-bottom:1px dotted var(--win-border)">'
+          + '<span style="color:#ffa500">' + (f.label || f.placeholder || f.name || f.type) + '</span>'
+          + ' <span style="color:var(--muted2)">→ ' + f.selector + '</span>'
+          + '</div>';
+      }).join('')
+      + '<div style="margin-top:6px;color:var(--muted2)">Submit: ' + (schema.submitSel||'auto') + ' · CAPTCHA: ' + schema.captcha + '</div>';
+  }
+  display.innerHTML = html;
+}
+
+// ── Register using learned schema (single or multi-step) ──
 async function uacLearnRegister() {
   var url = document.getElementById('uac-learn-url')?.value?.trim();
   if (!url) { toast('Enter the signup URL', 'w'); return; }
@@ -16268,7 +16728,6 @@ async function uacLearnRegister() {
   var domain = '';
   try { domain = new URL(url).hostname; } catch {}
 
-  // Try in-memory first, then localStorage
   var schema = UAC_LEARN_STATE.schema || uacLearnSchemaFor(domain);
   if (!schema) {
     toast('No schema learned for this site yet. Click "Open & Learn" first.', 'w');
@@ -16285,8 +16744,16 @@ async function uacLearnRegister() {
   const useMailTm  = document.getElementById('uac-learn-mailtm')?.checked !== false;
   const secret     = settingGet('vercel_secret') || '';
 
-  uacLearnLog('\n🚀 REGISTER × ' + count + ' → ' + domain, 't-accent');
-  uacLearnLog('   Schema: ' + schema.fields.length + ' fields · Submit: ' + (schema.submitSel||'auto'), 'tm');
+  var isMulti = !!(schema.multiStep && schema.steps && schema.steps.length > 1);
+
+  uacLearnLog('\n🚀 REGISTER × ' + count + ' → ' + domain + (isMulti ? ' [' + schema.steps.length + '-STEP WIZARD]' : ''), 't-accent');
+  if (isMulti) {
+    schema.steps.forEach(function(s) {
+      uacLearnLog('   ' + s.label + ': ' + s.fields.length + ' fields · next: ' + s.nextSel, 'tm');
+    });
+  } else {
+    uacLearnLog('   Schema: ' + schema.fields.length + ' fields · Submit: ' + (schema.submitSel||'auto'), 'tm');
+  }
 
   for (var i = 0; i < count; i++) {
     uacLearnLog('\n[' + (i+1) + '/' + count + '] Creating account...', 'tm');
@@ -16296,12 +16763,12 @@ async function uacLearnRegister() {
         headers: { 'Content-Type': 'application/json', ...(secret ? {'X-API-Key': secret} : {}) },
         body: JSON.stringify({
           url,
-          schema,           // send the learned schema directly
+          schema,
           captchaKey: captchaKey || '',
           useMailTm,
           profile: customPw ? { password: customPw } : {},
         }),
-        signal: AbortSignal.timeout(240000),
+        signal: AbortSignal.timeout(300000),  // 5 min for multi-step
       });
       const data = await resp.json().catch(() => ({ ok: false, note: 'Non-JSON response' }));
 
@@ -16324,7 +16791,6 @@ async function uacLearnRegister() {
       };
       UAC_LEARN_STATE.jobs.unshift(job);
       uacLearnRenderTable();
-
       uacLearnLog('[' + (i+1) + '] ' + (data.ok ? '✅ LIVE' : '❌ FAILED') + ' · ' + (data.username||'') + ' · ' + (data.email||''), data.ok ? 't-info' : 't-err');
     } catch(e) {
       uacLearnLog('[' + (i+1) + '] ❌ ' + e.message, 't-err');
@@ -16344,6 +16810,10 @@ function uacLearnClear() {
     uacLearnSchemasSave(all);
   }
   UAC_LEARN_STATE.schema = null;
+  UAC_LEARN_STATE.pendingSteps = [];
+  UAC_LEARN_STATE.multiStepMode = false;
+  var bar = document.getElementById('uac-multistep-bar');
+  if (bar) bar.style.display = 'none';
   var card = document.getElementById('uac-learn-schema-card');
   if (card) card.style.display = 'none';
   var regCard = document.getElementById('uac-register-card');
@@ -16390,10 +16860,14 @@ function uacSchemaListRefresh() {
   list.innerHTML = keys.map(function(domain) {
     var s = all[domain];
     var date = s.learnedAt ? new Date(s.learnedAt).toLocaleDateString() : '';
+    var typeTag = s.multiStep
+      ? '<span class="badge badge-b" style="font-size:8px">' + s.steps.length + '-STEP</span>'
+      : '<span class="badge badge-g" style="font-size:8px">1-PAGE</span>';
+    var fieldCount = s.multiStep ? s.steps.reduce(function(a,st){return a+st.fields.length;},0) : (s.fields ? s.fields.length : 0);
     return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dotted var(--win-border)">'
-      + '<span class="badge badge-g" style="font-size:8px">✔</span>'
+      + typeTag
       + '<span style="flex:1">' + domain + '</span>'
-      + '<span style="color:var(--muted2)">' + (s.fields ? s.fields.length : 0) + ' fields · ' + date + '</span>'
+      + '<span style="color:var(--muted2)">' + fieldCount + ' fields · ' + date + '</span>'
       + '<button class="btn btn-ghost btn-xs" onclick="uacSchemaLoad(&quot;' + domain + '&quot;)">Use</button>'
       + '<button class="btn btn-danger btn-xs" onclick="uacSchemaDelete(&quot;' + domain + '&quot;)">✕</button>'
       + '</div>';
@@ -16405,8 +16879,19 @@ function uacSchemaLoad(domain) {
   var schema = all[domain];
   if (!schema) return;
   document.getElementById('uac-learn-url').value = schema.url || ('https://' + domain);
-  uacLearnApplySchema(schema);
-  uacLearnLog('📂 Loaded saved schema for ' + domain, 't-accent');
+  if (schema.multiStep) {
+    UAC_LEARN_STATE.schema = schema;
+    uacLearnRenderSchemaDisplay(schema);
+    var card = document.getElementById('uac-learn-schema-card');
+    if (card) card.style.display = '';
+    var regCard = document.getElementById('uac-register-card');
+    if (regCard) regCard.style.display = '';
+    uacLearnLog('📂 Loaded multi-step schema for ' + domain + ' (' + schema.steps.length + ' steps)', 't-accent');
+    toast('Loaded: ' + domain + ' (' + schema.steps.length + '-step)', 's', 3000);
+  } else {
+    uacLearnApplySchema(schema);
+    uacLearnLog('📂 Loaded saved schema for ' + domain, 't-accent');
+  }
 }
 
 function uacSchemaDelete(domain) {
@@ -16873,14 +17358,52 @@ function renderAccountCreator(el){
   <!-- TAB: LEARN & REGISTER                                       -->
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="ac-panel-learn">
-    <div class="notice notice-success" style="margin-bottom:12px">
-      <strong>🧠 How it works:</strong>
+    <div class="notice notice-success" style="margin-bottom:8px">
+      <strong>🧠 Two ways to learn a form:</strong>
       <ol style="margin:6px 0 0 16px;padding:0;font-size:11px;line-height:1.8">
-        <li>Paste a signup URL below and click <strong>Open &amp; Learn</strong> — the site opens in a new tab</li>
-        <li>Navigate to the registration/signup form in that tab</li>
-        <li>Come back here and click <strong>📸 Capture Form Now</strong> — it scans the live form in that tab</li>
-        <li>Click <strong>🚀 Register with Learned Schema</strong> — backend fills + submits using exact field selectors</li>
+        <li><strong>Bookmarklet (recommended):</strong> Install the 📎 bookmark below → navigate to ANY signup page in your browser → click the bookmark → schema appears here instantly. For multi-step forms, click Next on the site, click the bookmark again, repeat.</li>
+        <li><strong>Popup mode:</strong> Paste URL → Open &amp; Learn → navigate to the form → Capture Form Now.</li>
       </ol>
+    </div>
+
+    <!-- Bookmarklet install card -->
+    <div class="card" style="margin-bottom:12px;border:2px solid var(--win-sel);background:rgba(49,106,197,0.04)">
+      <div class="card-title" style="color:var(--win-sel)">📎 Install Capture Bookmarklet — Click Once on Any Signup Page to Learn It</div>
+      <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:10px;font-family:var(--mono);color:var(--muted2);margin-bottom:6px">
+            Drag the button below to your bookmarks bar. Then go to any site's signup page and click it — the form schema appears here automatically.
+          </div>
+          <div style="font-size:10px;font-family:var(--mono);color:var(--muted2);margin-bottom:10px">
+            <strong style="color:var(--win-text)">Multi-step forms:</strong> Click the bookmark on step 1 → fill &amp; click Next on the site → click bookmark on step 2 → repeat → click <em>Save Multi-Step</em> here when done.
+          </div>
+          <div id="uac-bookmarklet-wrap" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <a id="uac-bookmarklet-link" href="#" style="display:inline-block;padding:8px 16px;background:var(--win-sel);color:#fff;font-family:var(--mono);font-size:11px;font-weight:bold;text-decoration:none;border:2px outset var(--win-btn-hi);cursor:grab;white-space:nowrap" title="Drag this to your bookmarks bar">
+              📎 Capture Form
+            </a>
+            <span style="font-size:9px;color:var(--muted2);font-family:var(--mono)">← drag to bookmarks bar</span>
+          </div>
+        </div>
+        <div style="flex:0 0 auto;display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+          <div style="font-size:9px;font-family:var(--mono);color:var(--muted2)">Received schemas:</div>
+          <div id="uac-bm-rx-count" style="font-family:var(--mono);font-size:20px;color:var(--win-sel);font-weight:bold;text-align:center">0</div>
+          <div id="uac-bm-mode-badge" style="font-size:8px;font-family:var(--mono);padding:2px 6px;background:var(--win-dark);color:var(--muted2)">IDLE</div>
+          <button class="btn btn-ghost btn-xs" onclick="uacBmResetSession()">Reset session</button>
+        </div>
+      </div>
+      <!-- Multi-step accumulator status (shown when receiving steps via bookmarklet) -->
+      <div id="uac-bm-step-status" style="display:none;margin-top:10px;padding:6px 8px;background:rgba(49,106,197,0.08);border:1px solid rgba(49,106,197,0.3)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+          <span style="font-family:var(--mono);font-size:10px;color:var(--win-sel);font-weight:bold">🔀 Multi-Step Session in Progress</span>
+          <span id="uac-bm-step-count" style="font-family:var(--mono);font-size:10px;color:var(--muted2)">0 steps</span>
+        </div>
+        <div id="uac-bm-step-pills" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;min-height:20px"></div>
+        <div class="row" style="gap:6px">
+          <button class="btn btn-primary btn-sm" style="flex:1" onclick="uacBmSaveMultiStep()">✅ Save as Multi-Step Schema</button>
+          <button class="btn btn-ghost btn-sm" style="flex:1" onclick="uacBmSaveSingleStep()">💾 Save as Single-Step (last capture only)</button>
+          <button class="btn btn-danger btn-xs" onclick="uacBmResetSession()">✕ Discard</button>
+        </div>
+      </div>
     </div>
 
     <div class="grid2" style="gap:14px">
@@ -16896,6 +17419,31 @@ function renderAccountCreator(el){
           <div class="row" style="gap:8px;flex-wrap:wrap">
             <button class="btn btn-primary" style="flex:1" onclick="uacLearnOpen()">🌐 Open &amp; Learn</button>
             <button class="btn btn-ghost" style="flex:1" onclick="uacLearnCapture()">📸 Capture Form Now</button>
+          </div>
+
+          <!-- Multi-Step Controls (shown after first step captured) -->
+          <div id="uac-multistep-bar" style="display:none;margin-top:10px;padding:8px;background:rgba(10,77,196,0.07);border:1px solid rgba(10,77,196,0.25)">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <span style="font-family:var(--mono);font-size:10px;color:var(--accent);font-weight:bold">📋 MULTI-STEP MODE</span>
+              <span id="uac-step-counter" style="font-family:var(--mono);font-size:10px;color:var(--muted2)">0 steps recorded</span>
+            </div>
+            <!-- Step pills -->
+            <div id="uac-step-pills" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;min-height:24px"></div>
+            <div style="font-size:9px;color:var(--muted2);font-family:var(--mono);margin-bottom:8px">
+              After capturing each step, manually click NEXT in the popup tab to advance to the next form page, then capture again.
+            </div>
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <button class="btn btn-ghost btn-sm" style="flex:1" onclick="uacLearnCaptureStep()">📸 Capture This Step</button>
+              <button class="btn btn-primary btn-sm" style="flex:1" onclick="uacLearnSaveMultiStep()">✅ Save &amp; Done</button>
+              <button class="btn btn-danger btn-xs" onclick="uacLearnResetSteps()" title="Discard all captured steps">✕ Reset</button>
+            </div>
+          </div>
+
+          <!-- Button to activate multi-step mode -->
+          <div style="margin-top:8px;text-align:center">
+            <button class="btn btn-ghost btn-xs" onclick="uacLearnActivateMultiStep()" title="Use this for forms that span multiple pages">
+              🔀 This is a multi-page form (wizard)
+            </button>
           </div>
         </div>
 
@@ -16940,10 +17488,10 @@ function renderAccountCreator(el){
           <div class="card-title">🖥 Learn &amp; Register Log</div>
           <div class="terminal" id="uac-learn-terminal" style="height:300px">
             <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">🧠 LEARN MODE READY</span></div>
-            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   1. Paste signup URL → Open &amp; Learn</span></div>
-            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   2. Navigate to the signup form in the opened tab</span></div>
-            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   3. Click "Capture Form Now" to scan it</span></div>
-            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   4. Click "Register" — schema replays automatically</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   BOOKMARKLET: Drag "📎 Capture Form" to bookmarks bar</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Go to any signup page → click the bookmark → schema appears here</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Multi-step: click bookmark per step → Save as Multi-Step Schema</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   POPUP MODE: Paste URL → Open &amp; Learn → Capture Form Now</span></div>
           </div>
         </div>
         <div class="card">

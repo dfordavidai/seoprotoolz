@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -27854,9 +27853,7 @@ function mbpTriggerAutoPost(id){
   const site=MBP.sites.find(function(s){return s.id===id;});
   if(!site){toast('Site not found','e');return;}
   const domain=site.credDomain||'';
-  const schema=MBP.getLearned(domain);
   const cred=MBP.getCred(domain);
-  if(!schema){toast('No form learned for this site yet — use RECORD FORM bookmarklet','w');return;}
   if(!cred){toast('No credentials saved for '+domain,'w');return;}
   if(!site.postUrl){toast('No post URL set for this site','w');return;}
 
@@ -27868,12 +27865,67 @@ function mbpTriggerAutoPost(id){
     linkUrl:document.getElementById('blast-link-url')?.value||'',
   };
   const capKey=settingGet('cap_2captchaKey')||'';
+
+  // ── VERCEL BACKEND PATH (no bookmarklet, no popups, works on every site) ──
+  if(vercelEnabled()){
+    MBP.setState(id,'auto_posting');
+    mbpTermLog('🤖 [Vercel] Auto-posting to: '+site.name,'t-accent');
+    mbpTermLog('   POST URL: '+site.postUrl,'t-info');
+    const loginUrl = site.loginUrl||site.url||'';
+    fetch(vercelUrl()+'/api/click-link',{
+      method:'POST',
+      headers: vercelHeaders(),
+      body: JSON.stringify({
+        action:          'autopost',
+        url:             site.postUrl,
+        loginUrl:        loginUrl,
+        credentials:     {username: cred.user||cred.login||'', password: cred.pass||cred.password||''},
+        fields:          {subject: postData.title, body: postData.body, tags: postData.tags, linkUrl: postData.linkUrl, anchor: postData.anchor},
+        captchaKey:      capKey||undefined,
+        screenshotOnFail:true,
+        waitAfterSubmit: 5000,
+      }),
+      signal: AbortSignal.timeout(130000),
+    })
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(data.ok){
+        MBP.addLog({siteId:id, site:site.name, url:data.url, title:data.title||'', note:'auto-post (vercel)', auto:true});
+        MBP.setState(id,'done');
+        mbpTermLog('✅ AUTO-POST SUCCESS: '+data.url,'t-accent');
+        toast('🚀 Auto-posted: '+(data.url||'').slice(0,55)+'…','s',5000);
+        BLP.addLog({domain:domain,status:'success',url:data.url,keyword:'',manual:false});
+        BLP.saveLog();
+        mbpBlastAdvance({siteId:id,success:true,url:data.url});
+      } else {
+        MBP.setState(id,'failed');
+        mbpTermLog('❌ AUTO-POST FAILED: '+(data.error||'unknown'),'t-warn');
+        if(data.screenshot) mbpTermLog('   📸 Screenshot captured — check console for base64','t-info');
+        toast('❌ Auto-post failed: '+(data.error||'?').slice(0,60),'e',8000);
+        mbpBlastAdvance({siteId:id,success:false,error:data.error||'unknown'});
+      }
+      const logEl=document.getElementById('mbp-log-table');
+      if(logEl) mbpRenderLogTable(logEl);
+      mbpRefreshKanban();
+    })
+    .catch(function(err){
+      MBP.setState(id,'failed');
+      mbpTermLog('❌ Vercel request failed: '+err.message,'t-warn');
+      toast('❌ Backend error: '+err.message.slice(0,60),'e',8000);
+      mbpBlastAdvance({siteId:id,success:false,error:err.message});
+    });
+    mbpSubTab(0);
+    return;
+  }
+
+  // ── FALLBACK: bookmarklet / window.name relay (original behaviour) ──
+  const schema=MBP.getLearned(domain);
+  if(!schema){toast('No form learned for this site yet — use RECORD FORM bookmarklet (or configure Vercel backend for schema-free posting)','w');return;}
   const job={siteId:id,siteName:site.name,schema,postData,captchaKey:capKey,queuedAt:Date.now()};
   const jobJson=JSON.stringify(job);
   MBP.setState(id,'auto_posting');
   mbpTermLog('🤖 Auto-post queued for: '+site.name,'t-accent');
   mbpTermLog('   Opening post URL: '+site.postUrl,'t-info');
-  // Open about:blank first (synchronous), then write relay script that navigates to postUrl
   const w=window.open('about:blank','mbp_'+id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
   if(!w){
     toast('\u26a0 Popup blocked! Click the popup icon in the address bar \u2192 Allow popups \u2192 then retry','e',10000);
@@ -27881,8 +27933,6 @@ function mbpTriggerAutoPost(id){
     MBP.setState(id,'idle');return;
   }
   MBP._popups[id]=w;
-  // Inject relay script into about:blank window — sets window.name then navigates cross-origin.
-  // window.name survives the cross-origin navigation so AUTO-POST bookmarklet can read the job.
   try{
     var jobEscT = jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
     w.document.write('<script>window.name="mbp_job:'+jobEscT+'";location.replace("'+site.postUrl.replace(/"/g,'%22')+'")<\/script>');
@@ -27893,7 +27943,6 @@ function mbpTriggerAutoPost(id){
     try{w.name='mbp_job:'+jobJson;}catch(e2){}
     w.location.href=site.postUrl;
   }
-  // Broadcast job every 1s for 60s via BroadcastChannel + postMessage
   var _bcTrig; try{_bcTrig=new BroadcastChannel('mbp_bridge');}catch(e){}
   var _trigN=0,_trigTimer=setInterval(function(){
     _trigN++;
@@ -27931,46 +27980,50 @@ function mbpStartBlast(){
     return {siteId:id, site, postData, captchaKey:capKey, delay, status:'pending', url:null};
   }).filter(function(q){return q.site;});
   if(!queue.length){toast('No valid sites selected','e');return;}
-  if(!confirm('Blast '+queue.length+' sites with this post?\n\n"'+title.slice(0,60)+'"\n\nThis will open each site and auto-post. Continue?')) return;
+  const usingVercel = vercelEnabled();
+  if(!confirm('Blast '+queue.length+' sites with this post?\n\n"'+title.slice(0,60)+'"\n\n'+(usingVercel?'✅ Vercel backend active — no popups, runs fully server-side.':'⚠ No Vercel backend — browser popups will open per site.')+'\n\nContinue?')) return;
   window._mbpBlastQueue   = queue;
   window._mbpBlastResults = [];
   window._mbpBlastActive  = {total:queue.length, done:0, startedAt:Date.now()};
-  // Pre-open ALL windows RIGHT NOW in the synchronous click handler — this is the ONLY way
-  // to bypass the browser popup blocker (only direct user gestures can open windows).
   window._mbpBlastWindowPool = {};
-  var poolOk = 0, poolFail = 0;
-  queue.forEach(function(q, i){
-    var w = window.open('about:blank','mbp_blast_'+q.siteId,
-      'width=1100,height=780,left='+(80+i*20)+',top='+(50+i*16)+
-      ',toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
-    if(w){
-      window._mbpBlastWindowPool[q.siteId] = w;
-      poolOk++;
-      try{
-        w.document.write([
-          '<!DOCTYPE html><html><head><meta charset=utf-8>',
-          '<title>&#x1F916; Backlink Pro Loading \u2014 '+q.site.name+'</title>',
-          '<style>body{background:#0a0f0a;color:#00cc44;font-family:monospace;',
-          'display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;}',
-          '.ico{font-size:40px;} .name{font-size:16px;font-weight:bold;color:#fff;}',
-          '.msg{font-size:11px;opacity:.6;} .bar{width:200px;height:3px;background:#003300;border-radius:2px;margin-top:8px;}',
-          '.fill{height:100%;background:#00cc44;border-radius:2px;animation:grow 1.2s ease-out forwards;}',
-          '@keyframes grow{from{width:0}to{width:100%}}</style></head>',
-          '<body><div class=ico>&#x1F916;</div>',
-          '<div class=name>'+q.site.name+'</div>',
-          '<div class=msg>Job queued \u2014 navigating to post page&hellip;</div>',
-          '<div class=bar><div class=fill></div></div>',
-          '</body></html>'
-        ].join(''));
-        w.document.close();
-      }catch(e){}
-    } else { poolFail++; }
-  });
-  if(poolFail>0){
-    mbpTermLog('\u26a0 '+poolFail+' window(s) were blocked \u2014 click the popup icon (??) in the browser address bar and choose "Always allow", then start blast again','t-warn');
-    toast('\u26a0 '+poolFail+' popup(s) blocked! Click the blocked-popup icon in address bar \u2192 Allow','w',12000);
+  // Only pre-open windows when NOT using Vercel backend (popup blocker bypass not needed server-side)
+  if(!usingVercel){
+    var poolOk = 0, poolFail = 0;
+    queue.forEach(function(q, i){
+      var w = window.open('about:blank','mbp_blast_'+q.siteId,
+        'width=1100,height=780,left='+(80+i*20)+',top='+(50+i*16)+
+        ',toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
+      if(w){
+        window._mbpBlastWindowPool[q.siteId] = w;
+        poolOk++;
+        try{
+          w.document.write([
+            '<!DOCTYPE html><html><head><meta charset=utf-8>',
+            '<title>&#x1F916; Backlink Pro Loading \u2014 '+q.site.name+'</title>',
+            '<style>body{background:#0a0f0a;color:#00cc44;font-family:monospace;',
+            'display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;}',
+            '.ico{font-size:40px;} .name{font-size:16px;font-weight:bold;color:#fff;}',
+            '.msg{font-size:11px;opacity:.6;} .bar{width:200px;height:3px;background:#003300;border-radius:2px;margin-top:8px;}',
+            '.fill{height:100%;background:#00cc44;border-radius:2px;animation:grow 1.2s ease-out forwards;}',
+            '@keyframes grow{from{width:0}to{width:100%}}</style></head>',
+            '<body><div class=ico>&#x1F916;</div>',
+            '<div class=name>'+q.site.name+'</div>',
+            '<div class=msg>Job queued \u2014 navigating to post page&hellip;</div>',
+            '<div class=bar><div class=fill></div></div>',
+            '</body></html>'
+          ].join(''));
+          w.document.close();
+        }catch(e){}
+      } else { poolFail++; }
+    });
+    if(poolFail>0){
+      mbpTermLog('\u26a0 '+poolFail+' window(s) were blocked \u2014 click the popup icon in the browser address bar and choose "Always allow", then start blast again','t-warn');
+      toast('\u26a0 '+poolFail+' popup(s) blocked! Click the blocked-popup icon in address bar \u2192 Allow','w',12000);
+    }
+    mbpTermLog('\uD83D\uDCA5 BLAST STARTED: '+queue.length+' sites ('+poolOk+' windows opened)','t-accent');
+  } else {
+    mbpTermLog('\uD83D\uDCA5 BLAST STARTED: '+queue.length+' sites \u2014 \uD83D\uDFE2 Vercel backend (no popups needed)','t-accent');
   }
-  mbpTermLog('\uD83D\uDCA5 BLAST STARTED: '+queue.length+' sites ('+poolOk+' windows opened)','t-accent');
   mbpSubTab(3);
   setTimeout(mbpBlastStep, 600);
 }
@@ -27988,52 +28041,96 @@ async function mbpBlastStep(){
   const queue=window._mbpBlastQueue;
   const next=queue.find(function(q){return q.status==='pending';});
   if(!next){
-    // Only finish if nothing is still running — prevents premature BLAST COMPLETE
-    // when the window is navigating cross-origin and the result hasn't arrived yet
     const stillRunning=queue.find(function(q){return q.status==='running';});
-    if(stillRunning) return; // result will arrive via poll/BroadcastChannel, which calls mbpBlastAdvance then mbpBlastStep again
+    if(stillRunning) return;
     mbpBlastFinish();
     return;
   }
   next.status='running';
   const site=next.site;
   const domain=site.credDomain||'';
-  const schema=MBP.getLearned(domain);
   const cred=MBP.getCred(domain);
-  if(!schema||!cred||!site.postUrl){
-    next.status='skipped';
-    next.error='missing schema or creds';
-    mbpTermLog('⏭ Skipped: '+site.name+' (no schema/creds)','t-warn');
+
+  // ── VERCEL BACKEND PATH — no popups, no bookmarklet, works on every site ──
+  if(vercelEnabled()){
+    if(!cred||!site.postUrl){
+      next.status='skipped';next.error='missing creds or postUrl';
+      mbpTermLog('⏭ Skipped: '+site.name+' (no creds/postUrl)','t-warn');
+      if(window._mbpBlastActive) window._mbpBlastActive.done++;
+      mbpRefreshBlastUI();
+      setTimeout(mbpBlastStep,500);
+      return;
+    }
+    MBP.setState(site.id,'auto_posting');
+    mbpTermLog('🤖 [Vercel] Blasting: '+site.name,'t-accent');
+    try{
+      const resp=await fetch(vercelUrl()+'/api/click-link',{
+        method:'POST',
+        headers:vercelHeaders(),
+        body:JSON.stringify({
+          action:          'autopost',
+          url:             site.postUrl,
+          loginUrl:        site.loginUrl||site.url||'',
+          credentials:     {username:cred.user||cred.login||'',password:cred.pass||cred.password||''},
+          fields:          {subject:next.postData.title,body:next.postData.body,tags:next.postData.tags||'',linkUrl:next.postData.linkUrl||'',anchor:next.postData.anchor||''},
+          captchaKey:      next.captchaKey||undefined,
+          screenshotOnFail:true,
+          waitAfterSubmit: 5000,
+        }),
+        signal:AbortSignal.timeout(130000),
+      });
+      const data=await resp.json();
+      if(data.ok){
+        next.status='done';next.url=data.url;
+        MBP.setState(site.id,'done');
+        mbpTermLog('✅ Blast success: '+site.name+' → '+data.url,'t-accent');
+        window._mbpBlastResults.push({site:site.name,url:data.url,ts:Date.now()});
+        MBP.addLog({siteId:site.id,site:site.name,url:data.url,title:data.title||'',note:'blast (vercel)',auto:true});
+        BLP.addLog({domain,status:'success',url:data.url,keyword:'',manual:false});
+        BLP.saveLog();
+      } else {
+        next.status='failed';next.error=data.error||'unknown';
+        MBP.setState(site.id,'failed');
+        mbpTermLog('❌ Blast failed: '+site.name+': '+next.error,'t-warn');
+      }
+    }catch(err){
+      next.status='failed';next.error=err.message;
+      MBP.setState(site.id,'failed');
+      mbpTermLog('❌ Vercel error on '+site.name+': '+err.message,'t-warn');
+    }
     if(window._mbpBlastActive) window._mbpBlastActive.done++;
-    setTimeout(mbpBlastStep, 500);
+    mbpRefreshBlastUI();
+    await new Promise(function(res){setTimeout(res,next.delay||8000);});
+    mbpBlastStep();
+    return;
+  }
+
+  // ── FALLBACK: bookmarklet / window.name relay (original behaviour) ──
+  const schema=MBP.getLearned(domain);
+  if(!schema||!cred||!site.postUrl){
+    next.status='skipped';next.error='missing schema or creds';
+    mbpTermLog('⏭ Skipped: '+site.name+' (no schema/creds — configure Vercel backend to skip schema requirement)','t-warn');
+    if(window._mbpBlastActive) window._mbpBlastActive.done++;
+    setTimeout(mbpBlastStep,500);
     return;
   }
   const job={siteId:site.id,siteName:site.name,schema,postData:next.postData,captchaKey:next.captchaKey,queuedAt:Date.now()};
   const jobJson=JSON.stringify(job);
   MBP.setState(site.id,'auto_posting');
   mbpTermLog('🤖 Blasting: '+site.name,'t-accent');
-  // Use pre-opened window from pool (opened synchronously on user click) or open now
-  var w = window._mbpBlastWindowPool && window._mbpBlastWindowPool[site.id];
+  var w=window._mbpBlastWindowPool&&window._mbpBlastWindowPool[site.id];
   if(!w||w.closed){
-    // Fallback: try window.open now (may be blocked in some browsers)
     w=window.open('about:blank','mbp_blast_'+site.id,'width=1140,height=800,left=80,top=50,toolbar=yes,menubar=yes,scrollbars=yes,resizable=yes,location=yes,status=yes');
     if(w){
-      // Write relay script into fresh window immediately (same-origin about:blank)
       try{
-        var jobEsc2 = jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
+        var jobEsc2=jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
         w.document.write('<script>window.name="mbp_job:'+jobEsc2+'";location.replace("'+site.postUrl.replace(/"/g,'%22')+'")<\/script>');
         w.document.close();
-      }catch(e2){
-        // If that fails, set name and navigate directly
-        try{w.name='mbp_job:'+jobJson;}catch(e3){}
-        w.location.href=site.postUrl;
-      }
+      }catch(e2){try{w.name='mbp_job:'+jobJson;}catch(e3){}w.location.href=site.postUrl;}
     }
   } else {
-    // Write relay script into pool window (about:blank same-origin) — sets window.name then navigates.
-    // window.name persists across the cross-origin navigation to the target site.
     try{
-      var jobEsc = jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
+      var jobEsc=jobJson.replace(/\\/g,'\\\\').replace(/"/g,'\\"').replace(/<\/script>/gi,'<\\/script>');
       w.document.write('<script>window.name="mbp_job:'+jobEsc+'";location.replace("'+site.postUrl.replace(/"/g,'%22')+'")<\/script>');
       w.document.close();
       mbpTermLog('   ✅ Relay injected ('+jobJson.length+' bytes in window.name) — navigating to post URL','t-info');
@@ -28049,14 +28146,10 @@ async function mbpBlastStep(){
     MBP.setState(site.id,'failed');
     if(window._mbpBlastActive) window._mbpBlastActive.done++;
     mbpRefreshBlastUI();
-    setTimeout(mbpBlastStep, 500);
+    setTimeout(mbpBlastStep,500);
     return;
   }
   MBP._popups[site.id]=w;
-  // NOTE: window.name was already set by the relay script inside about:blank (same-origin).
-  // Do NOT attempt w.name = here — by this point the window has navigated cross-origin and the
-  // assignment would throw a SecurityError or be silently ignored.
-  // Broadcast job every 1s for 30s via BroadcastChannel + postMessage
   var _bcBlast; try{_bcBlast=new BroadcastChannel('mbp_bridge');}catch(e){}
   var _blastN=0,_blastDeliverTimer=setInterval(function(){
     _blastN++;
@@ -28065,8 +28158,7 @@ async function mbpBlastStep(){
     try{w.postMessage({type:'mbp_autopost_job',payload:jobJson},'*');}catch(e){}
   },1000);
   window._mbpLastJobJson=jobJson;
-  // Wait for result with timeout
-  const timeout=120000; // 120s per site (covers 30s post-fill + 30s redirect watch + buffer)
+  const timeout=120000;
   const started=Date.now();
   await new Promise(function(resolve){
     const poll=setInterval(function(){

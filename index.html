@@ -15928,7 +15928,6 @@ async function uacRunCreation(){
   const customPw      = document.getElementById('uac-custom-pw')?.value?.trim()||'';
   const proxyStr      = document.getElementById('uac-proxy')?.value?.trim()||'';
   const headless      = document.getElementById('uac-headless')?.checked !== false;
-  const forceLearn    = document.getElementById('uac-force-learn')?.checked === true;
 
   UAC_STATE.running = true; UAC_STATE.stopFlag = false;
   const runBtn  = document.getElementById('uac-run-btn');  if(runBtn)  runBtn.disabled=true;
@@ -15988,7 +15987,6 @@ async function uacRunCreation(){
             proxy:      proxyStr||'',
             headless:   headless,
             autoVerify: autoVerify && !!mailTmToken, // server does its own verify only if we also poll
-            forceLearn: forceLearn,
           });
         } catch(e){
           uacLog(`  [${i+1}] ❌ Backend error: ${e.message}`, 't-err');
@@ -16051,7 +16049,6 @@ async function uacRunCreation(){
         uacLog(`  [${i+1}] ${statusIcon} ${job.siteName} · ${profile.username} → ${result.ok?'LIVE':'FAILED'}`, result.ok?'t-info':'t-warn');
         if(result.formFields?.length) uacLog(`    ↳ Fields filled: ${result.formFields.join(', ')}`, 'tm');
         if(result.captchaSolved) uacLog(`    ↳ 🧩 CAPTCHA solved via 2captcha`, 't-accent');
-        if(result.schemaMode) uacLog(`    ↳ 🧠 Schema: ${result.schemaMode==='replay'?'REPLAY (learned selectors)':result.schemaMode==='learn'?'LEARN (first run — schema saved)':'REPLAY+RELEARN (schema refreshed)'}`, 'tm');
         uacLog(`    ↳ ${result.note||''}`, 'tm');
 
         if(i < countPerSite-1) await sleep(1500 + Math.random()*1000);
@@ -16099,6 +16096,327 @@ function uacRenderTable(){
   </tr>`).join('');
 }
 
+// ══════════════════════════════════════════════════════════════
+// LEARN & REGISTER ENGINE
+// ══════════════════════════════════════════════════════════════
+
+const UAC_LEARN_STATE = { popup: null, schema: null, jobs: [] };
+const UAC_LEARN_STORE_KEY = 'uac_learned_schemas';
+const uacLearnLog = (m, c='t-info') => termLog('uac-learn-terminal', m, c);
+
+function uacLearnSchemasGet() {
+  try { return JSON.parse(localStorage.getItem(UAC_LEARN_STORE_KEY) || '{}'); } catch { return {}; }
+}
+function uacLearnSchemasSave(obj) {
+  localStorage.setItem(UAC_LEARN_STORE_KEY, JSON.stringify(obj));
+}
+function uacLearnSchemaFor(domain) {
+  return uacLearnSchemasGet()[domain] || null;
+}
+
+// Step 1a: Open the site in a popup window
+function uacLearnOpen() {
+  const url = document.getElementById('uac-learn-url')?.value?.trim();
+  if (!url || !url.startsWith('http')) { toast('Paste a valid URL first', 'w'); return; }
+  uacLearnLog('🌐 Opening: ' + url, 't-accent');
+  uacLearnLog('   Navigate to the SIGNUP/REGISTER form in that tab, then click "Capture Form Now"', 'tm');
+  UAC_LEARN_STATE.popup = window.open(url, 'uac_learn_popup', 'width=1200,height=800,scrollbars=yes,resizable=yes');
+  if (!UAC_LEARN_STATE.popup) {
+    uacLearnLog('⚠ Popup blocked — allow popups for this site, or open the URL manually then click Capture', 't-warn');
+    toast('Popup blocked — allow popups and try again', 'w');
+  }
+}
+
+// Step 1b: Capture form from the open popup tab
+function uacLearnCapture() {
+  const learnUrl = document.getElementById('uac-learn-url')?.value?.trim();
+  if (!learnUrl) { toast('Paste the signup URL first', 'w'); return; }
+
+  // The form scanner — same logic as RECORD FORM bookmarklet but richer
+  const SCANNER = function() {
+    var fields = [];
+    var seen = {};
+    var inputs = document.querySelectorAll(
+      'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=image]):not([type=reset]):not([type=file]),textarea,select'
+    );
+    inputs.forEach(function(el) {
+      var rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return;
+      var st = window.getComputedStyle(el);
+      if (st.display === 'none' || st.visibility === 'hidden') return;
+      var name = el.name || el.id || '';
+      var id   = el.id || '';
+      var ph   = el.placeholder || '';
+      var type = (el.type || el.tagName).toLowerCase();
+      var labelText = '';
+      if (id) { var lbl = document.querySelector('label[for="' + id + '"]'); if (lbl) labelText = lbl.innerText.trim(); }
+      if (!labelText) { var p = el.closest('label'); if (p) labelText = p.innerText.slice(0, 60); }
+      var selector = id ? '#' + id : (name ? '[name="' + name + '"]' : '');
+      if (!selector) return;
+      var dedup = selector;
+      if (seen[dedup]) return;
+      seen[dedup] = true;
+      fields.push({
+        tag: el.tagName.toLowerCase(),
+        type: type,
+        name: name,
+        id: id,
+        placeholder: ph,
+        label: labelText,
+        selector: selector,
+        value: el.value || ''
+      });
+    });
+    var submitEl = document.querySelector('button[type=submit],input[type=submit]');
+    var submitSel = submitEl ? (submitEl.id ? '#' + submitEl.id : (submitEl.name ? '[name="' + submitEl.name + '"]' : 'button[type=submit]')) : 'button[type=submit]';
+    var captcha = document.querySelector('.g-recaptcha,[data-sitekey],.h-captcha,iframe[src*=recaptcha],iframe[src*=hcaptcha]') ? 'detected' : 'none';
+    return {
+      domain: location.hostname,
+      url: location.href,
+      fields: fields,
+      submitSel: submitSel,
+      captcha: captcha,
+      learnedAt: Date.now()
+    };
+  };
+
+  // Try to run in the popup
+  try {
+    if (UAC_LEARN_STATE.popup && !UAC_LEARN_STATE.popup.closed) {
+      var schema = UAC_LEARN_STATE.popup.eval('(' + SCANNER.toString() + ')()');
+      uacLearnApplySchema(schema);
+    } else {
+      // Popup closed or not opened — try same-origin via proxy approach
+      uacLearnLog('⚠ Popup not open. Click "Open & Learn" first, navigate to the form, then click Capture.', 't-warn');
+    }
+  } catch(e) {
+    // Cross-origin block — inject script via backend proxy
+    uacLearnLog('⚠ Cross-origin block (' + e.message.slice(0,60) + ')', 't-warn');
+    uacLearnLog('   Trying backend-assisted capture...', 'tm');
+    uacLearnCaptureViaBackend(learnUrl);
+  }
+}
+
+// Backend-assisted capture for cross-origin sites
+async function uacLearnCaptureViaBackend(url) {
+  const base = uacGetVercelBase();
+  if (!base) { uacLearnLog('❌ Vercel backend URL not set in Settings', 't-err'); return; }
+  const secret = settingGet('vercel_secret') || '';
+  uacLearnLog('🔍 Backend scanning form on: ' + url, 'tm');
+  try {
+    const resp = await fetch(base + '/api/universal-register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(secret ? {'X-API-Key': secret} : {}) },
+      body: JSON.stringify({ url, _learnOnly: true }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (data.schema && data.schema.fields) {
+      uacLearnApplySchema(data.schema);
+    } else {
+      uacLearnLog('⚠ Backend could not find form fields. Try opening the site manually.', 't-warn');
+    }
+  } catch(e) {
+    uacLearnLog('❌ Backend error: ' + e.message, 't-err');
+  }
+}
+
+function uacLearnApplySchema(schema) {
+  if (!schema || !schema.fields || !schema.fields.length) {
+    uacLearnLog('⚠ No form fields found on this page. Navigate to the signup form first.', 't-warn');
+    return;
+  }
+  UAC_LEARN_STATE.schema = schema;
+
+  // Save to localStorage keyed by domain
+  var all = uacLearnSchemasGet();
+  all[schema.domain] = schema;
+  uacLearnSchemasSave(all);
+
+  uacLearnLog('✅ FORM LEARNED: ' + schema.domain + ' — ' + schema.fields.length + ' fields captured', 't-accent');
+  schema.fields.forEach(function(f) {
+    uacLearnLog('   ' + f.selector + ' → ' + (f.label || f.placeholder || f.name || f.type), 'tm');
+  });
+  if (schema.captcha === 'detected') uacLearnLog('   ⚠ CAPTCHA detected on this form', 't-warn');
+
+  // Show schema card and register card
+  var card = document.getElementById('uac-learn-schema-card');
+  if (card) { card.style.display = ''; }
+  var regCard = document.getElementById('uac-register-card');
+  if (regCard) { regCard.style.display = ''; }
+
+  var display = document.getElementById('uac-learn-schema-display');
+  if (display) {
+    display.innerHTML = '<div style="color:var(--accent);margin-bottom:4px">📍 ' + schema.url + '</div>'
+      + schema.fields.map(function(f) {
+          return '<div style="padding:2px 0;border-bottom:1px dotted var(--win-border)">'
+            + '<span style="color:#ffa500">' + (f.label || f.placeholder || f.name || f.type) + '</span>'
+            + ' <span style="color:var(--muted2)">→ ' + f.selector + '</span>'
+            + '</div>';
+        }).join('')
+      + '<div style="margin-top:6px;color:var(--muted2)">Submit: ' + (schema.submitSel||'auto') + ' · CAPTCHA: ' + schema.captcha + '</div>';
+  }
+  uacSchemaListRefresh();
+  toast('✅ Form learned — ' + schema.fields.length + ' fields!', 's', 4000);
+}
+
+// Step 2: Register using learned schema
+async function uacLearnRegister() {
+  var url = document.getElementById('uac-learn-url')?.value?.trim();
+  if (!url) { toast('Enter the signup URL', 'w'); return; }
+
+  var domain = '';
+  try { domain = new URL(url).hostname; } catch {}
+
+  // Try in-memory first, then localStorage
+  var schema = UAC_LEARN_STATE.schema || uacLearnSchemaFor(domain);
+  if (!schema) {
+    toast('No schema learned for this site yet. Click "Open & Learn" first.', 'w');
+    uacLearnLog('❌ No saved schema for ' + (domain||url) + '. Learn the form first.', 't-err');
+    return;
+  }
+
+  const base = uacGetVercelBase();
+  if (!base) { uacLearnLog('❌ Vercel backend URL not set in Settings', 't-err'); return; }
+
+  const count      = Math.min(parseInt(document.getElementById('uac-learn-count')?.value) || 1, 10);
+  const customPw   = document.getElementById('uac-learn-pw')?.value?.trim() || '';
+  const captchaKey = document.getElementById('uac-learn-captcha')?.value?.trim() || settingGet('cap_2captchaKey') || '';
+  const useMailTm  = document.getElementById('uac-learn-mailtm')?.checked !== false;
+  const secret     = settingGet('vercel_secret') || '';
+
+  uacLearnLog('\n🚀 REGISTER × ' + count + ' → ' + domain, 't-accent');
+  uacLearnLog('   Schema: ' + schema.fields.length + ' fields · Submit: ' + (schema.submitSel||'auto'), 'tm');
+
+  for (var i = 0; i < count; i++) {
+    uacLearnLog('\n[' + (i+1) + '/' + count + '] Creating account...', 'tm');
+    try {
+      const resp = await fetch(base + '/api/universal-register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(secret ? {'X-API-Key': secret} : {}) },
+        body: JSON.stringify({
+          url,
+          schema,           // send the learned schema directly
+          captchaKey: captchaKey || '',
+          useMailTm,
+          profile: customPw ? { password: customPw } : {},
+        }),
+        signal: AbortSignal.timeout(240000),
+      });
+      const data = await resp.json().catch(() => ({ ok: false, note: 'Non-JSON response' }));
+
+      if (Array.isArray(data.log)) {
+        data.log.forEach(function(e) { uacLearnLog('  [server] ' + e.msg, e.cls || 'tm'); });
+      }
+
+      const job = {
+        time: ts(),
+        siteUrl: url,
+        siteName: domain,
+        username: data.username || '',
+        email: data.email || '',
+        password: data.password || '',
+        status: data.ok ? 'live' : 'failed',
+        verifyStatus: data.verifyStatus || '',
+        verifyLink: data.verifyLink || '',
+        profileUrl: data.profileUrl || '',
+        note: data.note || '',
+      };
+      UAC_LEARN_STATE.jobs.unshift(job);
+      uacLearnRenderTable();
+
+      uacLearnLog('[' + (i+1) + '] ' + (data.ok ? '✅ LIVE' : '❌ FAILED') + ' · ' + (data.username||'') + ' · ' + (data.email||''), data.ok ? 't-info' : 't-err');
+    } catch(e) {
+      uacLearnLog('[' + (i+1) + '] ❌ ' + e.message, 't-err');
+    }
+    if (i < count - 1) await sleep(1500);
+  }
+  uacLearnLog('\n🏁 Done — ' + UAC_LEARN_STATE.jobs.filter(j=>j.status==='live').length + ' live', 't-accent');
+}
+
+function uacLearnClear() {
+  var url = document.getElementById('uac-learn-url')?.value?.trim();
+  var domain = '';
+  try { domain = new URL(url).hostname; } catch {}
+  if (domain) {
+    var all = uacLearnSchemasGet();
+    delete all[domain];
+    uacLearnSchemasSave(all);
+  }
+  UAC_LEARN_STATE.schema = null;
+  var card = document.getElementById('uac-learn-schema-card');
+  if (card) card.style.display = 'none';
+  var regCard = document.getElementById('uac-register-card');
+  if (regCard) regCard.style.display = 'none';
+  uacSchemaListRefresh();
+  uacLearnLog('🗑 Schema cleared for ' + (domain||'site'), 't-warn');
+}
+
+function uacLearnRenderTable() {
+  var tbody = document.getElementById('uac-learn-tbody');
+  if (!tbody) return;
+  if (!UAC_LEARN_STATE.jobs.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = UAC_LEARN_STATE.jobs.slice(0, 200).map(function(j) {
+    return '<tr>'
+      + '<td class="mono xs tm">' + j.time + '</td>'
+      + '<td class="mono xs">' + esc(j.siteName) + '</td>'
+      + '<td class="mono xs" style="cursor:pointer" onclick="navigator.clipboard?.writeText(&quot;' + esc(j.username) + '&quot;)" title="Copy">' + esc(j.username) + '</td>'
+      + '<td class="mono xs tm" style="cursor:pointer" onclick="navigator.clipboard?.writeText(&quot;' + esc(j.email) + '&quot;)" title="Copy">' + esc(j.email) + '</td>'
+      + '<td class="mono xs" style="cursor:pointer" onclick="navigator.clipboard?.writeText(&quot;' + esc(j.password) + '&quot;)" title="Copy">' + esc(j.password) + '</td>'
+      + '<td><span class="badge ' + (j.status==='live'?'badge-g':'badge-r') + '">' + j.status.toUpperCase() + '</span></td>'
+      + '<td><span class="badge ' + (j.verifyStatus==='verified'?'badge-g':'badge-r') + '" style="font-size:8px">' + (j.verifyStatus||'').replace(/_/g,' ').toUpperCase() + '</span></td>'
+      + '<td style="white-space:nowrap">'
+        + (j.profileUrl ? '<a href="' + esc(j.profileUrl) + '" target="_blank" class="btn btn-blue btn-xs">Profile ↗</a> ' : '')
+        + (j.verifyLink ? '<a href="' + esc(j.verifyLink) + '" target="_blank" class="btn btn-ghost btn-xs">Verify ↗</a>' : '')
+      + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function uacSchemaListRefresh() {
+  var all = uacLearnSchemasGet();
+  var keys = Object.keys(all);
+  var badge = document.getElementById('uac-schema-count');
+  if (badge) badge.textContent = keys.length;
+  var list = document.getElementById('uac-schema-list');
+  if (!list) return;
+  if (!keys.length) {
+    list.innerHTML = '<div style="color:var(--muted2);padding:6px">No schemas saved yet</div>';
+    return;
+  }
+  list.innerHTML = keys.map(function(domain) {
+    var s = all[domain];
+    var date = s.learnedAt ? new Date(s.learnedAt).toLocaleDateString() : '';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dotted var(--win-border)">'
+      + '<span class="badge badge-g" style="font-size:8px">✔</span>'
+      + '<span style="flex:1">' + domain + '</span>'
+      + '<span style="color:var(--muted2)">' + (s.fields ? s.fields.length : 0) + ' fields · ' + date + '</span>'
+      + '<button class="btn btn-ghost btn-xs" onclick="uacSchemaLoad(&quot;' + domain + '&quot;)">Use</button>'
+      + '<button class="btn btn-danger btn-xs" onclick="uacSchemaDelete(&quot;' + domain + '&quot;)">✕</button>'
+      + '</div>';
+  }).join('');
+}
+
+function uacSchemaLoad(domain) {
+  var all = uacLearnSchemasGet();
+  var schema = all[domain];
+  if (!schema) return;
+  document.getElementById('uac-learn-url').value = schema.url || ('https://' + domain);
+  uacLearnApplySchema(schema);
+  uacLearnLog('📂 Loaded saved schema for ' + domain, 't-accent');
+}
+
+function uacSchemaDelete(domain) {
+  var all = uacLearnSchemasGet();
+  delete all[domain];
+  uacLearnSchemasSave(all);
+  uacSchemaListRefresh();
+  uacLearnLog('🗑 Deleted schema for ' + domain, 't-warn');
+}
+
 function uacExportCSV(){
   if(!UAC_STATE.jobs.length) return;
   const h = 'Time,Site,SiteURL,Username,Email,Password,FormFields,CaptchaSolved,Status,VerifyStatus,ProfileURL,Note\n';
@@ -16106,46 +16424,6 @@ function uacExportCSV(){
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([h+rows],{type:'text/csv'}));
   a.download='universal-accounts.csv'; a.click();
-}
-
-async function uacCheckSchemas(){
-  const panel = document.getElementById('uac-schema-status');
-  if(!panel) return;
-  const urls = (document.getElementById('uac-urls')?.value||'').split('\n').map(u=>u.trim()).filter(u=>u.startsWith('http'));
-  if(!urls.length){ panel.innerHTML='<span style="color:var(--muted2)">Paste URLs on the left first.</span>'; return; }
-  const base   = uacGetVercelBase();
-  const secret = settingGet('vercel_secret')||'';
-  if(!base){ panel.innerHTML='<span style="color:#f66">⚠ Vercel backend URL not set in Settings.</span>'; return; }
-  panel.innerHTML='<span class="tm">Checking schemas…</span>';
-  const results = await Promise.all(urls.map(async url => {
-    const host = (()=>{ try{return new URL(url).hostname.replace('www.','');}catch{return url.slice(0,40);}})();
-    try {
-      const r = await fetch(`${base}/api/universal-register`,{
-        method:'POST',
-        headers:{'Content-Type':'application/json',...(secret?{'X-API-Key':secret}:{})},
-        body:JSON.stringify({url,_checkSchema:true}),
-        signal:AbortSignal.timeout(8000),
-      });
-      const d = await r.json().catch(()=>({}));
-      return {host,url,hasSchema:d.schemaExists,fields:d.fieldCount||0};
-    } catch(e){ return {host,url,hasSchema:false,err:e.message}; }
-  }));
-  panel.innerHTML = results.map(r=>`
-    <div style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px dotted var(--win-border)">
-      ${r.hasSchema
-        ?'<span class="badge badge-g" style="font-size:9px">✔ LEARNED</span>'
-        :'<span class="badge" style="background:#555;color:#ccc;font-size:9px">NOT YET</span>'}
-      <span class="mono xs">${r.host}</span>
-      <span class="xs" style="color:var(--muted2)">${r.hasSchema?`→ ${r.fields} fields saved, will REPLAY`:'→ will LEARN on first run'}</span>
-    </div>`).join('');
-}
-
-function uacForceRelearn(){
-  const cb = document.getElementById('uac-force-learn');
-  if(cb){ cb.checked=true; }
-  const panel = document.getElementById('uac-schema-status');
-  if(panel) panel.innerHTML='<span style="color:#ffa500">🔄 Force Re-learn is ON — next run will re-scan all site forms and overwrite saved schemas.</span>';
-  uacLog('🔄 Force Re-learn enabled — schemas will be refreshed on next run','t-warn');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -16585,15 +16863,104 @@ function renderAccountCreator(el){
 
   <!-- ── TAB SWITCHER ── -->
   <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:2px solid var(--win-border)">
-    <button id="ac-tab-universal" class="ptab active" onclick="hubSwitch('ac','universal',['universal','platforms','backend'])" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;">🌐 Universal Creator <span class="badge badge-g" style="font-size:8px">NEW</span></button>
-    <button id="ac-tab-platforms" class="ptab" onclick="hubSwitch('ac','platforms',['universal','platforms','backend'])" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;">🏗 Preset Platforms</button>
-    <button id="ac-tab-backend" class="ptab" onclick="hubSwitch('ac','backend',['universal','platforms','backend'])" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;">🔧 Backend Setup</button>
+    <button id="ac-tab-learn" class="ptab active" onclick="hubSwitch('ac','learn',['learn','universal','platforms','backend'])" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;">🧠 Learn &amp; Register</button>
+    <button id="ac-tab-universal" class="ptab" onclick="hubSwitch('ac','universal',['learn','universal','platforms','backend'])" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;">🌐 Bulk Creator</button>
+    <button id="ac-tab-platforms" class="ptab" onclick="hubSwitch('ac','platforms',['learn','universal','platforms','backend'])" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;">🏗 Preset Platforms</button>
+    <button id="ac-tab-backend" class="ptab" onclick="hubSwitch('ac','backend',['learn','universal','platforms','backend'])" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;">🔧 Backend Setup</button>
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
-  <!-- TAB: UNIVERSAL CREATOR                                      -->
+  <!-- TAB: LEARN & REGISTER                                       -->
   <!-- ══════════════════════════════════════════════════════════ -->
-  <div id="ac-panel-universal">
+  <div id="ac-panel-learn">
+    <div class="notice notice-success" style="margin-bottom:12px">
+      <strong>🧠 How it works:</strong>
+      <ol style="margin:6px 0 0 16px;padding:0;font-size:11px;line-height:1.8">
+        <li>Paste a signup URL below and click <strong>Open &amp; Learn</strong> — the site opens in a new tab</li>
+        <li>Navigate to the registration/signup form in that tab</li>
+        <li>Come back here and click <strong>📸 Capture Form Now</strong> — it scans the live form in that tab</li>
+        <li>Click <strong>🚀 Register with Learned Schema</strong> — backend fills + submits using exact field selectors</li>
+      </ol>
+    </div>
+
+    <div class="grid2" style="gap:14px">
+      <!-- LEFT: Learn controls -->
+      <div>
+        <div class="card">
+          <div class="card-title">Step 1 — Open Site &amp; Learn Its Form</div>
+          <div class="fg" style="margin-bottom:10px">
+            <label class="lbl">Registration / Signup URL</label>
+            <input type="text" id="uac-learn-url" placeholder="https://example.com/signup" style="font-family:var(--mono);font-size:11px" />
+            <div style="font-size:9px;color:var(--muted2);font-family:var(--mono);margin-top:4px">💡 Paste the homepage too — navigate manually to the signup form inside the opened tab</div>
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <button class="btn btn-primary" style="flex:1" onclick="uacLearnOpen()">🌐 Open &amp; Learn</button>
+            <button class="btn btn-ghost" style="flex:1" onclick="uacLearnCapture()">📸 Capture Form Now</button>
+          </div>
+        </div>
+
+        <div class="card" id="uac-learn-schema-card" style="display:none">
+          <div class="card-title">✅ Learned Schema</div>
+          <div id="uac-learn-schema-display" style="font-family:var(--mono);font-size:10px;color:var(--term-text)"></div>
+        </div>
+
+        <div class="card" id="uac-register-card" style="display:none">
+          <div class="card-title">Step 2 — Register Using Learned Schema</div>
+          <div class="grid2">
+            <div class="fg"><label class="lbl">Base Username</label>
+              <input type="text" id="uac-learn-username" placeholder="seouser" value="seouser" /></div>
+            <div class="fg"><label class="lbl">Accounts to Create</label>
+              <input type="number" id="uac-learn-count" value="1" min="1" max="10" /></div>
+          </div>
+          <div class="fg"><label class="lbl">Custom Password <span class="xs tm">(blank = auto-generate)</span></label>
+            <input type="password" id="uac-learn-pw" placeholder="Leave blank to auto-generate" /></div>
+          <div class="fg"><label class="lbl">2Captcha Key <span class="xs tm">(if site has CAPTCHA)</span></label>
+            <input type="password" id="uac-learn-captcha" placeholder="Your 2captcha.com API key" /></div>
+          <div style="display:flex;align-items:center;gap:8px;padding:7px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2);margin:8px 0">
+            <input type="checkbox" id="uac-learn-mailtm" style="width:auto" checked />
+            <label for="uac-learn-mailtm" class="mono xs" style="cursor:pointer;color:var(--accent)">📧 Auto-create mail.tm disposable inbox per account</label>
+          </div>
+          <div class="row" style="gap:8px;margin-top:8px">
+            <button class="btn btn-primary" style="flex:1;font-size:12px;padding:9px" onclick="uacLearnRegister()">🚀 Register with Learned Schema</button>
+            <button class="btn btn-danger btn-sm" onclick="uacLearnClear()">🗑 Clear Schema</button>
+          </div>
+        </div>
+
+        <!-- Saved Schemas list -->
+        <div class="card">
+          <div class="card-title">🗂 All Saved Schemas <span class="badge badge-b" id="uac-schema-count" style="font-size:9px">0</span></div>
+          <div id="uac-schema-list" style="font-family:var(--mono);font-size:10px;max-height:200px;overflow-y:auto"></div>
+          <button class="btn btn-ghost btn-xs" style="margin-top:8px" onclick="uacSchemaListRefresh()">Refresh</button>
+        </div>
+      </div>
+
+      <!-- RIGHT: Log -->
+      <div>
+        <div class="card">
+          <div class="card-title">🖥 Learn &amp; Register Log</div>
+          <div class="terminal" id="uac-learn-terminal" style="height:300px">
+            <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">🧠 LEARN MODE READY</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   1. Paste signup URL → Open &amp; Learn</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   2. Navigate to the signup form in the opened tab</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   3. Click "Capture Form Now" to scan it</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   4. Click "Register" — schema replays automatically</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">📋 Registered Accounts</div>
+          <div class="tw" style="max-height:300px;overflow-y:auto"><table>
+            <thead><tr><th>Time</th><th>Site</th><th>Username</th><th>Email</th><th>Password</th><th>Status</th><th>Verify</th><th>Links</th></tr></thead>
+            <tbody id="uac-learn-tbody"><tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet</td></tr></tbody>
+          </table></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- TAB: UNIVERSAL CREATOR (BULK)                              -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="ac-panel-universal" style="display:none">
     <div class="notice notice-success" style="margin-bottom:10px">
       <strong>⚡ God-Tier Universal Engine:</strong> Paste ANY website URL(s). Playwright opens a real Chromium browser, finds the signup page automatically, detects every form field (email, username, password, name, phone, bio, DOB, country…), fills them with smart profile data, solves reCAPTCHA/hCaptcha via 2captcha, clicks Submit, waits for success — then polls mail.tm inbox and auto-clicks the verification link.
     </div>
@@ -16638,9 +17005,6 @@ function renderAccountCreator(el){
             <div style="display:flex;align-items:center;gap:10px;padding:8px;background:rgba(0,87,255,0.05);border:1px solid rgba(0,87,255,0.15)">
               <input type="checkbox" id="uac-headless" style="width:auto" checked />
               <label for="uac-headless" class="mono xs" style="cursor:pointer;color:var(--accent)">👻 Headless mode (uncheck to see browser — for debugging)</label></div>
-            <div style="display:flex;align-items:center;gap:10px;padding:8px;background:rgba(255,160,0,0.06);border:1px solid rgba(255,160,0,0.25)">
-              <input type="checkbox" id="uac-force-learn" style="width:auto" />
-              <label for="uac-force-learn" class="mono xs" style="cursor:pointer;color:#ffa500">🔄 Force Re-learn schema (use if site changed its form)</label></div>
           </div>
           <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
             <button id="uac-run-btn" class="btn btn-primary" style="flex:1;font-size:12px;padding:8px" onclick="uacRunCreation()">🚀 LAUNCH UNIVERSAL CREATOR</button>
@@ -16683,16 +17047,6 @@ function renderAccountCreator(el){
 
       <!-- RIGHT COLUMN: Terminal + Results -->
       <div>
-        <div class="card" id="uac-schema-panel" style="margin-bottom:10px">
-          <div class="card-title" style="display:flex;align-items:center;gap:8px">
-            🧠 Schema Store — Learned Sites
-            <button class="btn btn-ghost btn-xs" onclick="uacCheckSchemas()" style="margin-left:auto">Refresh</button>
-            <button class="btn btn-danger btn-xs" onclick="uacForceRelearn()">Force Re-learn All</button>
-          </div>
-          <div id="uac-schema-status" class="mono xs" style="padding:6px 0;color:var(--muted2)">
-            Paste URLs and run — learned schemas appear here. <span style="color:#ffa500">🟡 First run = LEARN. All after = REPLAY (fast + 100% accurate).</span>
-          </div>
-        </div>
         <div class="card">
           <div class="card-title">🖥 Universal Creator Log — Live Output</div>
           <div class="terminal" id="uac-terminal" style="height:320px">

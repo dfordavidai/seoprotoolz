@@ -985,6 +985,7 @@ tr:hover td{background:#c8d8f0}
       <!-- ④ INFRASTRUCTURE -->
       <div class="nav-section nav-section-toggle nav-section-collapsed" data-section="s4">④ INFRASTRUCTURE <span class="nav-chevron">▸</span></div>
       <div class="nav-group nav-group-collapsed" id="nav-group-s4">
+        <div class="nav-item" data-page="seo_toolz"><span class="nav-icon">🔬</span>SEO Toolz<span class="nav-badge" style="background:#7b2ff7;color:#fff;border-color:#7b2ff7">MOZ</span></div>
         <div class="nav-item" data-page="account_setup"><span class="nav-icon">🛠</span>Account Setup<span class="nav-badge blue">5 tools</span></div>
         <div class="nav-item" data-page="ctr_manipulator"><span class="nav-icon">🖱</span>CTR Engine<span class="nav-badge" style="background:var(--win-green);color:#fff;border-color:var(--win-green)">PRO</span></div>
         <div class="nav-item" data-page="indexing_suite"><span class="nav-icon">📡</span>Indexing Suite</div>
@@ -1063,6 +1064,7 @@ tr:hover td{background:#c8d8f0}
       <div id="page-account_setup" class="page"></div>
       <div id="page-blog_commenter" class="page"></div>
       <div id="page-link_indexer" class="page"></div>
+      <div id="page-seo_toolz" class="page"></div>
 
     </div>
   </div>
@@ -2718,6 +2720,7 @@ function renderPage(id){
     site_audit:       renderSiteAudit,
     content_hub:      renderContentHub,
     account_setup:    renderAccountSetup,
+    seo_toolz:        renderSeoToolz,
   }[id];
   if(r) r(el);
 }
@@ -12869,6 +12872,39 @@ const PDF_STATE = {
   archiveSecretKey:'',
   settings:{ density:'rich', font:'helvetica', color:'#0057ff', includeLinks:true, includeSchema:true, addTOC:true }
 };
+/* ── ARCHIVE.ORG MULTI-ACCOUNT POOL ─────────────────────────────────────────
+   Accounts rotate round-robin so consecutive uploads use different keys,
+   eliminating the per-key rate limit that causes "Rate limited, retrying in 3s".
+   Falls back to the single pdf_archive_access/secret if pool is empty.
+─────────────────────────────────────────────────────────────────────────── */
+let _archivePoolIndex = 0;
+
+function getArchivePool() {
+  // Always re-read from settings so newly added accounts are picked up
+  const accounts = (typeof settingGet === 'function' ? settingGet('archive_accounts') : null) || [];
+  // Inject the legacy single-key as account #0 if set and not already present
+  const legacyAccess = (typeof settingGet === 'function' ? settingGet('pdf_archive_access') : PDF_STATE.archiveAccessKey) || '';
+  const legacySecret = (typeof settingGet === 'function' ? settingGet('pdf_archive_secret') : PDF_STATE.archiveSecretKey) || '';
+  if (legacyAccess && legacySecret) {
+    const alreadyIn = accounts.some(a => a.accessKey === legacyAccess);
+    if (!alreadyIn) {
+      return [{ label: 'Primary', accessKey: legacyAccess, secretKey: legacySecret }, ...accounts];
+    }
+  }
+  return accounts;
+}
+
+function getNextArchiveKeys() {
+  const pool = getArchivePool();
+  if (!pool.length) {
+    // Last-resort: return whatever is in PDF_STATE
+    return { accessKey: PDF_STATE.archiveAccessKey || '', secretKey: PDF_STATE.archiveSecretKey || '', label: 'Primary' };
+  }
+  const idx = _archivePoolIndex % pool.length;
+  _archivePoolIndex = (idx + 1) % pool.length;
+  return pool[idx];
+}
+
 // Auto-populate PDF_STATE from global settings — deferred until after SETTINGS is declared
 function _pdfStateInit(){
   if(typeof settingGet!=='function') return;
@@ -13588,7 +13624,8 @@ async function pdfBlastPlatforms(pdfBytes, job, selectedPlatformIds, credentials
       if(pid==='archive'){
         const creds = credentials.archive||{};
         if(creds.accessKey && creds.secretKey){
-          const r = await archiveUploadPDF(pdfBytes, job.title, job.keyword, creds.accessKey, creds.secretKey, (pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg}));
+          const _archKeys = (creds.accessKey && creds.secretKey) ? creds : getNextArchiveKeys();
+          const r = await archiveUploadPDF(pdfBytes, job.title, job.keyword, _archKeys.accessKey, _archKeys.secretKey, (pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg,account:_archKeys.label||''}));
           result.status='live'; result.url=r.url; result.note='Archive.org S3 API — fully automated';
         } else {
           result.note='Add Archive.org S3 keys for auto-upload'; result.status='manual';
@@ -14550,14 +14587,15 @@ async function pdfBlastPlatformsV2(pdfBytes,job,selectedPlatformIds,credentials,
       const filename=job.title.toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,60)+'.pdf';
       if(pid==='archive'){
         // Always get latest keys from PDF_STATE (populated from settings) as fallback
-        const c={
-          accessKey:(credentials.archive&&credentials.archive.accessKey)||PDF_STATE.archiveAccessKey||'',
-          secretKey:(credentials.archive&&credentials.archive.secretKey)||PDF_STATE.archiveSecretKey||''
-        };
+        const _manualAccess = (credentials.archive&&credentials.archive.accessKey)||'';
+        const _manualSecret = (credentials.archive&&credentials.archive.secretKey)||'';
+        const c = (_manualAccess && _manualSecret)
+          ? { accessKey: _manualAccess, secretKey: _manualSecret, label: 'Manual' }
+          : getNextArchiveKeys();
         if(c.accessKey&&c.secretKey){
           // archiveUploadPDF handles proxy-first then direct fallback — safe JSON parsing throughout
-          const r=await archiveUploadPDF(pdfBytes,job.title,job.keyword,c.accessKey,c.secretKey,(pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg}));
-          result={...result,status:'live',url:r.url,note:'Archive.org S3 ✓'};
+          const r=await archiveUploadPDF(pdfBytes,job.title,job.keyword,c.accessKey,c.secretKey,(pct,msg)=>onUpdate({pid,name:plat.name,status:'uploading',pct,msg,account:c.label||''}));
+          result={...result,status:'live',url:r.url,note:'Archive.org S3 ✓ ['+( c.label||'Account')+']'};
         } else {
           result.note='Add Archive.org S3 keys in Settings → Archive.org S3 Keys section';
         }
@@ -14776,11 +14814,14 @@ function renderPDFTools(el){
               <strong>Archive.org is fully automated</strong> (S3 API — no CORS, returns live URL). Other platforms use your Vercel proxy for auto-upload with cookie auth. If CORS blocks, PDF is downloaded + upload page opens automatically.
             </div>
             <div class="card-title" style="margin-top:4px">🔑 Archive.org S3 (Full Automation)</div>
-            <div class="grid2">
-              <div class="fg"><label class="lbl">S3 Access Key</label><input type="text" id="blast-archive-access" placeholder="archive.org access key" value="${PDF_STATE.archiveAccessKey||''}" oninput="PDF_STATE.archiveAccessKey=this.value.trim();if(typeof settingSet==='function')settingSet('pdf_archive_access',this.value.trim());document.getElementById('cred-archive-access')&&(document.getElementById('cred-archive-access').value=this.value)"></div>
-              <div class="fg"><label class="lbl">S3 Secret Key</label><input type="password" id="blast-archive-secret" placeholder="archive.org secret key" value="${PDF_STATE.archiveSecretKey||''}" oninput="PDF_STATE.archiveSecretKey=this.value.trim();if(typeof settingSet==='function')settingSet('pdf_archive_secret',this.value.trim());document.getElementById('cred-archive-secret')&&(document.getElementById('cred-archive-secret').value=this.value)"></div>
+            <div style="font-size:10px;font-family:var(--mono);color:var(--win-text-muted);margin-bottom:6px" id="blast-arch-pool-hint">
+              ${(()=>{ const pool = getArchivePool(); return pool.length ? '<span style="color:var(--win-green)">✓ '+pool.length+' account'+(pool.length>1?'s':'')+' in rotation pool — uploads cycle automatically</span>' : '<span style="color:var(--win-yellow)">No accounts in pool — enter keys below or add in Settings</span>'; })()}
             </div>
-            <div class="notice notice-info" style="margin:8px 0;font-size:10px">Get S3 keys free at: <a href="https://archive.org/account/s3.php" target="_blank">archive.org/account/s3.php</a></div>
+            <div class="grid2">
+              <div class="fg"><label class="lbl">Primary S3 Access Key</label><input type="text" id="blast-archive-access" placeholder="archive.org access key" value="${PDF_STATE.archiveAccessKey||''}" oninput="PDF_STATE.archiveAccessKey=this.value.trim();if(typeof settingSet==='function')settingSet('pdf_archive_access',this.value.trim());document.getElementById('cred-archive-access')&&(document.getElementById('cred-archive-access').value=this.value)"></div>
+              <div class="fg"><label class="lbl">Primary S3 Secret Key</label><input type="password" id="blast-archive-secret" placeholder="archive.org secret key" value="${PDF_STATE.archiveSecretKey||''}" oninput="PDF_STATE.archiveSecretKey=this.value.trim();if(typeof settingSet==='function')settingSet('pdf_archive_secret',this.value.trim());document.getElementById('cred-archive-secret')&&(document.getElementById('cred-archive-secret').value=this.value)"></div>
+            </div>
+            <div class="notice notice-info" style="margin:8px 0;font-size:10px">Get S3 keys free at: <a href="https://archive.org/account/s3.php" target="_blank">archive.org/account/s3.php</a> — add more accounts in <strong>Settings → Archive.org Accounts</strong> to rotate and eliminate rate limits.</div>
             <div class="card-title" style="margin-top:8px">🍪 Platform Session Cookies (for proxy upload)</div>
             <div class="notice notice-warn" style="margin-bottom:8px;font-size:10px">Log into each platform, copy your session cookie from DevTools → Application → Cookies. Paste here for automated upload.</div>
             <div style="max-height:300px;overflow-y:auto">
@@ -20405,7 +20446,12 @@ const SETTINGS_DEFAULTS = {
   // ── PDF SEO / ARCHIVE.ORG S3 ──
   pdf_archive_access:    '',
   pdf_archive_secret:    '',
+  archive_accounts:      [], // [{label,accessKey,secretKey}] — multi-account pool
 
+
+  // ── RAILWAY MOZ SCRAPER ──
+  railway_moz_url:       '',   // e.g. https://your-project.up.railway.app
+  railway_moz_secret:    '',   // optional API secret
 
   // ── SESSION MANAGER ──
   csm_rotateOnFail:      true,
@@ -20981,10 +21027,72 @@ function renderSettings(el) {
     </div>
   </div>
 
-  ${sSection('🏛️','Archive.org S3 Keys','Access &amp; Secret keys for fully-automated PDF uploads to Archive.org (DA94)',
-    sField('pdf_archive_access','S3 Access Key','text',{ph:'your-archive-access-key',hint:'From archive.org/account/s3.php — top field',width:'280px'}) +
-    sField('pdf_archive_secret','S3 Secret Key','password',{ph:'your-archive-secret-key',hint:'From archive.org/account/s3.php — second field'}) +
-    '<div style="font-size:10px;color:var(--win-text-muted);font-family:var(--mono);margin-top:4px">Get keys free at <a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">archive.org/account/s3.php</a> — keys are stored here and auto-used in PDF SEO blast.</div>'
+  ${sSection('\U0001f3db\ufe0f','Archive.org Accounts','Add multiple S3 key pairs \u2014 uploads rotate round-robin to eliminate rate limits',
+    `<div style="margin-bottom:8px;font-size:10px;color:var(--win-text-muted);font-family:var(--mono)">
+      Each upload automatically picks the next account in the pool so no single key hits Archive.org rate limits.<br>
+      Get keys free: <a href="https://archive.org/account/s3.php" target="_blank" style="color:var(--accent)">archive.org/account/s3.php</a>
+    </div>
+    <div id="archive-accounts-list" style="margin-bottom:8px"></div>
+    <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px">
+      <div class="fg" style="flex:1;min-width:100px"><label class="lbl">Label</label><input type="text" id="new-arch-label" placeholder="e.g. Account 2" style="width:100%"></div>
+      <div class="fg" style="flex:2;min-width:180px"><label class="lbl">S3 Access Key</label><input type="text" id="new-arch-access" placeholder="access key" style="width:100%"></div>
+      <div class="fg" style="flex:2;min-width:180px"><label class="lbl">S3 Secret Key</label><input type="password" id="new-arch-secret" placeholder="secret key" style="width:100%"></div>
+      <button class="btn btn-sm" style="border-color:var(--win-green);color:var(--win-green);font-weight:700;white-space:nowrap;flex-shrink:0" onclick="archiveAccountAdd()">+ Add Account</button>
+    </div>
+    <div id="archive-pool-status" style="font-size:10px;font-family:var(--mono);color:var(--win-text-muted)"></div>
+    <script>
+    function _archRenderAccounts(){
+      var accounts = settingGet('archive_accounts')||[];
+      var legacyA = settingGet('pdf_archive_access')||'';
+      var legacyS = settingGet('pdf_archive_secret')||'';
+      var pool = legacyA&&legacyS&&!accounts.some(function(a){return a.accessKey===legacyA;})
+        ? [{label:'Primary (legacy)',accessKey:legacyA,secretKey:legacyS,_legacy:true}].concat(accounts)
+        : accounts.slice();
+      var el = document.getElementById('archive-accounts-list');
+      var st = document.getElementById('archive-pool-status');
+      if(!el) return;
+      if(!pool.length){
+        el.innerHTML='<div style="font-size:10px;color:#888;font-family:var(--mono);padding:4px 0">No accounts added yet.</div>';
+        if(st) st.textContent='Pool empty \u2014 add at least one account above.';
+        return;
+      }
+      el.innerHTML = pool.map(function(a,i){
+        return '<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;margin-bottom:4px;background:var(--win-dark);border:1px solid var(--win-btn-sh);border-radius:2px">'
+          +'<span style="font-size:11px;font-family:var(--mono);color:var(--win-blue);min-width:20px;text-align:center">'+(i+1)+'</span>'
+          +'<span style="font-size:10px;font-family:var(--mono);font-weight:700;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(a.label||('Account '+(i+1)))+' \u2014 <span style="color:var(--win-text-muted)">'+a.accessKey.slice(0,8)+'\u2026</span></span>'
+          +(a._legacy?'<span style="font-size:9px;color:var(--win-yellow);font-family:var(--mono)">[legacy]</span>':'')
+          +(!a._legacy?'<button class="btn btn-xs" style="border-color:var(--win-red);color:var(--win-red)" onclick="archiveAccountRemove('+i+')">\u2715</button>':'')
+          +'</div>';
+      }).join('');
+      if(st) st.innerHTML='<span style="color:var(--win-green)">\u2713 '+pool.length+' account'+(pool.length>1?'s':'')+' in rotation pool \u2014 uploads cycle through them automatically.</span>';
+    }
+    function archiveAccountAdd(){
+      var label  = (document.getElementById('new-arch-label')||{value:''}).value.trim()||('Account '+(((settingGet('archive_accounts')||[]).length)+1));
+      var access = (document.getElementById('new-arch-access')||{value:''}).value.trim();
+      var secret = (document.getElementById('new-arch-secret')||{value:''}).value.trim();
+      if(!access||!secret){alert('Both Access Key and Secret Key are required.');return;}
+      var accounts = JSON.parse(JSON.stringify(settingGet('archive_accounts')||[]));
+      if(accounts.some(function(a){return a.accessKey===access;})){alert('This Access Key is already in the pool.');return;}
+      accounts.push({label:label,accessKey:access,secretKey:secret});
+      settingSet('archive_accounts',accounts);
+      if(!settingGet('pdf_archive_access')){
+        settingSet('pdf_archive_access',access);
+        settingSet('pdf_archive_secret',secret);
+        if(typeof PDF_STATE!=='undefined'){PDF_STATE.archiveAccessKey=access;PDF_STATE.archiveSecretKey=secret;}
+      }
+      document.getElementById('new-arch-label').value='';
+      document.getElementById('new-arch-access').value='';
+      document.getElementById('new-arch-secret').value='';
+      _archRenderAccounts();
+    }
+    function archiveAccountRemove(idx){
+      var accounts = JSON.parse(JSON.stringify(settingGet('archive_accounts')||[]));
+      accounts.splice(idx,1);
+      settingSet('archive_accounts',accounts);
+      _archRenderAccounts();
+    }
+    setTimeout(_archRenderAccounts,0);
+    <\/script>`
   )}
 
   ${sSection('▲','Vercel Backend','Serverless backend API on Vercel for CORS bypass &amp; server-side operations',
@@ -26274,10 +26382,18 @@ const BLP_SUBMITTERS = {
 
   // ── ARCHIVE.ORG ──
   async 'archive.org'(content, site, cred){
-    if(!cred||!cred.key) throw new Error('Archive.org requires S3-like Access Key — see archive.org/account/s3.php');
-    const accessKey = cred.key;
-    const secretKey = cred.extra;
-    if(!secretKey) throw new Error('Archive.org: paste S3 Secret Key in the extra field');
+    // Use pool rotation — fall back to manually-supplied cred if both key+extra set
+    let accessKey, secretKey;
+    if(cred && cred.key && cred.extra){
+      accessKey = cred.key;
+      secretKey = cred.extra;
+    } else {
+      const poolKeys = getNextArchiveKeys();
+      if(!poolKeys.accessKey) throw new Error('Archive.org requires S3-like Access Key — add accounts in Settings → Archive.org Accounts');
+      accessKey = poolKeys.accessKey;
+      secretKey = poolKeys.secretKey;
+    }
+    if(!secretKey) throw new Error('Archive.org: Secret Key missing');
     const itemName = 'seo-resource-'+Date.now();
     const filename = 'content.txt';
     const r = await _blpFetch(`https://s3.us.archive.org/${itemName}/${filename}`,{
@@ -29783,6 +29899,338 @@ if(!window.__MBP_IS_RELAY_TAB__) MBP.startCapturePoll();  // FIX: start poll at 
 // Helper: returns the current dashboard URL (used by bookmarklet generator)
 function mbpGetDashboardUrl(){
   return location.href.split('#')[0];
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SEO TOOLZ — Railway-backed Moz Link Explorer integration
+// ═══════════════════════════════════════════════════════════════
+
+const TOOLZ = {
+  results: {},
+  status: 'idle',  // idle | loading | ready | error
+};
+
+function toolzRailwayUrl() {
+  return (settingGet('railway_moz_url') || '').replace(/\/+$/, '');
+}
+
+function toolzHeaders() {
+  const secret = settingGet('railway_moz_secret') || '';
+  const h = { 'Content-Type': 'application/json' };
+  if (secret) h['x-api-secret'] = secret;
+  return h;
+}
+
+async function toolzCheckHealth() {
+  const base = toolzRailwayUrl();
+  if (!base) return { ok: false, status: 'No Railway URL configured' };
+  try {
+    const res  = await fetch(base + '/health', { headers: toolzHeaders(), signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    return data;
+  } catch (e) {
+    return { ok: false, status: e.message };
+  }
+}
+
+async function toolzFetch(endpoint, domain) {
+  const base = toolzRailwayUrl();
+  if (!base) throw new Error('Railway URL not configured. Go to Settings → Infrastructure.');
+  const url = `${base}${endpoint}?domain=${encodeURIComponent(domain)}`;
+  const res  = await fetch(url, { headers: toolzHeaders(), signal: AbortSignal.timeout(35000) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+function toolzStatusBadge(h) {
+  if (!h) return '<span class="badge badge-y">Unknown</span>';
+  return h.ok
+    ? `<span class="badge badge-g">● Ready</span>`
+    : `<span class="badge badge-r">✕ ${esc(h.status || 'Error')}</span>`;
+}
+
+function toolzMetricCard(label, value, color) {
+  const c = color || 'var(--win-blue)';
+  return `<div class="stat" style="border-top:3px solid ${c}">
+    <div class="stat-v" style="color:${c}">${esc(value || '—')}</div>
+    <div class="stat-l">${label}</div>
+  </div>`;
+}
+
+function renderSeoToolz(el) {
+  if (!el) el = document.getElementById('page-seo_toolz');
+  if (!el) return;
+
+  el.innerHTML = `
+  <div class="page-title">🔬 SEO Toolz</div>
+  <div class="page-sub">// Moz Link Explorer via Railway · DA · PA · Backlinks · Spam Score · Anchors · Top Pages</div>
+
+  <!-- Config bar -->
+  <div class="card" style="margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <div class="fg" style="flex:1;min-width:220px;margin:0">
+        <label class="lbl">Railway URL</label>
+        <input type="text" id="toolz-railway-url" class="inp" placeholder="https://your-project.up.railway.app"
+          value="${esc(settingGet('railway_moz_url') || '')}"
+          oninput="settingSet('railway_moz_url', this.value.trim())">
+      </div>
+      <div class="fg" style="flex:0 0 180px;margin:0">
+        <label class="lbl">API Secret (optional)</label>
+        <input type="password" id="toolz-railway-secret" class="inp" placeholder="leave blank if none"
+          value="${esc(settingGet('railway_moz_secret') || '')}"
+          oninput="settingSet('railway_moz_secret', this.value.trim())">
+      </div>
+      <div style="padding-top:16px;display:flex;gap:6px">
+        <button class="btn btn-primary" onclick="toolzPingHealth()">⚡ Test Connection</button>
+        <button class="btn" onclick="toolzForceRefresh()">↺ Re-login</button>
+      </div>
+      <div id="toolz-health-badge" style="padding-top:16px">
+        <span class="badge badge-y">Not tested</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Domain input -->
+  <div class="card" style="margin-bottom:10px">
+    <div class="card-title">Domain Analysis</div>
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <div class="fg" style="flex:1;min-width:240px;margin:0">
+        <label class="lbl">Domain</label>
+        <input type="text" id="toolz-domain" class="inp" placeholder="example.com"
+          onkeydown="if(event.key==='Enter') toolzAnalyze()">
+      </div>
+      <button class="btn btn-primary" onclick="toolzAnalyze()">🔍 Analyze</button>
+      <button class="btn" onclick="toolzAnalyze('links')">🔗 Inbound Links</button>
+      <button class="btn" onclick="toolzAnalyze('anchors')">⚓ Anchors</button>
+      <button class="btn" onclick="toolzAnalyze('toppages')">📄 Top Pages</button>
+      <button class="btn" onclick="toolzAnalyze('spam')">🚫 Spam Score</button>
+    </div>
+    <div id="toolz-loading" style="display:none;margin-top:10px;font-family:var(--mono);color:var(--term-text);background:var(--term-bg);padding:8px 12px;border-radius:3px;font-size:11px">
+      ⏳ Fetching from Moz via Railway… this takes 10–25 seconds.
+    </div>
+    <div id="toolz-error" style="display:none;margin-top:8px" class="notice notice-err"></div>
+  </div>
+
+  <!-- Results: Overview metrics -->
+  <div id="toolz-overview" style="display:none" class="card">
+    <div class="card-title">📊 Domain Overview — <span id="toolz-res-domain" class="mono"></span></div>
+    <div class="grid4" style="margin-bottom:10px" id="toolz-metrics"></div>
+    <div style="font-size:9px;color:var(--win-text-muted);margin-top:4px">Source: Moz Link Explorer via ToolzBuy · <span id="toolz-ts"></span></div>
+  </div>
+
+  <!-- Results: Links table -->
+  <div id="toolz-links-wrap" style="display:none" class="card">
+    <div class="card-title">🔗 Inbound Links — <span id="toolz-links-domain" class="mono"></span> <span id="toolz-links-count" class="badge badge-b" style="margin-left:6px"></span></div>
+    <div class="tw" style="max-height:340px;overflow-y:auto">
+      <table id="toolz-links-table">
+        <thead><tr><th>Source URL</th><th>Anchor Text</th><th>PA</th><th>DA</th><th>Spam</th></tr></thead>
+        <tbody id="toolz-links-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Results: Anchors table -->
+  <div id="toolz-anchors-wrap" style="display:none" class="card">
+    <div class="card-title">⚓ Anchor Text Distribution — <span id="toolz-anchors-domain" class="mono"></span></div>
+    <div class="tw" style="max-height:340px;overflow-y:auto">
+      <table id="toolz-anchors-table">
+        <thead><tr><th>Anchor Text</th><th>Root Domains</th><th>Total Links</th></tr></thead>
+        <tbody id="toolz-anchors-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Results: Top Pages table -->
+  <div id="toolz-toppages-wrap" style="display:none" class="card">
+    <div class="card-title">📄 Top Pages by Links — <span id="toolz-toppages-domain" class="mono"></span></div>
+    <div class="tw" style="max-height:340px;overflow-y:auto">
+      <table id="toolz-toppages-table">
+        <thead><tr><th>URL</th><th>PA</th><th>Linking Domains</th><th>Links</th></tr></thead>
+        <tbody id="toolz-toppages-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Results: Spam -->
+  <div id="toolz-spam-wrap" style="display:none" class="card">
+    <div class="card-title">🚫 Spam Score — <span id="toolz-spam-domain" class="mono"></span></div>
+    <div id="toolz-spam-content"></div>
+  </div>
+
+  <!-- Setup guide (shown if no Railway URL) -->
+  <div id="toolz-setup-guide" class="card" style="margin-top:10px;${settingGet('railway_moz_url')?'display:none':''}">
+    <div class="card-title">🚀 Setup Guide</div>
+    <div style="font-family:var(--mono);font-size:10px;line-height:1.8;color:var(--win-text-dim)">
+      <b>Step 1:</b> Upload the <code>moz-scraper/</code> folder to GitHub<br>
+      <b>Step 2:</b> Go to <a href="https://railway.app" target="_blank">railway.app</a> → New Project → Deploy from GitHub repo<br>
+      <b>Step 3:</b> In Railway Variables, set:<br>
+      &nbsp;&nbsp;<code>TB_EMAIL</code> = your ToolzBuy email<br>
+      &nbsp;&nbsp;<code>TB_PASS</code> = your ToolzBuy password<br>
+      &nbsp;&nbsp;<code>ALLOWED_ORIGIN</code> = https://your-app.vercel.app<br>
+      &nbsp;&nbsp;<code>API_SECRET</code> = any random string (optional)<br>
+      <b>Step 4:</b> Copy your Railway public URL and paste it above<br>
+      <b>Step 5:</b> Click "Test Connection" — it should show <span style="color:var(--win-green)">● Ready</span>
+    </div>
+  </div>`;
+}
+
+async function toolzPingHealth() {
+  const badge = document.getElementById('toolz-health-badge');
+  if (badge) badge.innerHTML = '<span class="badge badge-y">Testing…</span>';
+  const h = await toolzCheckHealth();
+  if (badge) badge.innerHTML = toolzStatusBadge(h);
+  if (h.ok) {
+    toast('Railway connected ✓ — Session: ' + (h.status || 'ready'), 's');
+  } else {
+    toast('Railway error: ' + (h.status || 'unreachable'), 'e');
+  }
+}
+
+async function toolzForceRefresh() {
+  const base = toolzRailwayUrl();
+  if (!base) { toast('Set Railway URL first', 'w'); return; }
+  try {
+    toast('Sending re-login signal…', 'i');
+    const res = await fetch(base + '/session/refresh', {
+      method: 'POST', headers: toolzHeaders(), signal: AbortSignal.timeout(60000)
+    });
+    const d = await res.json();
+    toast(d.ok ? 'Session refreshed ✓' : 'Refresh failed: ' + d.error, d.ok ? 's' : 'e');
+    toolzPingHealth();
+  } catch (e) {
+    toast('Re-login failed: ' + e.message, 'e');
+  }
+}
+
+function toolzSetLoading(on) {
+  const el = document.getElementById('toolz-loading');
+  if (el) el.style.display = on ? 'block' : 'none';
+}
+
+function toolzSetError(msg) {
+  const el = document.getElementById('toolz-error');
+  if (!el) return;
+  if (msg) { el.textContent = '✕ ' + msg; el.style.display = 'block'; }
+  else      { el.style.display = 'none'; }
+}
+
+function toolzHideAll() {
+  ['toolz-overview','toolz-links-wrap','toolz-anchors-wrap','toolz-toppages-wrap','toolz-spam-wrap']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+  toolzSetError(null);
+}
+
+async function toolzAnalyze(type) {
+  type = type || 'overview';
+  const domain = (document.getElementById('toolz-domain')?.value || '').trim();
+  if (!domain) { toast('Enter a domain first', 'w'); return; }
+  if (!toolzRailwayUrl()) { toast('Set your Railway URL in the config bar above', 'w'); return; }
+
+  toolzHideAll();
+  toolzSetLoading(true);
+
+  try {
+    if (type === 'overview') {
+      const data = await toolzFetch('/moz', domain);
+      toolzSetLoading(false);
+      const ov = document.getElementById('toolz-overview');
+      if (ov) ov.style.display = 'block';
+      const dom = document.getElementById('toolz-res-domain');
+      if (dom) dom.textContent = data.domain || domain;
+      const ts = document.getElementById('toolz-ts');
+      if (ts) ts.textContent = data.ts || '';
+      const metrics = document.getElementById('toolz-metrics');
+      if (metrics) metrics.innerHTML = [
+        toolzMetricCard('Domain Authority', data.da, '#0a4dc4'),
+        toolzMetricCard('Page Authority',   data.pa, '#006600'),
+        toolzMetricCard('Spam Score',       data.spam ? data.spam + '%' : null, '#cc0000'),
+        toolzMetricCard('Linking Domains',  data.linkingDomains, '#997700'),
+      ].join('');
+
+    } else if (type === 'links') {
+      const data = await toolzFetch('/moz/links', domain);
+      toolzSetLoading(false);
+      const wrap = document.getElementById('toolz-links-wrap');
+      if (wrap) wrap.style.display = 'block';
+      document.getElementById('toolz-links-domain').textContent  = domain;
+      document.getElementById('toolz-links-count').textContent   = data.count + ' links';
+      const tbody = document.getElementById('toolz-links-body');
+      if (tbody) tbody.innerHTML = (data.links || []).map(l => `
+        <tr>
+          <td class="mono xs" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">
+            <a href="${esc(l.sourceUrl||'')}" target="_blank">${esc((l.sourceUrl||'—').slice(0,70))}</a>
+          </td>
+          <td class="xs">${esc(l.anchorText||'—')}</td>
+          <td class="mono xs" style="text-align:center">${esc(l.pa||'—')}</td>
+          <td class="mono xs" style="text-align:center">${esc(l.da||'—')}</td>
+          <td class="mono xs" style="text-align:center">${esc(l.spam||'—')}</td>
+        </tr>`).join('') || '<tr><td colspan="5" class="tm" style="text-align:center;padding:12px">No links returned</td></tr>';
+
+    } else if (type === 'anchors') {
+      const data = await toolzFetch('/moz/anchors', domain);
+      toolzSetLoading(false);
+      const wrap = document.getElementById('toolz-anchors-wrap');
+      if (wrap) wrap.style.display = 'block';
+      document.getElementById('toolz-anchors-domain').textContent = domain;
+      const tbody = document.getElementById('toolz-anchors-body');
+      if (tbody) tbody.innerHTML = (data.anchors || []).map(a => `
+        <tr>
+          <td class="xs">${esc(a.anchor||'—')}</td>
+          <td class="mono xs" style="text-align:center">${esc(a.rootDomains||'—')}</td>
+          <td class="mono xs" style="text-align:center">${esc(a.links||'—')}</td>
+        </tr>`).join('') || '<tr><td colspan="3" class="tm" style="text-align:center;padding:12px">No anchors returned</td></tr>';
+
+    } else if (type === 'toppages') {
+      const data = await toolzFetch('/moz/toppages', domain);
+      toolzSetLoading(false);
+      const wrap = document.getElementById('toolz-toppages-wrap');
+      if (wrap) wrap.style.display = 'block';
+      document.getElementById('toolz-toppages-domain').textContent = domain;
+      const tbody = document.getElementById('toolz-toppages-body');
+      if (tbody) tbody.innerHTML = (data.pages || []).map(p => `
+        <tr>
+          <td class="mono xs" style="max-width:300px;overflow:hidden;text-overflow:ellipsis">
+            <a href="${esc(p.url||'')}" target="_blank">${esc((p.url||'—').slice(0,80))}</a>
+          </td>
+          <td class="mono xs" style="text-align:center">${esc(p.pa||'—')}</td>
+          <td class="mono xs" style="text-align:center">${esc(p.linkingDomains||'—')}</td>
+          <td class="mono xs" style="text-align:center">${esc(p.links||'—')}</td>
+        </tr>`).join('') || '<tr><td colspan="4" class="tm" style="text-align:center;padding:12px">No pages returned</td></tr>';
+
+    } else if (type === 'spam') {
+      const data = await toolzFetch('/moz/spam', domain);
+      toolzSetLoading(false);
+      const wrap = document.getElementById('toolz-spam-wrap');
+      if (wrap) wrap.style.display = 'block';
+      document.getElementById('toolz-spam-domain').textContent = domain;
+      const content = document.getElementById('toolz-spam-content');
+      if (content) {
+        const score = data.spamScore || '—';
+        const flags = data.spamFlags || [];
+        const scoreNum = parseInt(score) || 0;
+        const col = scoreNum >= 60 ? '#cc0000' : scoreNum >= 30 ? '#997700' : '#006600';
+        content.innerHTML = `
+          <div class="grid4" style="margin-bottom:10px">
+            ${toolzMetricCard('Spam Score', score + (scoreNum?'%':''), col)}
+          </div>
+          ${flags.length ? `
+          <div class="card-title" style="margin-top:8px">Spam Flags</div>
+          <ul style="margin:6px 0 0 16px;font-size:11px;line-height:1.8;color:var(--win-text-dim)">
+            ${flags.map(f=>`<li>${esc(f)}</li>`).join('')}
+          </ul>` : '<div class="notice notice-info" style="margin-top:8px">No spam flags detected</div>'}`;
+      }
+    }
+
+    toast('Moz data loaded for ' + domain, 's');
+
+  } catch (e) {
+    toolzSetLoading(false);
+    toolzSetError(e.message);
+    toast('Toolz error: ' + e.message, 'e');
+  }
 }
 </script>
 </body>

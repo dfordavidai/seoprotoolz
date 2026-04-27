@@ -13042,9 +13042,10 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
   if(vercelBase){
     if(onProgress) onProgress(10,'Uploading to Archive.org via proxy...');
     try{
+      const _archSecret=(typeof settingGet==='function'?settingGet('vercel_secret'):'').trim()||'';
       const proxyRes = await fetch(vercelBase+'/api/proxy',{
         method:'POST',
-        headers:{'Content-Type':'application/json'},
+        headers:{'Content-Type':'application/json',...(_archSecret?{'X-API-Key':_archSecret}:{})},
         body:JSON.stringify({mode:'pdf-upload',platform:'archive',pdfBase64:b64,filename,title,keyword,accessKey,secretKey})
       });
       const txt = await proxyRes.text();
@@ -13077,10 +13078,10 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
     'x-archive-auto-make-bucket':'1',
   };
   let lastErr='';
-  for(let attempt=0; attempt<3; attempt++){
+  for(let attempt=0; attempt<5; attempt++){
     if(attempt>0){
-      const delay=Math.pow(2,attempt)*1500;
-      if(onProgress) onProgress(20+attempt*15,'Rate limited, retrying in '+(delay/1000)+'s...');
+      const delay=Math.pow(2,attempt)*1000; // 2s, 4s, 8s, 16s
+      if(onProgress) onProgress(20+attempt*10,'Archive.org SlowDown — retrying in '+(delay/1000)+'s (attempt '+(attempt+1)+'/5)...');
       await sleep(delay);
     }
     try{
@@ -13094,8 +13095,8 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
       }
       const errText=await res.text().catch(()=>'');
       lastErr='HTTP '+res.status+': '+errText.slice(0,150);
-      if(res.status===401||res.status===403) break; // bad keys — no point retrying
-      // 503 SlowDown → retry
+      if(res.status===401||res.status===403){ lastErr='Auth error — check your Archive.org S3 keys (Settings \u2192 Archive.org Accounts)'; break; }
+      // 503 SlowDown or 429 → retry with backoff
     }catch(e){ lastErr=e.message; break; }
   }
   throw new Error('Archive.org upload failed: '+lastErr);

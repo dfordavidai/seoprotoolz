@@ -13096,38 +13096,48 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
         if(onProgress) onProgress(100,'\u2705 Live! \u2192 '+d.url);
         return { url:d.url, identifier:d.identifier||'' };
       }
-      throw new Error(d.error||'Proxy upload failed');
+      // Surface the real proxy error instead of silently falling through
+      if(onProgress) onProgress(40,'Proxy error: '+(d.error||'unknown')+'  — trying direct upload...');
+      console.warn('[Archive] Proxy failed:',d.error||d);
+      // fall through to Strategy 2
     }catch(proxyErr){
-      if(onProgress) onProgress(40,'Proxy failed, trying direct upload...');
+      if(onProgress) onProgress(40,'Proxy unreachable ('+proxyErr.message+') — trying direct upload...');
+      console.warn('[Archive] Proxy fetch error:',proxyErr);
       // fall through to Strategy 2
     }
   }
 
   // ── Strategy 2: Direct browser S3 PUT ─────────────────────────────────────
-  // Note: browser cannot set Content-Length — may get 503 SlowDown on first attempt.
-  // Retry up to 3 times with backoff.
+  // IMPORTANT: browsers block setting Content-Length directly.
+  // Sending a Blob body with explicit size makes the browser calculate and send
+  // Content-Length automatically — this is what archive.org needs to not 503.
   if(onProgress) onProgress(20,'Uploading directly to Archive.org S3...');
   const identifier = slug(keyword)+'-'+(Date.now().toString(36));
   const uploadUrl  = 'https://s3.us.archive.org/'+identifier+'/'+encodeURIComponent(filename);
+
+  // Wrap raw bytes in a Blob — this causes fetch() to set Content-Length for us
+  const pdfBlob = new Blob([pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes)], {type:'application/pdf'});
+
   const putHeaders = {
     'Authorization':'LOW '+accessKey+':'+secretKey,
-    'Content-Type':'application/pdf',
     'x-archive-meta-title':title,
     'x-archive-meta-subject':keyword,
     'x-archive-meta-description':'Comprehensive guide on '+keyword+'. SEO-optimized resource.',
     'x-archive-meta-mediatype':'texts',
     'x-archive-meta-collection':'opensource',
     'x-archive-auto-make-bucket':'1',
+    // Do NOT set Content-Type here — let the Blob type propagate so browser
+    // correctly sets both Content-Type AND Content-Length in the same request
   };
   let lastErr='';
-  for(let attempt=0; attempt<5; attempt++){
+  for(let attempt=0; attempt<4; attempt++){
     if(attempt>0){
-      const delay=Math.pow(2,attempt)*1000; // 2s, 4s, 8s, 16s
-      if(onProgress) onProgress(20+attempt*10,'Archive.org SlowDown — retrying in '+(delay/1000)+'s (attempt '+(attempt+1)+'/5)...');
+      const delay=[3000,6000,12000][attempt-1]||12000;
+      if(onProgress) onProgress(30+attempt*10,'Rate limited — retrying in '+(delay/1000)+'s (attempt '+(attempt+1)+'/4)...');
       await sleep(delay);
     }
     try{
-      const res = await fetch(uploadUrl,{method:'PUT',headers:putHeaders,body:pdfBytes});
+      const res = await fetch(uploadUrl,{method:'PUT',headers:putHeaders,body:pdfBlob});
       if(res.ok||res.status===200){
         if(onProgress) onProgress(90,'Processing...');
         await sleep(2000);
@@ -13136,8 +13146,10 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
         return { url:liveUrl, identifier };
       }
       const errText=await res.text().catch(()=>'');
-      lastErr='HTTP '+res.status+': '+errText.slice(0,150);
+      lastErr='HTTP '+res.status+': '+errText.slice(0,200);
+      console.warn('[Archive] PUT attempt '+(attempt+1)+' failed:',lastErr);
       if(res.status===401||res.status===403){ lastErr='Auth error — check your Archive.org S3 keys (Settings \u2192 Archive.org Accounts)'; break; }
+      if(res.status===400){ lastErr='Bad request — identifier may already exist or title contains invalid chars. Try again.'; break; }
       // 503 SlowDown or 429 → retry with backoff
     }catch(e){ lastErr=e.message; break; }
   }

@@ -13070,7 +13070,7 @@ const PDF_PLATFORMS = [
 async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, onProgress){
   if(!accessKey||!secretKey) throw new Error('Archive.org S3 keys missing — add them in Settings (archive.org/account/s3.php)');
 
-  const filename = slug(title)+'.pdf';
+  const filename = slug(title).slice(0,80)+'.pdf'; // Archive.org chokes on very long filenames
 
   // Base64-encode PDF for proxy transport
   const bytes=new Uint8Array(pdfBytes);
@@ -13112,7 +13112,11 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
   // Sending a Blob body with explicit size makes the browser calculate and send
   // Content-Length automatically — this is what archive.org needs to not 503.
   if(onProgress) onProgress(20,'Uploading directly to Archive.org S3...');
-  const identifier = slug(keyword)+'-'+(Date.now().toString(36));
+  // Archive.org identifier rules: max ~80 chars, lowercase, no leading numbers,
+  // must be globally unique. Truncate keyword slug to 40 chars + timestamp + random suffix.
+  const _kwSlug = slug(keyword).slice(0,40).replace(/-+$/,'');
+  const _rand   = Math.random().toString(36).slice(2,6); // 4-char random suffix
+  const identifier = (_kwSlug||'doc')+'-'+(Date.now().toString(36))+'-'+_rand;
   const uploadUrl  = 'https://s3.us.archive.org/'+identifier+'/'+encodeURIComponent(filename);
 
   // Wrap raw bytes in a Blob — this causes fetch() to set Content-Length for us

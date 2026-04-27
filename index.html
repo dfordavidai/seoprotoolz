@@ -12915,24 +12915,66 @@ function _pdfStateInit(){
 }
 
 /* ── PDF PERSISTENCE ── */
+function _pdfJobToSaveable(j){
+  return {
+    id:j.id, keyword:j.keyword, title:j.title, template:j.template,
+    density:j.density, backlinks:j.backlinks, color:j.color,
+    status:j.status, statusMsg:j.statusMsg, ts:j.ts,
+    wordCount:j.wordCount, lsiUsed:j.lsiUsed, hasSchema:j.hasSchema,
+    hasTOC:j.hasTOC, titleOptimized:j.titleOptimized, aiGenerated:j.aiGenerated,
+    seoScore:j.seoScore, uploadedTo:j.uploadedTo||[], log:j.log||[],
+    imgLink:j.imgLink||'',
+    pdfB64: (j.pdfBytes && j.pdfBytes.byteLength < 3145728)
+      ? (()=>{ try{ const b=new Uint8Array(j.pdfBytes); let s=''; const c=8192; for(let i=0;i<b.length;i+=c) s+=btoa(String.fromCharCode(...b.subarray(i,i+c))); return s; }catch(e){ return null; } })()
+      : null
+  };
+}
+
 function pdfSaveJobs(){
   try{
-    // Store metadata only (no pdfBytes — too large for localStorage)
-    const saveable = PDF_STATE.jobs.map(j=>({
-      id:j.id, keyword:j.keyword, title:j.title, template:j.template,
-      density:j.density, backlinks:j.backlinks, color:j.color,
-      status:j.status, statusMsg:j.statusMsg, ts:j.ts,
-      wordCount:j.wordCount, lsiUsed:j.lsiUsed, hasSchema:j.hasSchema,
-      hasTOC:j.hasTOC, titleOptimized:j.titleOptimized, aiGenerated:j.aiGenerated,
-      seoScore:j.seoScore, uploadedTo:j.uploadedTo||[], log:j.log||[],
-      imgLink:j.imgLink||'',
-      // Store pdfBytes as base64 if small enough (<2MB)
-      pdfB64: (j.pdfBytes && j.pdfBytes.byteLength < 2097152)
-        ? (()=>{ try{ const b=new Uint8Array(j.pdfBytes); let s=''; const c=8192; for(let i=0;i<b.length;i+=c) s+=btoa(String.fromCharCode(...b.subarray(i,i+c))); return s; }catch(e){ return null; } })()
-        : null
-    }));
+    const saveable = PDF_STATE.jobs.map(_pdfJobToSaveable);
     localStorage.setItem('pdf_state_jobs_v2', JSON.stringify(saveable));
-  }catch(e){ console.warn('pdfSaveJobs:', e.message); }
+  }catch(e){ console.warn('pdfSaveJobs localStorage:', e.message); }
+  // Async Supabase sync — fire and forget
+  _pdfSupabaseSync().catch(e=>console.warn('pdfSaveJobs supabase:', e.message));
+}
+
+async function _pdfSupabaseSync(){
+  if(!supaUrl()||!supaKey()) return;
+  const prefix = supaPrefix();
+  const table = prefix + 'pdf_jobs';
+  const rows = PDF_STATE.jobs.map(_pdfJobToSaveable);
+  if(!rows.length) return;
+  // True upsert — one batch call, no looping
+  await supaFetch(`/rest/v1/${table}`, 'POST', rows, false, {'Prefer':'resolution=merge-duplicates,return=minimal'})
+    .catch(e=>console.warn('_pdfSupabaseSync upsert:', e.message));
+}
+
+async function _pdfSupabaseSyncOne(j){
+  if(!supaUrl()||!supaKey()) return;
+  const prefix = supaPrefix();
+  const table = prefix + 'pdf_jobs';
+  const row = _pdfJobToSaveable(j);
+  await supaFetch(`/rest/v1/${table}`, 'POST', [row], false, {'Prefer':'resolution=merge-duplicates,return=minimal'})
+    .catch(e=>console.warn('_pdfSupabaseSyncOne:', e.message));
+}
+
+async function pdfLoadJobsFromSupabase(){
+  if(!supaUrl()||!supaKey()) return false;
+  try{
+    const prefix = supaPrefix();
+    const rows = await supaFetch(`/rest/v1/${prefix}pdf_jobs?order=ts.desc&limit=200`, 'GET', null, false);
+    if(!Array.isArray(rows)||!rows.length) return false;
+    // Restore pdfBytes from pdfB64
+    const jobs = rows.map(j=>{
+      let pdfBytes=null;
+      if(j.pdfB64){ try{ const bin=atob(j.pdfB64); const buf=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) buf[i]=bin.charCodeAt(i); pdfBytes=buf.buffer; }catch(e){} }
+      return {...j, pdfBytes, sections:[]};
+    });
+    PDF_STATE.jobs = jobs;
+    localStorage.setItem('pdf_state_jobs_v2', JSON.stringify(rows));
+    return true;
+  }catch(e){ console.warn('pdfLoadJobsFromSupabase:', e.message); return false; }
 }
 
 function pdfLoadJobs(){
@@ -14432,10 +14474,12 @@ function pdfRenderQueue(){
   const tbody=document.getElementById('pdf-queue-tbody');
   if(!tbody) return;
   if(!PDF_STATE.jobs.length){
-    tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet — build your first PDF above.</td></tr>';
+    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet — build your first PDF above.</td></tr>';
+    _pdfUpdateBulkBtn();
     return;
   }
   tbody.innerHTML=PDF_STATE.jobs.map(job=>{
+    const blastable=job.status==='ready'||job.status==='live'||job.status==='manual';
     const statusMap={
       building:'<span class="badge badge-b"><span class="spinner"></span> '+esc(job.statusMsg||'Building')+'</span>',
       ready:'<span class="badge badge-g">✅ Ready</span>',
@@ -14446,6 +14490,7 @@ function pdfRenderQueue(){
     const score=job.seoScore;
     const scoreColor=score?score.score>=80?'badge-g':score.score>=60?'badge-b':'badge-y':'';
     return `<tr>
+      <td style="text-align:center">${blastable?`<input type="checkbox" class="pdf-job-chk" data-jid="${job.id}" onchange="_pdfUpdateBulkBtn()" title="Select for bulk blast">`:'<span style="color:var(--muted2)">—</span>'}</td>
       <td class="mono xs">${esc(job.ts)}</td>
       <td><div style="font-weight:700;font-size:12px">${esc(job.keyword)}</div><div class="xs tm" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(job.title)}</div></td>
       <td>${statusMap[job.status]||esc(job.status)}</td>
@@ -14453,7 +14498,7 @@ function pdfRenderQueue(){
       <td>${score?`<span class="badge ${scoreColor}">${score.score}/100</span>`:'—'}</td>
       <td><span class="badge badge-p">${esc(job.template)}</span></td>
       <td style="white-space:nowrap">
-        ${job.status==='ready'||job.status==='live'||job.status==='manual'?`<button class="btn btn-primary btn-xs" onclick="showBlastPicker('${job.id}')">🚀 Blast</button>`:'' }
+        ${blastable?`<button class="btn btn-primary btn-xs" onclick="showBlastPicker('${job.id}')">🚀 Blast</button>`:''}
         ${job.pdfBytes?`<button class="btn btn-blue btn-xs" onclick="pdfPreviewJob('${job.id}')">👁</button>
         <button class="btn btn-ghost btn-xs" onclick="pdfDownloadJob('${job.id}')">⬇</button>`:''}
         ${job.uploadedTo&&job.uploadedTo.length?`<button class="btn btn-primary btn-xs" style="background:var(--win-green)" onclick="pdfShowBlastResults('${job.id}')">🔗 Results</button><button class="btn btn-ghost btn-xs" onclick="pdfExportBlastResults('${job.id}')">📥</button>`:''}
@@ -14461,6 +14506,7 @@ function pdfRenderQueue(){
       </td>
     </tr>`;
   }).join('');
+  _pdfUpdateBulkBtn();
 }
 
 function pdfUpdateStats(){
@@ -14473,6 +14519,192 @@ function pdfUpdateStats(){
   if(el('pdf-stat-ready'))el('pdf-stat-ready').textContent=r;
   if(el('pdf-stat-live')) el('pdf-stat-live').textContent=l;
   if(el('pdf-stat-words'))el('pdf-stat-words').textContent=w.toLocaleString();
+}
+
+/* ── BULK SELECT + BLAST ── */
+function _pdfGetCheckedIds(){
+  return [...document.querySelectorAll('.pdf-job-chk:checked')].map(c=>c.dataset.jid);
+}
+
+function _pdfUpdateBulkBtn(){
+  const ids=_pdfGetCheckedIds();
+  const btn=document.getElementById('bulk-blast-btn');
+  const cnt=document.getElementById('bulk-blast-count');
+  if(!btn) return;
+  btn.style.display=ids.length?'':'none';
+  if(cnt) cnt.textContent=ids.length;
+  // sync select-all checkbox state
+  const allChks=document.querySelectorAll('.pdf-job-chk');
+  const sa=document.getElementById('pdf-select-all');
+  if(sa && allChks.length){
+    sa.indeterminate=ids.length>0&&ids.length<allChks.length;
+    sa.checked=ids.length===allChks.length&&allChks.length>0;
+  }
+}
+
+function pdfToggleSelectAll(checked){
+  document.querySelectorAll('.pdf-job-chk').forEach(c=>{ c.checked=checked; });
+  _pdfUpdateBulkBtn();
+}
+
+function showBulkBlastPicker(){
+  const ids=_pdfGetCheckedIds();
+  if(!ids.length){pdfToast('Tick at least one job first','warn');return;}
+  const jobs=ids.map(id=>PDF_STATE.jobs.find(j=>j.id===id)).filter(Boolean);
+  const noBytes=jobs.filter(j=>!j.pdfBytes);
+  if(noBytes.length){pdfToast(`${noBytes.length} job(s) have no built PDF — they will be skipped`,'warn');}
+
+  const modal=document.createElement('div');
+  modal.className='modal-overlay'; modal.id='pdf-bulk-blast-picker';
+  modal.onclick=e=>{if(e.target===modal)modal.remove();};
+
+  const chips=PDF_PLATFORMS.map(p=>`<div class="chip pdf-bulk-blast-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on')" title="${p.note}">
+    ${p.icon} ${p.name} <span class="mono" style="font-size:8px">DA${p.da}</span>
+  </div>`).join('');
+
+  const credInputs=PDF_PLATFORMS.map(p=>{
+    if(p.id==='archive') return `
+      <div class="fg" style="margin-bottom:8px" data-cred-pid="archive">
+        <label class="lbl">🏛️ Archive.org — S3 Keys</label>
+        <div class="grid2" style="gap:6px">
+          <input type="text" id="bk-cred-archive-access" placeholder="Access Key" value="${PDF_STATE.archiveAccessKey||''}" style="font-size:10px;font-family:var(--mono)">
+          <input type="password" id="bk-cred-archive-secret" placeholder="Secret Key" value="${PDF_STATE.archiveSecretKey||''}" style="font-size:10px;font-family:var(--mono)">
+        </div>
+      </div>`;
+    if(p.id==='issuu') return `
+      <div class="fg" style="margin-bottom:8px" data-cred-pid="issuu">
+        <label class="lbl">📰 Issuu — API Token</label>
+        <input type="password" id="bk-cred-issuu-token" placeholder="Issuu API token" style="font-size:10px;font-family:var(--mono);width:100%">
+      </div>`;
+    return `
+      <div class="fg" style="margin-bottom:8px" data-cred-pid="${p.id}">
+        <label class="lbl">${p.icon} ${p.name} Cookie</label>
+        <input type="password" id="bk-cred-${p.id}-cookie" placeholder="Paste session cookie string" style="font-size:10px;font-family:var(--mono);width:100%">
+      </div>`;
+  }).join('');
+
+  modal.innerHTML=`<div class="modal-box" style="min-width:640px;max-width:96vw;max-height:88vh;overflow-y:auto">
+    <div class="modal-title">🚀 Bulk Blast — ${jobs.length} PDF${jobs.length!==1?'s':''}
+      <button class="btn btn-ghost btn-xs" onclick="document.getElementById('pdf-bulk-blast-picker')?.remove()">✕</button>
+    </div>
+    <div class="notice notice-info" style="font-size:10px;margin-bottom:8px">
+      <strong>${jobs.length} PDFs selected.</strong> Each will be blasted sequentially to all chosen platforms. Results shown live.
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-bulk-blast-chip').forEach(c=>c.classList.add('on'))">All</button>
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-bulk-blast-chip').forEach(c=>c.classList.remove('on'))">None</button>
+      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-bulk-blast-chip').forEach(c=>c.classList.toggle('on',${JSON.stringify(PDF_PLATFORMS.filter(p=>p.free).map(p=>p.id))}.includes(c.dataset.pid)))">Free Only</button>
+    </div>
+    <div class="chips" style="max-height:140px;overflow-y:auto;margin-bottom:10px">${chips}</div>
+    <div style="font-size:11px;font-weight:700;padding:4px 8px;background:var(--win-blue);color:#fff;margin-bottom:8px">🔑 Credentials (shared across all blasts)</div>
+    <div style="max-height:260px;overflow-y:auto">${credInputs}</div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="document.getElementById('pdf-bulk-blast-picker')?.remove()">Cancel</button>
+      <button class="btn btn-primary" style="min-width:160px" onclick="_runBulkBlast(${JSON.stringify(ids)})">🚀 Blast All ${jobs.length} PDFs</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+async function _runBulkBlast(jobIds){
+  const sel=[...document.querySelectorAll('.pdf-bulk-blast-chip.on')].map(c=>c.dataset.pid);
+  if(!sel.length){pdfToast('Select at least one platform','warn');return;}
+
+  // Collect creds once
+  const creds={};
+  creds.archive={
+    accessKey:(document.getElementById('bk-cred-archive-access')||{value:''}).value.trim()||PDF_STATE.archiveAccessKey||'',
+    secretKey:(document.getElementById('bk-cred-archive-secret')||{value:''}).value.trim()||PDF_STATE.archiveSecretKey||'',
+  };
+  creds.issuu={apiToken:(document.getElementById('bk-cred-issuu-token')||{value:''}).value.trim()};
+  PDF_PLATFORMS.forEach(p=>{
+    if(p.id==='archive'||p.id==='issuu') return;
+    const el=document.getElementById('bk-cred-'+p.id+'-cookie');
+    if(el) creds[p.id]={cookie:el.value.trim()};
+  });
+
+  document.getElementById('pdf-bulk-blast-picker')?.remove();
+
+  // Build queue of jobs with pdfBytes
+  const jobs=jobIds.map(id=>PDF_STATE.jobs.find(j=>j.id===id)).filter(j=>j&&j.pdfBytes);
+  if(!jobs.length){pdfToast('No valid built PDFs in selection','warn');return;}
+
+  // Show bulk progress modal
+  const modal=document.createElement('div');
+  modal.className='modal-overlay'; modal.id='pdf-bulk-progress-modal';
+  modal.innerHTML=`<div class="modal-box" style="min-width:680px;max-width:96vw;max-height:90vh;overflow-y:auto">
+    <div class="modal-title">🚀 Bulk Blast Progress — ${jobs.length} PDFs
+      <button class="btn btn-ghost btn-xs" onclick="document.getElementById('pdf-bulk-progress-modal')?.remove()">✕</button>
+    </div>
+    <div id="bulk-blast-job-list">
+      ${jobs.map(j=>`<div id="bkjob-${j.id}" style="margin-bottom:12px;padding:10px;border:1px solid var(--border);border-radius:4px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span id="bkjob-status-${j.id}" class="badge badge-y"><span class="spinner"></span> Queued</span>
+          <strong style="font-size:11px">${esc(j.keyword)}</strong>
+          <span class="mono" style="font-size:10px;color:var(--muted2)">${esc(j.title).substring(0,60)}</span>
+        </div>
+        <div id="bkjob-rows-${j.id}" style="display:none">
+          ${sel.map(pid=>{const p=PDF_PLATFORMS.find(x=>x.id===pid); return p?`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--win-dark);font-size:10px">
+            <span>${p.icon}</span><span style="flex:1">${p.name}</span>
+            <span id="bkrow-status-${j.id}-${pid}" class="badge badge-y" style="font-size:9px"><span class="spinner"></span> Waiting</span>
+            <span id="bkrow-url-${j.id}-${pid}" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px"></span>
+          </div>`:'';}).join('')}
+        </div>
+      </div>`).join('')}
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="document.getElementById('pdf-bulk-progress-modal')?.remove()">Close</button>
+      <button class="btn btn-primary" id="bulk-export-all-btn" style="display:none" onclick="_bulkExportAllResults(${JSON.stringify(jobIds)})">📥 Export All Results</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+
+  const vercelBase=PDF_STATE.vercelBase;
+  let totalLive=0, totalPlatforms=0;
+
+  for(const job of jobs){
+    // Mark job as blasting
+    const jStatusEl=document.getElementById('bkjob-status-'+job.id);
+    const jRowsEl=document.getElementById('bkjob-rows-'+job.id);
+    if(jStatusEl) jStatusEl.innerHTML='<span class="badge badge-b"><span class="spinner"></span> Blasting</span>';
+    if(jRowsEl) jRowsEl.style.display='block';
+
+    const results=await pdfBlastPlatformsV2(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{
+      const sEl=document.getElementById(`bkrow-status-${job.id}-${pid}`);
+      const uEl=document.getElementById(`bkrow-url-${job.id}-${pid}`);
+      if(!sEl) return;
+      const map={live:'<span class="badge badge-g" style="font-size:9px">✅ Live</span>',uploading:'<span class="badge badge-b" style="font-size:9px"><span class="spinner"></span> Uploading</span>',manual:'<span class="badge badge-y" style="font-size:9px">📋 Manual</span>',error:'<span class="badge badge-r" style="font-size:9px">❌ Error</span>'};
+      sEl.innerHTML=map[status]||sEl.innerHTML;
+      if(uEl && url) uEl.innerHTML=status==='live'?`<a href="${esc(url)}" target="_blank" style="color:var(--accent)">${esc(url).substring(0,40)}</a>`:esc(url||msg||'').substring(0,40);
+    });
+
+    job.uploadedTo=results;
+    job.status=results.some(r=>r.status==='live')?'live':'manual';
+    pdfSaveJobs(); pdfRenderQueue(); pdfUpdateStats();
+
+    const live=results.filter(r=>r.status==='live').length;
+    totalLive+=live; totalPlatforms+=results.length;
+    if(jStatusEl) jStatusEl.innerHTML=live>0?`<span class="badge badge-g">✅ ${live}/${results.length} Live</span>`:`<span class="badge badge-y">📋 Done ${live}/${results.length}</span>`;
+  }
+
+  pdfToast(`Bulk blast done — ${totalLive}/${totalPlatforms} platform uploads live across ${jobs.length} PDFs`,'success');
+  const exportBtn=document.getElementById('bulk-export-all-btn');
+  if(exportBtn) exportBtn.style.display='';
+}
+
+function _bulkExportAllResults(jobIds){
+  const rows=['PDF Title,Keyword,Platform,DA,Status,URL,Note'];
+  jobIds.forEach(id=>{
+    const job=PDF_STATE.jobs.find(j=>j.id===id);
+    if(!job||!job.uploadedTo) return;
+    job.uploadedTo.forEach(r=>{
+      rows.push(`"${(job.title||'').replace(/"/g,'""')}","${(job.keyword||'').replace(/"/g,'""')}","${r.name}","${r.da}","${r.status}","${r.url||''}","${r.note||''}"`);
+    });
+  });
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
+  a.download='bulk-blast-results-'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
 }
 
 function pdfToast(msg,type='info'){
@@ -14758,10 +14990,11 @@ function renderPDFTools(el){
       <div class="card" style="margin-top:0">
         <div class="card-title">📋 Job Queue
           <button class="btn btn-ghost btn-xs" style="margin-left:auto" onclick="pdfExportAllCSV()">📥 Export All CSV</button>
+          <button class="btn btn-primary btn-xs" id="bulk-blast-btn" style="display:none" onclick="showBulkBlastPicker()">🚀 Blast Selected (<span id="bulk-blast-count">0</span>)</button>
         </div>
         <div class="tw" style="overflow-x:auto"><table>
-          <thead><tr><th>Time</th><th>Keyword / Title</th><th>Status</th><th>Words</th><th>SEO Score</th><th>Template</th><th>Actions</th></tr></thead>
-          <tbody id="pdf-queue-tbody"><tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet.</td></tr></tbody>
+          <thead><tr><th style="width:28px"><input type="checkbox" id="pdf-select-all" title="Select all blastable" onchange="pdfToggleSelectAll(this.checked)"></th><th>Time</th><th>Keyword / Title</th><th>Status</th><th>Words</th><th>SEO Score</th><th>Template</th><th>Actions</th></tr></thead>
+          <tbody id="pdf-queue-tbody"><tr><td colspan="8" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet.</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -21916,10 +22149,10 @@ function supaHeaders(service=false){
   };
 }
 
-async function supaFetch(endpoint, method='GET', body=null, useService=false){
+async function supaFetch(endpoint, method='GET', body=null, useService=false, extraHeaders={}){
   const url = supaUrl();
   if(!url || !supaKey()) throw new Error('Supabase not configured');
-  const opts = { method, headers: supaHeaders(useService) };
+  const opts = { method, headers: {...supaHeaders(useService), ...extraHeaders} };
   if(body) opts.body = JSON.stringify(body);
   const res = await fetch(url + endpoint, opts);
   if(!res.ok){

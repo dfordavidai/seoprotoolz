@@ -1,5 +1,5 @@
 /**
- * api/proxy.js — Universal Server-Side Proxy
+ * api/proxy.js — Universal Server-Side Proxy  v2.0
  * Routes ALL browser requests through Vercel's servers, eliminating CORS.
  * Supports cookie threading for CSRF-protected sites (rentry.co, etc).
  * Supports arbitrary headers including auth tokens for API sites.
@@ -7,27 +7,78 @@
  * GET  /api/proxy?url=<encoded>&cookies=<encoded>   — simple GET proxy
  * POST /api/proxy
  * Body: {
- *   url        string   — Target URL to fetch
- *   method     string   — HTTP method (default: GET)
- *   headers    object   — Request headers to forward
- *   body       string   — Request body (for POST/PUT)
- *   cookies    string   — Cookie string to inject (for CSRF threading)
- *   timeout    number   — Timeout in seconds (default: 30)
- *   returnCookies boolean — Whether to return Set-Cookie values
+ *   url           string   — Target URL to fetch
+ *   method        string   — HTTP method (default: GET)
+ *   headers       object   — Request headers to forward
+ *   body          string   — Request body (for POST/PUT)
+ *   cookies       string   — Cookie string to inject (for CSRF threading)
+ *   timeout       number   — Timeout in MILLISECONDS (default: 30000)
+ *                           NOTE: also accepts seconds for back-compat (auto-detected)
+ *   returnCookies boolean  — Whether to return Set-Cookie values (default: true)
+ *   returnBody    boolean  — Always include raw HTML body string (default: true)
+ *   followRedirects boolean — Follow redirects (default: true, always on)
+ *   maxBodyBytes  number   — Max response body size in bytes (default: 3MB)
  * }
  * Response: {
  *   ok          boolean
  *   status      number
- *   status_code number  — alias of status (frontend reads this field)
+ *   status_code number    — alias of status (all frontend paths read this)
  *   redirected  boolean
- *   text        string  — Response body as text
- *   body        object  — Response body parsed as JSON (if applicable)
- *   cookies     string  — All Set-Cookie values joined
- *   finalUrl    string  — Final URL after redirects
+ *   text        string    — Response body as raw text (ALWAYS present)
+ *   body        string    — ALIAS of text (raw HTML/text, NOT parsed JSON)
+ *                           ← SCANNER READS THIS — must be the raw string
+ *   bodyJson    object    — Parsed JSON if response was JSON, else null
+ *   cookies     string    — All Set-Cookie values joined
+ *   finalUrl    string    — Final URL after redirects
+ *   redirects   string[]  — Redirect chain
+ *   truncated   boolean   — True if body was cut at maxBodyBytes
  * }
+ *
+ * BREAKING CHANGE from v1: `body` is now the raw text string, not parsed JSON.
+ * Parsed JSON is available in `bodyJson`. All existing frontend code that reads
+ * `body` for upload scanner purposes now works correctly.
  */
 
 export const config = { maxDuration: 60 };
+
+// ── ROTATING USER-AGENTS (realistic browser fingerprints) ────────────────────
+// Sites like UCSF, ResearchGate, Academia block generic bot UAs.
+// Rotate per-request to avoid pattern detection.
+
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0',
+];
+
+function randomUA() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+// Default browser-realistic headers for HTML page fetches
+function browserHeaders(ua, cookies) {
+  const h = {
+    'User-Agent':      ua || randomUA(),
+    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Cache-Control':   'no-cache',
+    'Pragma':          'no-cache',
+    'Sec-Fetch-Dest':  'document',
+    'Sec-Fetch-Mode':  'navigate',
+    'Sec-Fetch-Site':  'none',
+    'Upgrade-Insecure-Requests': '1',
+  };
+  if (cookies) h['Cookie'] = cookies;
+  return h;
+}
+
+// Max body size to prevent Vercel 4.5MB response limit crashes (default 3MB)
+const DEFAULT_MAX_BODY_BYTES = 3 * 1024 * 1024;
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 
@@ -311,7 +362,7 @@ export default async function handler(req, res) {
   if (!isAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
 
   // Parse request — GET uses query params, POST uses JSON body
-  let url, method, reqHeaders, reqBody, incomingCookies, timeout, returnCookies;
+  let url, method, reqHeaders, reqBody, incomingCookies, timeoutMs, returnCookies, maxBodyBytes;
 
   if (req.method === 'GET') {
     url             = req.query.url || '';
@@ -319,8 +370,10 @@ export default async function handler(req, res) {
     reqHeaders      = {};
     reqBody         = null;
     incomingCookies = req.query.cookies || '';
-    timeout         = parseInt(req.query.timeout) || 30;
+    // GET params: assume seconds for back-compat
+    timeoutMs       = (parseInt(req.query.timeout) || 30) * 1000;
     returnCookies   = true;
+    maxBodyBytes    = DEFAULT_MAX_BODY_BYTES;
   } else {
     let body = {};
     try {
@@ -336,8 +389,22 @@ export default async function handler(req, res) {
     reqHeaders      = body.headers || {};
     reqBody         = body.body || null;
     incomingCookies = body.cookies || '';
-    timeout         = body.timeout || 30;
     returnCookies   = body.returnCookies !== undefined ? body.returnCookies : true;
+    maxBodyBytes    = body.maxBodyBytes || DEFAULT_MAX_BODY_BYTES;
+
+    // ── Timeout: auto-detect ms vs seconds ──────────────────────────────────
+    // New scanner sends ms (e.g. 15000). Old callers sent seconds (e.g. 30).
+    // Heuristic: if value > 300, treat as ms; otherwise multiply by 1000.
+    const rawTimeout = body.timeout;
+    if (rawTimeout == null) {
+      timeoutMs = 30000;
+    } else if (rawTimeout > 300) {
+      timeoutMs = rawTimeout; // already milliseconds
+    } else {
+      timeoutMs = rawTimeout * 1000; // seconds → ms
+    }
+    // Hard cap: Vercel maxDuration is 60s, leave 5s buffer for response write
+    timeoutMs = Math.min(timeoutMs, 55000);
   }
 
   if (!url) return res.status(400).json({ error: 'url is required' });
@@ -351,34 +418,36 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Only http/https URLs allowed' });
   }
 
-  // Build fetch headers
-  const fetchHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    ...reqHeaders,
-  };
+  // ── Build fetch headers ───────────────────────────────────────────────────
+  // Use browser-realistic defaults for GET (HTML fetches), merge caller overrides.
+  const isHtmlFetch = method.toUpperCase() === 'GET' && !reqHeaders['Content-Type'];
+  const baseHeaders = isHtmlFetch
+    ? browserHeaders(reqHeaders['User-Agent'], incomingCookies)
+    : {
+        'User-Agent': reqHeaders['User-Agent'] || randomUA(),
+        'Accept':     reqHeaders['Accept'] || '*/*',
+        ...(incomingCookies ? { Cookie: incomingCookies } : {}),
+      };
 
-  if (incomingCookies) {
-    fetchHeaders['Cookie'] = incomingCookies;
+  const fetchHeaders = { ...baseHeaders, ...reqHeaders };
+
+  // Remove hop-by-hop / problematic headers
+  for (const h of ['host', 'Host', 'origin', 'Origin', 'connection', 'Connection', 'content-length', 'Content-Length']) {
+    delete fetchHeaders[h];
   }
 
-  // Remove problematic hop-by-hop headers
-  delete fetchHeaders['host'];
-  delete fetchHeaders['Host'];
-  delete fetchHeaders['origin'];
-  delete fetchHeaders['Origin'];
-
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout * 1000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   let fetchResponse;
   const redirectHistory = [];
 
   try {
-    let currentUrl          = url;
-    let accumulatedCookies  = incomingCookies;
-    let currentMethod       = method.toUpperCase();
-    let currentBody         = reqBody;
-    let redirectCount       = 0;
+    let currentUrl         = url;
+    let accumulatedCookies = incomingCookies;
+    let currentMethod      = method.toUpperCase();
+    let currentBody        = reqBody;
+    let redirectCount      = 0;
 
     while (redirectCount < 10) {
       const opts = {
@@ -394,7 +463,7 @@ export default async function handler(req, res) {
 
       fetchResponse = await fetch(currentUrl, opts);
 
-      // Accumulate Set-Cookie headers
+      // Accumulate Set-Cookie headers across redirect chain
       if (returnCookies) {
         const setCookies = [];
         fetchResponse.headers.forEach((value, key) => {
@@ -405,19 +474,14 @@ export default async function handler(req, res) {
         }
       }
 
-      // Follow redirects manually so we capture every Set-Cookie along the chain
+      // Follow redirects manually — captures every Set-Cookie in the chain
       if ([301, 302, 303, 307, 308].includes(fetchResponse.status)) {
         const location = fetchResponse.headers.get('location');
         if (!location) break;
         redirectHistory.push(currentUrl);
         currentUrl = location.startsWith('http') ? location : new URL(location, currentUrl).href;
-        // 303 always becomes GET with no body
-        if (fetchResponse.status === 303) {
-          currentMethod = 'GET';
-          currentBody   = null;
-        }
-        // 301/302 POST→GET convention (match browser behaviour)
-        if ([301, 302].includes(fetchResponse.status) && currentMethod === 'POST') {
+        // 303 and POST→301/302 always become GET with no body (browser convention)
+        if (fetchResponse.status === 303 || ([301, 302].includes(fetchResponse.status) && currentMethod === 'POST')) {
           currentMethod = 'GET';
           currentBody   = null;
         }
@@ -429,17 +493,33 @@ export default async function handler(req, res) {
 
     clearTimeout(timer);
 
-    const responseText = await fetchResponse.text().catch(() => '');
-    let responseJson   = null;
+    // ── Read response body with size cap ─────────────────────────────────────
+    // Prevents Vercel 4.5MB response limit crashes on large JS bundles / pages.
+    let responseText = '';
+    let truncated    = false;
+    try {
+      const buf = await fetchResponse.arrayBuffer();
+      const full = Buffer.from(buf);
+      if (full.length > maxBodyBytes) {
+        responseText = full.slice(0, maxBodyBytes).toString('utf-8');
+        truncated    = true;
+      } else {
+        responseText = full.toString('utf-8');
+      }
+    } catch (_) {
+      responseText = '';
+    }
+
+    // Try to parse as JSON (for API responses) — stored separately
+    let responseJson = null;
     try { responseJson = JSON.parse(responseText); } catch (_) {}
 
+    // Collect final Set-Cookie
     const finalSetCookies = [];
     fetchResponse.headers.forEach((value, key) => {
       if (key.toLowerCase() === 'set-cookie') finalSetCookies.push(value);
     });
-    const allCookies = returnCookies
-      ? mergeCookies(incomingCookies, finalSetCookies)
-      : '';
+    const allCookies = returnCookies ? mergeCookies(incomingCookies, finalSetCookies) : '';
 
     const upstreamStatus = fetchResponse.status;
     const wasRedirected  = redirectHistory.length > 0;
@@ -447,13 +527,20 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok:          fetchResponse.ok,
       status:      upstreamStatus,
-      status_code: upstreamStatus,   // ← frontend reads status_code in all unwrap paths
+      status_code: upstreamStatus,   // ← all frontend paths read status_code
       redirected:  wasRedirected,
+      // ── BODY FIELDS ──────────────────────────────────────────────────────
+      // `text` and `body` are BOTH the raw response string.
+      // This is the key fix: scanner reads r.body and expects raw HTML, not
+      // a parsed JSON object. `bodyJson` holds the parsed JSON when available.
       text:        responseText,
-      body:        responseJson,
+      body:        responseText,     // ← RAW STRING (was parsed JSON in v1 — FIXED)
+      bodyJson:    responseJson,     // ← parsed JSON if applicable, else null
+      // ─────────────────────────────────────────────────────────────────────
       cookies:     allCookies,
       finalUrl:    currentUrl,
       redirects:   redirectHistory,
+      truncated,
     });
 
   } catch (err) {
@@ -463,7 +550,10 @@ export default async function handler(req, res) {
       ok:          false,
       status:      502,
       status_code: 502,
-      error:       isTimeout ? `Request timed out after ${timeout}s` : err.message,
+      error:       isTimeout ? `Request timed out after ${timeoutMs}ms` : err.message,
+      text:        '',
+      body:        '',
+      bodyJson:    null,
       url,
     });
   }

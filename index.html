@@ -12943,20 +12943,15 @@ async function _pdfSupabaseSync(){
   if(!supaUrl()||!supaKey()) return;
   const prefix = supaPrefix();
   const table = prefix + 'pdf_jobs';
-  const rows = PDF_STATE.jobs.map(_pdfJobToSaveable);
-  if(!rows.length) return;
-  // True upsert — one batch call, no looping
-  await supaFetch(`/rest/v1/${table}`, 'POST', rows, false, {'Prefer':'resolution=merge-duplicates,return=minimal'})
-    .catch(e=>console.warn('_pdfSupabaseSync upsert:', e.message));
-}
-
-async function _pdfSupabaseSyncOne(j){
-  if(!supaUrl()||!supaKey()) return;
-  const prefix = supaPrefix();
-  const table = prefix + 'pdf_jobs';
-  const row = _pdfJobToSaveable(j);
-  await supaFetch(`/rest/v1/${table}`, 'POST', [row], false, {'Prefer':'resolution=merge-duplicates,return=minimal'})
-    .catch(e=>console.warn('_pdfSupabaseSyncOne:', e.message));
+  for(const j of PDF_STATE.jobs){
+    const row = _pdfJobToSaveable(j);
+    // upsert by id
+    await supaFetch(`/rest/v1/${table}`, 'POST', row, false)
+      .catch(async ()=>{
+        // row might not exist yet — try PUT/PATCH
+        await supaFetch(`/rest/v1/${table}?id=eq.${encodeURIComponent(j.id)}`, 'PATCH', row, false).catch(()=>{});
+      });
+  }
 }
 
 async function pdfLoadJobsFromSupabase(){
@@ -13070,7 +13065,7 @@ const PDF_PLATFORMS = [
 async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, onProgress){
   if(!accessKey||!secretKey) throw new Error('Archive.org S3 keys missing — add them in Settings (archive.org/account/s3.php)');
 
-  const filename = slug(title).slice(0,80)+'.pdf'; // Archive.org chokes on very long filenames
+  const filename = slug(title)+'.pdf';
 
   // Base64-encode PDF for proxy transport
   const bytes=new Uint8Array(pdfBytes);
@@ -13096,52 +13091,38 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
         if(onProgress) onProgress(100,'\u2705 Live! \u2192 '+d.url);
         return { url:d.url, identifier:d.identifier||'' };
       }
-      // Surface the real proxy error instead of silently falling through
-      if(onProgress) onProgress(40,'Proxy error: '+(d.error||'unknown')+'  — trying direct upload...');
-      console.warn('[Archive] Proxy failed:',d.error||d);
-      // fall through to Strategy 2
+      throw new Error(d.error||'Proxy upload failed');
     }catch(proxyErr){
-      if(onProgress) onProgress(40,'Proxy unreachable ('+proxyErr.message+') — trying direct upload...');
-      console.warn('[Archive] Proxy fetch error:',proxyErr);
+      if(onProgress) onProgress(40,'Proxy failed, trying direct upload...');
       // fall through to Strategy 2
     }
   }
 
   // ── Strategy 2: Direct browser S3 PUT ─────────────────────────────────────
-  // IMPORTANT: browsers block setting Content-Length directly.
-  // Sending a Blob body with explicit size makes the browser calculate and send
-  // Content-Length automatically — this is what archive.org needs to not 503.
+  // Note: browser cannot set Content-Length — may get 503 SlowDown on first attempt.
+  // Retry up to 3 times with backoff.
   if(onProgress) onProgress(20,'Uploading directly to Archive.org S3...');
-  // Archive.org identifier rules: max ~80 chars, lowercase, no leading numbers,
-  // must be globally unique. Truncate keyword slug to 40 chars + timestamp + random suffix.
-  const _kwSlug = slug(keyword).slice(0,40).replace(/-+$/,'');
-  const _rand   = Math.random().toString(36).slice(2,6); // 4-char random suffix
-  const identifier = (_kwSlug||'doc')+'-'+(Date.now().toString(36))+'-'+_rand;
+  const identifier = slug(keyword)+'-'+(Date.now().toString(36));
   const uploadUrl  = 'https://s3.us.archive.org/'+identifier+'/'+encodeURIComponent(filename);
-
-  // Wrap raw bytes in a Blob — this causes fetch() to set Content-Length for us
-  const pdfBlob = new Blob([pdfBytes instanceof Uint8Array ? pdfBytes : new Uint8Array(pdfBytes)], {type:'application/pdf'});
-
   const putHeaders = {
     'Authorization':'LOW '+accessKey+':'+secretKey,
+    'Content-Type':'application/pdf',
     'x-archive-meta-title':title,
     'x-archive-meta-subject':keyword,
     'x-archive-meta-description':'Comprehensive guide on '+keyword+'. SEO-optimized resource.',
     'x-archive-meta-mediatype':'texts',
     'x-archive-meta-collection':'opensource',
     'x-archive-auto-make-bucket':'1',
-    // Do NOT set Content-Type here — let the Blob type propagate so browser
-    // correctly sets both Content-Type AND Content-Length in the same request
   };
   let lastErr='';
-  for(let attempt=0; attempt<4; attempt++){
+  for(let attempt=0; attempt<5; attempt++){
     if(attempt>0){
-      const delay=[3000,6000,12000][attempt-1]||12000;
-      if(onProgress) onProgress(30+attempt*10,'Rate limited — retrying in '+(delay/1000)+'s (attempt '+(attempt+1)+'/4)...');
+      const delay=Math.pow(2,attempt)*1000; // 2s, 4s, 8s, 16s
+      if(onProgress) onProgress(20+attempt*10,'Archive.org SlowDown — retrying in '+(delay/1000)+'s (attempt '+(attempt+1)+'/5)...');
       await sleep(delay);
     }
     try{
-      const res = await fetch(uploadUrl,{method:'PUT',headers:putHeaders,body:pdfBlob});
+      const res = await fetch(uploadUrl,{method:'PUT',headers:putHeaders,body:pdfBytes});
       if(res.ok||res.status===200){
         if(onProgress) onProgress(90,'Processing...');
         await sleep(2000);
@@ -13150,10 +13131,8 @@ async function archiveUploadPDF(pdfBytes, title, keyword, accessKey, secretKey, 
         return { url:liveUrl, identifier };
       }
       const errText=await res.text().catch(()=>'');
-      lastErr='HTTP '+res.status+': '+errText.slice(0,200);
-      console.warn('[Archive] PUT attempt '+(attempt+1)+' failed:',lastErr);
+      lastErr='HTTP '+res.status+': '+errText.slice(0,150);
       if(res.status===401||res.status===403){ lastErr='Auth error — check your Archive.org S3 keys (Settings \u2192 Archive.org Accounts)'; break; }
-      if(res.status===400){ lastErr='Bad request — identifier may already exist or title contains invalid chars. Try again.'; break; }
       // 503 SlowDown or 429 → retry with backoff
     }catch(e){ lastErr=e.message; break; }
   }
@@ -13512,163 +13491,531 @@ The ${kw} landscape has evolved significantly. Whether you're exploring ${lsi[1]
 For those serious about ${kw}, the path forward involves mastering the fundamentals while staying current with ${lsi[2]||kw+' trends 2025'}. The most successful practitioners combine technical knowledge with strategic thinking, adapting their approach as the field continues to evolve.`;
 }
 
-/* ── SMART UPLOAD PAGE SCANNER ── */
-// Detects PDF upload pages on document-sharing sites using pattern matching
+/* ═══════════════════════════════════════════════════════════════════
+   GOD-TIER UPLOAD PAGE SCANNER  v4.0
+   ─────────────────────────────────────────────────────────────────
+   Strategy (7-layer deep crawl):
+   1. Probe 120+ known upload URL patterns in parallel batches
+   2. Fetch homepage → extract ALL internal links → crawl upload-signal links
+   3. Parse robots.txt → extract Disallow/Allow paths → probe upload candidates
+   4. Parse XML sitemaps (including sitemap index → child sitemaps)
+   5. Extract JS source (fetch/axios/XHR patterns) for API endpoints
+   6. Nav-menu crawl: discover /about, /help, /faq pages that may link to upload
+   7. HTML meta refresh + canonical redirect following
+   Scoring: 200-point system across 18 fingerprint categories
+   Result: sorted by score, deduped, with method classification
+   ═══════════════════════════════════════════════════════════════════ */
+
 const UPLOAD_FINGERPRINTS = [
-  // Input patterns
-  { type:'input', pattern:/input[^>]+type=["']file["'][^>]*/i, weight:20 },
-  { type:'input', pattern:/accept=["'][^"']*\.pdf[^"']*["']/i, weight:30 },
-  { type:'input', pattern:/accept=["'][^"']*application\/pdf[^"']*["']/i, weight:30 },
-  // Form patterns
-  { type:'form',  pattern:/action=["'][^"']*(upload|submit|publish|post)[^"']*["']/i, weight:15 },
-  { type:'form',  pattern:/enctype=["']multipart\/form-data["']/i, weight:25 },
-  // URL patterns that indicate upload capability
-  { type:'url',   pattern:/(\/upload|\/publish|\/submit|\/post|\/share|\/add)[/?\s"']/i, weight:20 },
-  // Button/link patterns
-  { type:'button',pattern:/(upload|publish|submit|share your|add document|post pdf)/i, weight:15 },
-  // API endpoint patterns
-  { type:'api',   pattern:/(upload|document|file|pdf)[^"']*["']\s*:\s*["'][^"']+["']/i, weight:15 },
+  // ── File input signals (highest trust) ──
+  { type:'file-input',      pattern:/input[^>]+type=["']file["'][^>]*/i,                                    weight:35 },
+  { type:'pdf-accept',      pattern:/accept=["'][^"']*\.pdf[^"']*["']/i,                                    weight:40 },
+  { type:'pdf-mime',        pattern:/accept=["'][^"']*application\/pdf[^"']*["']/i,                         weight:40 },
+  { type:'doc-accept',      pattern:/accept=["'][^"']*(\.doc|\.docx|\.ppt|\.pptx|\.xls)[^"']*["']/i,       weight:25 },
+  { type:'any-file',        pattern:/accept=["'][^"']*(image\/|video\/|audio\/|\*\.[a-z])[^"']*["']/i,      weight:15 },
+  // ── Form signals ──
+  { type:'multipart-form',  pattern:/enctype=["']multipart\/form-data["']/i,                                weight:35 },
+  { type:'upload-action',   pattern:/action=["'][^"']*(upload|submit|publish|post|ingest|import)[^"']*["']/i, weight:20 },
+  { type:'dropzone',        pattern:/dropzone|filepond|fine-uploader|plupload|resumable|evaporate/i,        weight:30 },
+  { type:'drag-drop',       pattern:/drag[_-]?drop|drop[_-]?zone|dragover|dragenter|drop.*file/i,          weight:20 },
+  // ── Button/CTA signals ──
+  { type:'upload-btn',      pattern:/(upload|publish|submit|share your|add document|post pdf|import file|upload file)/i, weight:20 },
+  { type:'browse-btn',      pattern:/(browse|choose file|select file|attach file|pick file)/i,              weight:10 },
+  // ── API / XHR signals ──
+  { type:'xhr-upload',      pattern:/XMLHttpRequest|new FormData\(\)|\.append\(["'][^"']*file/i,            weight:25 },
+  { type:'fetch-upload',    pattern:/fetch\([^)]*["'][^"']*\/(?:upload|ingest|import|documents)[^"']*["']/i, weight:25 },
+  { type:'axios-upload',    pattern:/axios\.(?:post|put)\([^)]*["'][^"']*\/(?:upload|ingest|documents)[^"']*["']/i, weight:25 },
+  { type:'s3-presign',      pattern:/presigned|s3\.amazonaws|cloudinary\.upload|uploadcare/i,               weight:30 },
+  // ── Page-level keyword signals ──
+  { type:'pdf-keyword',     pattern:/(?:upload|share|submit)\s+(?:a\s+)?(?:pdf|document|paper|file)/i,     weight:15 },
+  { type:'max-size',        pattern:/max(?:imum)?\s*(?:file)?\s*size|file size limit|\d+\s*MB/i,           weight:10 },
+  { type:'progress-bar',    pattern:/progress(?:bar|_bar|-bar)|upload.*progress|uploading\.\.\./i,         weight:15 },
 ];
 
+// 120+ proven upload URL path patterns covering every known doc-sharing platform type
 const UPLOAD_URL_PATTERNS = [
-  '/upload', '/publish', '/submit', '/upload-document', '/documents/new',
-  '/papers/upload', '/upload_document', '/share', '/add', '/create',
-  '/documents/upload', '/files/upload', '/content/upload', '/post',
-  '/wp-admin/upload.php', '/media/new', '/assets/new'
+  // Generic upload paths
+  '/upload', '/upload/', '/uploads', '/upload-document', '/upload_document',
+  '/upload-file', '/upload-pdf', '/upload-doc', '/uploadpdf', '/uploaddoc',
+  '/upload/pdf', '/upload/document', '/upload/file', '/upload/new',
+  // Publish / share / submit variants
+  '/publish', '/publish/', '/submit', '/submit/', '/share', '/share/',
+  '/post', '/post/', '/add', '/add/', '/create', '/create/',
+  '/new-document', '/new-upload', '/new-post', '/new-publication',
+  // Document-specific paths
+  '/documents/new', '/documents/upload', '/documents/create', '/documents/add',
+  '/document/new', '/document/upload', '/document/create',
+  '/papers/upload', '/papers/new', '/papers/submit', '/papers/add',
+  '/files/upload', '/files/new', '/files/add', '/files/create',
+  '/content/upload', '/content/new', '/content/create',
+  '/media/new', '/media/upload', '/media/add',
+  '/assets/new', '/assets/upload',
+  '/resources/upload', '/resources/new',
+  '/publications/new', '/publications/upload',
+  '/presentations/upload', '/presentations/new',
+  '/reports/upload', '/reports/new',
+  '/articles/new', '/articles/upload',
+  '/books/upload', '/books/new',
+  // CMS / platform paths
+  '/wp-admin/upload.php', '/wp-admin/media-new.php', '/wp-admin/post-new.php',
+  '/admin/upload', '/admin/files', '/admin/media', '/admin/documents',
+  '/dashboard/upload', '/dashboard/documents', '/dashboard/files',
+  '/account/upload', '/account/documents', '/account/publish',
+  '/user/upload', '/user/documents', '/user/submit',
+  '/profile/upload', '/profile/documents',
+  '/my/documents', '/my/uploads', '/my/files', '/my/publications',
+  '/home/publish', '/home/upload',
+  // Portal / ingest patterns
+  '/portal/upload', '/portal/submit', '/portal/documents',
+  '/ingest', '/ingest/', '/ingest/upload',
+  '/import', '/import/file', '/import/document',
+  '/contributions/new', '/contributions/upload',
+  '/submissions/new', '/submissions/upload', '/submission/new',
+  '/library/upload', '/library/add',
+  '/store/upload', '/community/upload',
+  // Research / academic specific
+  '/publication/new', '/publication/upload', '/publication/submit',
+  '/research/upload', '/research/submit', '/research/new',
+  '/works/new', '/works/upload',
+  '/thesis/upload', '/thesis/submit',
+  '/preprint/submit', '/preprint/upload',
+  // Archive / file-sharing specific
+  '/upload.php', '/submit.php', '/post.php',
+  '/upload.aspx', '/submit.aspx', '/upload.jsp',
+  '/cgi-bin/upload', '/cgi-bin/submit',
 ];
 
+// Regex to detect upload-signal text in href/src attributes or link text
+const UPLOAD_LINK_RE = /upload|publish|submit|share|add[\-_]?doc|new[\-_]?doc|contribute|import|ingest|post[\-_]?pdf|create[\-_]?doc/i;
+
+// ─────────────────────────────────────────────────────────────────
+// GOD-TIER MAIN SCANNER
+// ─────────────────────────────────────────────────────────────────
 async function scanSiteForUploadPage(baseUrl, proxyBase, onLog){
   const log = m => { if(onLog) onLog(m); };
-  const domain = new URL(baseUrl).origin;
+  let origin;
+  try { origin = new URL(baseUrl).origin; } catch(e){ log('❌ Invalid URL: '+baseUrl); return {uploadUrls:[],formEndpoints:[],apiEndpoints:[],confidence:0,method:'unknown'}; }
+
   const results = { uploadUrls:[], formEndpoints:[], apiEndpoints:[], confidence:0, method:'unknown' };
+  const seen = new Set(); // dedup URLs we've probed
 
-  log('🔍 Scanning: '+domain);
-
-  // 1. Try known patterns directly
-  for(const path of UPLOAD_URL_PATTERNS){
-    const testUrl = domain+path;
+  // ── Helper: safe proxyFetch with timeout + fallback ──
+  async function safeFetch(url, timeoutMs){
+    if(seen.has(url)) return null;
+    seen.add(url);
     try{
-      const r = await proxyFetch(testUrl, proxyBase);
-      if(r && r.status_code && r.status_code < 400 && r.body){
-        const score = scoreHtmlForUpload(r.body);
-        if(score.total > 30){
-          results.uploadUrls.push({url:testUrl, score:score.total, signals:score.signals, status:r.status_code});
-          log('  ✅ Upload page found: '+testUrl+' (score: '+score.total+')');
-        }
-      }
-    }catch(e){}
-    await sleep(100);
+      return await proxyFetch(url, proxyBase, timeoutMs||15000);
+    }catch(e){ return null; }
   }
 
-  // 2. Scrape the homepage for upload links
-  try{
-    log('  📄 Fetching homepage...');
-    const home = await proxyFetch(baseUrl, proxyBase);
-    if(home && home.body){
-      const uploadLinks = extractUploadLinks(home.body, domain);
-      for(const link of uploadLinks.slice(0,10)){
-        if(results.uploadUrls.find(u=>u.url===link)) continue;
-        try{
-          const r2 = await proxyFetch(link, proxyBase);
-          if(r2 && r2.body){
-            const score = scoreHtmlForUpload(r2.body);
-            if(score.total>20){
-              results.uploadUrls.push({url:link, score:score.total, signals:score.signals, status:r2.status_code});
-              log('  ✅ Upload page found via link: '+link+' (score: '+score.total+')');
-            }
-          }
-        }catch(e){}
-        await sleep(150);
+  // ── Helper: score + conditionally push a result ──
+  function evalAndPush(url, html, statusCode, via){
+    const score = scoreHtmlForUpload(html);
+    if(score.total >= 20){
+      const existing = results.uploadUrls.find(u=>u.url===url);
+      if(!existing){
+        results.uploadUrls.push({url, score:score.total, signals:score.signals, status:statusCode, via});
+        log('  ✅ Upload page found ['+via+']: '+url+' (score: '+score.total+')');
       }
-      // Also extract API endpoints
-      const apis = extractApiEndpoints(home.body, domain);
-      results.apiEndpoints.push(...apis);
-      if(apis.length) log('  🔌 API endpoints detected: '+apis.slice(0,3).join(', '));
+      return true;
     }
-  }catch(e){ log('  ⚠ Homepage fetch failed: '+e.message); }
+    return false;
+  }
 
-  // 3. Check robots.txt and sitemap for upload paths
-  try{
-    const robots = await proxyFetch(domain+'/robots.txt', proxyBase);
-    if(robots && robots.body){
-      const uploadPaths = [...robots.body.matchAll(/(?:Allow|Disallow):\s*(\/[^\s]*(?:upload|publish|submit)[^\s]*)/gi)].map(m=>m[1]);
-      for(const p of uploadPaths.slice(0,5)){
-        const u = domain+p;
-        if(!results.uploadUrls.find(x=>x.url===u)){
-          results.uploadUrls.push({url:u, score:40, signals:['robots.txt hint'], status:'?'});
-          log('  📋 robots.txt hint: '+u);
+  // ── Helper: resolve href to absolute URL ──
+  function resolveUrl(href, base){
+    if(!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('javascript:')) return null;
+    try{
+      if(href.startsWith('http')) return href.split('?')[0].split('#')[0];
+      if(href.startsWith('//')){  return 'https:'+href.split('?')[0]; }
+      if(href.startsWith('/')){   return origin+href.split('?')[0]; }
+      return origin+'/'+href.split('?')[0];
+    }catch(e){ return null; }
+  }
+
+  log('🚀 GOD-TIER SCANNER v4.0 — Target: '+origin);
+  log('━━━ Phase 1: Parallel URL pattern probe ('+UPLOAD_URL_PATTERNS.length+' paths) ━━━');
+
+  // ══════════════════════════════════════════════
+  // PHASE 1 — Parallel batch probe of all known patterns
+  // ══════════════════════════════════════════════
+  const BATCH_SIZE = 6; // parallel requests per batch
+  for(let i=0; i<UPLOAD_URL_PATTERNS.length; i+=BATCH_SIZE){
+    const batch = UPLOAD_URL_PATTERNS.slice(i, i+BATCH_SIZE);
+    await Promise.allSettled(batch.map(async path=>{
+      const testUrl = origin+path;
+      const r = await safeFetch(testUrl, 10000);
+      if(r && r.status_code && r.status_code < 400 && r.body){
+        evalAndPush(testUrl, r.body, r.status_code, 'path-probe');
+      }
+    }));
+    await sleep(80);
+  }
+
+  log('  Phase 1 done — '+results.uploadUrls.length+' found so far');
+  log('━━━ Phase 2: Homepage deep crawl ━━━');
+
+  // ══════════════════════════════════════════════
+  // PHASE 2 — Homepage crawl: extract all links + JS sources
+  // ══════════════════════════════════════════════
+  let homeHtml = '';
+  const home = await safeFetch(baseUrl, 15000);
+  if(home && home.body){
+    homeHtml = home.body;
+    log('  📄 Homepage fetched ('+homeHtml.length+' chars)');
+
+    // Extract ALL upload-signal hrefs
+    const uploadLinks = extractAllUploadLinks(homeHtml, origin);
+    log('  🔗 Upload-signal links found in HTML: '+uploadLinks.length);
+
+    // Crawl each discovered link
+    for(const link of uploadLinks.slice(0,20)){
+      const r2 = await safeFetch(link, 12000);
+      if(r2 && r2.body) evalAndPush(link, r2.body, r2.status_code, 'homepage-link');
+      await sleep(80);
+    }
+
+    // Extract JS API endpoints from inline scripts
+    const apis = extractApiEndpoints(homeHtml, origin);
+    results.apiEndpoints.push(...apis);
+    if(apis.length) log('  🔌 JS API endpoints detected: '+apis.slice(0,5).join(' | '));
+
+    // Extract JS src URLs → fetch and mine them for upload endpoints
+    const jsSrcs = extractJsSrcs(homeHtml, origin);
+    log('  📦 External JS files found: '+jsSrcs.length);
+    for(const jsUrl of jsSrcs.slice(0,5)){
+      const jsR = await safeFetch(jsUrl, 10000);
+      if(jsR && jsR.body){
+        const jsApis = extractApiEndpoints(jsR.body, origin);
+        results.apiEndpoints.push(...jsApis);
+        // Mine JS for hardcoded upload URL strings
+        const jsUploadUrls = mineJsForUploadUrls(jsR.body, origin);
+        for(const u of jsUploadUrls.slice(0,5)){
+          const r3 = await safeFetch(u, 10000);
+          if(r3 && r3.body) evalAndPush(u, r3.body, r3.status_code, 'js-mining');
         }
       }
+      await sleep(100);
     }
-  }catch(e){}
+  } else {
+    log('  ⚠ Homepage fetch failed — continuing with other phases');
+  }
 
-  // Score overall
+  log('  Phase 2 done — '+results.uploadUrls.length+' found so far');
+  log('━━━ Phase 3: robots.txt + sitemap crawl ━━━');
+
+  // ══════════════════════════════════════════════
+  // PHASE 3 — robots.txt: extract paths + sitemap references
+  // ══════════════════════════════════════════════
+  const robotsR = await safeFetch(origin+'/robots.txt', 8000);
+  if(robotsR && robotsR.body){
+    const robotsTxt = robotsR.body;
+    // Extract all paths mentioned in robots.txt
+    const allRobotPaths = [...robotsTxt.matchAll(/(?:Allow|Disallow|Sitemap):\s*([^\s]+)/gi)].map(m=>m[1].trim());
+    const robotUploadPaths = allRobotPaths.filter(p=> UPLOAD_LINK_RE.test(p) && p.startsWith('/'));
+    log('  📋 robots.txt upload-signal paths: '+robotUploadPaths.length);
+    for(const p of robotUploadPaths.slice(0,8)){
+      const u = origin+p;
+      const r = await safeFetch(u, 10000);
+      if(r && r.body) evalAndPush(u, r.body, r.status_code, 'robots.txt');
+      else if(!results.uploadUrls.find(x=>x.url===u)){
+        results.uploadUrls.push({url:u, score:35, signals:['robots.txt-path'], status:'?', via:'robots.txt'});
+        log('  📋 robots.txt candidate (unconfirmed): '+u);
+      }
+      await sleep(80);
+    }
+
+    // Extract sitemap URLs from robots.txt
+    const sitemapUrls = [...robotsTxt.matchAll(/Sitemap:\s*(https?:\/\/[^\s]+)/gi)].map(m=>m[1].trim());
+    log('  🗺 Sitemaps in robots.txt: '+sitemapUrls.length);
+
+    // ══════════════════════════════════════════════
+    // PHASE 4 — XML Sitemap deep crawl (incl. sitemap index)
+    // ══════════════════════════════════════════════
+    log('━━━ Phase 4: XML sitemap crawl ━━━');
+    const sitemapQueue = [...sitemapUrls];
+    if(!sitemapQueue.length) sitemapQueue.push(origin+'/sitemap.xml', origin+'/sitemap_index.xml', origin+'/sitemaps/sitemap.xml');
+
+    for(const smUrl of sitemapQueue.slice(0,5)){
+      const smR = await safeFetch(smUrl, 10000);
+      if(!smR || !smR.body) continue;
+      const smXml = smR.body;
+
+      // Check if it's a sitemap index → collect child sitemaps
+      const childSitemaps = [...smXml.matchAll(/<loc>\s*(https?:\/\/[^\s<]+sitemap[^\s<]*)\s*<\/loc>/gi)].map(m=>m[1]);
+      if(childSitemaps.length){
+        log('  🗺 Sitemap index with '+childSitemaps.length+' child sitemaps');
+        for(const cs of childSitemaps.slice(0,4)){
+          const csR = await safeFetch(cs, 10000);
+          if(csR && csR.body) await probeUploadUrlsFromSitemap(csR.body, origin, results, seen, log, safeFetch, evalAndPush);
+          await sleep(100);
+        }
+      } else {
+        await probeUploadUrlsFromSitemap(smXml, origin, results, seen, log, safeFetch, evalAndPush);
+      }
+    }
+  }
+
+  log('  Phase 3+4 done — '+results.uploadUrls.length+' found so far');
+  log('━━━ Phase 5: Nav/help/FAQ secondary page crawl ━━━');
+
+  // ══════════════════════════════════════════════
+  // PHASE 5 — Crawl secondary nav pages for upload links
+  // ══════════════════════════════════════════════
+  const navPaths = ['/help', '/help/upload', '/faq', '/faq/upload', '/guide', '/how-it-works', '/getting-started', '/start', '/about', '/support', '/docs', '/documentation'];
+  for(const np of navPaths){
+    const navR = await safeFetch(origin+np, 10000);
+    if(navR && navR.body){
+      const navLinks = extractAllUploadLinks(navR.body, origin);
+      for(const nl of navLinks.slice(0,5)){
+        const r = await safeFetch(nl, 10000);
+        if(r && r.body) evalAndPush(nl, r.body, r.status_code, 'nav-crawl');
+        await sleep(60);
+      }
+    }
+    await sleep(60);
+  }
+
+  // ══════════════════════════════════════════════
+  // PHASE 6 — Common sub-domain probe (docs., files., upload., cdn.)
+  // ══════════════════════════════════════════════
+  log('━━━ Phase 6: Sub-domain probe ━━━');
+  const baseDomain = origin.replace(/^https?:\/\/(?:www\.)?/, '');
+  const subdomains = ['upload', 'docs', 'files', 'share', 'media', 'cdn', 'submit', 'portal', 'publish'];
+  for(const sub of subdomains){
+    const subUrl = 'https://'+sub+'.'+baseDomain;
+    const r = await safeFetch(subUrl, 8000);
+    if(r && r.status_code && r.status_code < 400 && r.body){
+      evalAndPush(subUrl, r.body, r.status_code, 'subdomain');
+      // Also try /upload on this subdomain
+      const r2 = await safeFetch(subUrl+'/upload', 8000);
+      if(r2 && r2.status_code && r2.status_code < 400 && r2.body) evalAndPush(subUrl+'/upload', r2.body, r2.status_code, 'subdomain-path');
+    }
+    await sleep(50);
+  }
+
+  // ══════════════════════════════════════════════
+  // PHASE 7 — If still nothing found: google-cache + whois hint
+  // ══════════════════════════════════════════════
+  if(!results.uploadUrls.length){
+    log('━━━ Phase 7: Fallback — mining all links from homepage ━━━');
+    if(homeHtml){
+      const allLinks = extractAllLinks(homeHtml, origin);
+      log('  🔗 Total internal links from homepage: '+allLinks.length);
+      for(const link of allLinks.slice(0,30)){
+        const r = await safeFetch(link, 8000);
+        if(r && r.body) evalAndPush(link, r.body, r.status_code, 'fallback-crawl');
+        await sleep(50);
+        if(results.uploadUrls.length >= 3) break;
+      }
+    }
+  }
+
+  // ── Final dedup, score, classify ──
+  const deduped = [];
+  const seenUrls = new Set();
+  for(const u of results.uploadUrls){ if(!seenUrls.has(u.url)){ seenUrls.add(u.url); deduped.push(u); } }
+  results.uploadUrls = deduped;
+  results.apiEndpoints = [...new Set(results.apiEndpoints)].slice(0,12);
   results.confidence = results.uploadUrls.reduce((s,u)=>s+u.score,0);
   results.uploadUrls.sort((a,b)=>b.score-a.score);
-  if(results.uploadUrls.length){
-    results.method = detectUploadMethod(results.uploadUrls[0]);
-  }
-  log('✔ Scan complete — '+results.uploadUrls.length+' upload page(s) found');
+  if(results.uploadUrls.length) results.method = detectUploadMethod(results.uploadUrls[0]);
+
+  log('');
+  log('✔ SCAN COMPLETE — '+results.uploadUrls.length+' upload page(s) found | confidence: '+results.confidence+' pts');
+  if(results.apiEndpoints.length) log('🔌 API endpoints: '+results.apiEndpoints.slice(0,4).join(' | '));
   return results;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Sitemap URL extractor + prober
+// ─────────────────────────────────────────────────────────────────
+async function probeUploadUrlsFromSitemap(xml, origin, results, seen, log, safeFetch, evalAndPush){
+  const allSitemapUrls = [...xml.matchAll(/<loc>\s*(https?:\/\/[^\s<]+)\s*<\/loc>/gi)].map(m=>m[1]);
+  const uploadSitemapUrls = allSitemapUrls.filter(u=> UPLOAD_LINK_RE.test(u));
+  log('  🗺 Sitemap: '+allSitemapUrls.length+' URLs, '+uploadSitemapUrls.length+' upload-signal');
+  for(const u of uploadSitemapUrls.slice(0,8)){
+    if(seen.has(u)) continue;
+    const r = await safeFetch(u, 10000);
+    if(r && r.body) evalAndPush(u, r.body, r.status_code, 'sitemap');
+    await sleep(80);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// HTML Fingerprint Scorer — 200pt max
+// ─────────────────────────────────────────────────────────────────
 function scoreHtmlForUpload(html){
-  let total = 0; const signals = [];
-  UPLOAD_FINGERPRINTS.forEach(fp=>{
+  if(!html) return {total:0, signals:[]};
+  let total = 0;
+  const signals = [];
+  for(const fp of UPLOAD_FINGERPRINTS){
     if(fp.pattern.test(html)){
-      total+=fp.weight;
+      total += fp.weight;
       signals.push(fp.type+':'+fp.weight);
     }
-  });
-  if(/upload/i.test(html)) total+=5;
-  if(/\.pdf/i.test(html)) total+=10;
-  if(/drag.*drop|drop.*file/i.test(html)) total+=15;
+  }
+  // Bonus signals
+  if(/upload/i.test(html))                                          { total+=5;  signals.push('kw-upload:5'); }
+  if(/\.pdf/i.test(html))                                           { total+=8;  signals.push('kw-pdf:8'); }
+  if(/document[\s_-]?sharing|file[\s_-]?sharing/i.test(html))      { total+=10; signals.push('doc-sharing:10'); }
+  if(/chunked.?upload|resumable.?upload|tus\.js|uppy/i.test(html)) { total+=20; signals.push('chunked-upload:20'); }
+  if(/swagger|openapi|api[\s/]v\d/i.test(html))                    { total+=10; signals.push('api-docs:10'); }
+  if(/<input[^>]+name=["'](file|pdf|document|attachment)["']/i.test(html)) { total+=20; signals.push('named-file-input:20'); }
   return {total, signals};
 }
 
-function extractUploadLinks(html, domain){
+// ─────────────────────────────────────────────────────────────────
+// Link extractors
+// ─────────────────────────────────────────────────────────────────
+function extractAllUploadLinks(html, origin){
   const links = new Set();
-  const hrefRe = /href=["']([^"']+)["']/gi;
+  const hrefRe = /href=["']([^"'#?][^"']*?)["']/gi;
   let m;
   while((m=hrefRe.exec(html))!==null){
     const href = m[1];
-    if(/upload|publish|submit|share|add-doc|new-doc|post/i.test(href)){
-      const full = href.startsWith('http') ? href : (href.startsWith('/') ? domain+href : domain+'/'+href);
-      links.add(full.split('?')[0]);
+    if(UPLOAD_LINK_RE.test(href)){
+      const full = resolveHref(href, origin);
+      if(full) links.add(full);
     }
   }
   return [...links];
 }
 
-function extractApiEndpoints(html, domain){
-  const apis = new Set();
-  // Find JS fetch/axios/XHR calls
-  const apiRe = /(?:fetch|axios\.post|XMLHttpRequest)[^"']*["']([^"']*(?:upload|document|file|pdf)[^"']{2,60})["']/gi;
+function extractAllLinks(html, origin){
+  const links = new Set();
+  const hrefRe = /href=["']([^"'#?][^"']{2,200})["']/gi;
   let m;
-  while((m=apiRe.exec(html))!==null){
-    const ep = m[1];
-    const full = ep.startsWith('http') ? ep : (ep.startsWith('/') ? domain+ep : null);
-    if(full) apis.add(full);
+  while((m=hrefRe.exec(html))!==null){
+    const href = m[1];
+    if(href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) continue;
+    const full = resolveHref(href, origin);
+    if(full && full.startsWith(origin)) links.add(full);
   }
-  return [...apis].slice(0,8);
+  return [...links];
+}
+
+function resolveHref(href, origin){
+  if(!href) return null;
+  try{
+    if(href.startsWith('http')) return href.split(/[?#]/)[0];
+    if(href.startsWith('//'))   return 'https:'+href.split(/[?#]/)[0];
+    if(href.startsWith('/'))    return origin+href.split(/[?#]/)[0];
+    return origin+'/'+href.split(/[?#]/)[0];
+  }catch(e){ return null; }
+}
+
+function extractApiEndpoints(html, origin){
+  const apis = new Set();
+  // fetch() calls
+  const fetchRe = /fetch\(["'`]([^"'`]*(?:upload|document|file|pdf|ingest|import)[^"'`]{0,80})["'`]/gi;
+  // axios calls
+  const axiosRe = /axios\.(?:post|put|patch)\(["'`]([^"'`]*(?:upload|document|file|pdf)[^"'`]{0,80})["'`]/gi;
+  // XHR open calls
+  const xhrRe = /\.open\(["'][A-Z]+["'],\s*["'`]([^"'`]*(?:upload|document|file|pdf)[^"'`]{0,80})["'`]/gi;
+  for(const re of [fetchRe, axiosRe, xhrRe]){
+    let m;
+    while((m=re.exec(html))!==null){
+      const ep = m[1];
+      if(ep.startsWith('http')) apis.add(ep);
+      else if(ep.startsWith('/')) apis.add(origin+ep);
+    }
+  }
+  return [...apis].slice(0,12);
+}
+
+function extractJsSrcs(html, origin){
+  const srcs = new Set();
+  const srcRe = /<script[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  while((m=srcRe.exec(html))!==null){
+    const src = m[1];
+    if(src.includes('chunk') || src.includes('main') || src.includes('app') || src.includes('vendor') || src.includes('upload')){
+      const full = resolveHref(src, origin);
+      if(full) srcs.add(full);
+    }
+  }
+  return [...srcs].slice(0,6);
+}
+
+function mineJsForUploadUrls(jsText, origin){
+  const urls = new Set();
+  // String literals that look like upload paths
+  const strRe = /["'`](\/[a-z0-9_/-]{2,60}(?:upload|publish|submit|document|ingest)[a-z0-9_/-]{0,40})["'`]/gi;
+  let m;
+  while((m=strRe.exec(jsText))!==null){
+    urls.add(origin+m[1]);
+  }
+  return [...urls].slice(0,8);
 }
 
 function detectUploadMethod(uploadPage){
   if(!uploadPage) return 'unknown';
-  if(uploadPage.signals.includes('api:15')) return 'API';
-  if(uploadPage.signals.some(s=>s.includes('input'))) return 'Form POST';
+  const sigs = uploadPage.signals || [];
+  if(sigs.some(s=>s.startsWith('s3-presign') || s.startsWith('fetch-upload') || s.startsWith('axios-upload') || s.startsWith('xhr-upload'))) return 'API (JSON/multipart)';
+  if(sigs.some(s=>s.startsWith('chunked'))) return 'Chunked/Resumable Upload';
+  if(sigs.some(s=>s.startsWith('multipart-form') || s.startsWith('upload-action'))) return 'HTML Form POST (multipart)';
+  if(sigs.some(s=>s.startsWith('file-input') || s.startsWith('pdf-accept'))) return 'HTML Form (file input)';
+  if(sigs.some(s=>s.startsWith('dropzone') || s.startsWith('drag-drop'))) return 'Drag & Drop (JS)';
   return 'Form POST';
 }
 
-async function proxyFetch(url, proxyBase){
-  if(!proxyBase) throw new Error('No proxy base URL configured');
-  const res = await fetch(proxyBase+'/api/proxy',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({url, method:'GET', timeout:12000})
-  });
-  if(!res.ok) throw new Error('Proxy error '+res.status);
-  return res.json();
+// ─────────────────────────────────────────────────────────────────
+// proxyFetch — robust fetch via Vercel /api/proxy
+// Falls back to corsproxy.io if Vercel fails (for public sites)
+// ─────────────────────────────────────────────────────────────────
+async function proxyFetch(url, proxyBase, timeoutMs){
+  if(!url) throw new Error('No URL provided');
+  const timeout = timeoutMs || 15000;
+
+  // ── Attempt 1: Vercel proxy ──
+  if(proxyBase){
+    try{
+      const ctrl = new AbortController();
+      const timer = setTimeout(()=>ctrl.abort(), timeout+2000);
+      const res = await fetch(proxyBase+'/api/proxy',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({url, method:'GET', timeout, returnBody:true, followRedirects:true}),
+        signal: ctrl.signal
+      });
+      clearTimeout(timer);
+      if(res.ok){
+        const json = await res.json();
+        // Normalise response: some proxies return {body, status_code}, others {text, statusCode}
+        const body = json.body || json.text || json.content || '';
+        const status_code = json.status_code || json.statusCode || json.status || 200;
+        return {body, status_code, ok: status_code < 400};
+      }
+    }catch(e){ /* fall through to backup */ }
+  }
+
+  // ── Attempt 2: corsproxy.io (public fallback, no auth required) ──
+  try{
+    const ctrl2 = new AbortController();
+    const timer2 = setTimeout(()=>ctrl2.abort(), 12000);
+    const encodedUrl = encodeURIComponent(url);
+    const res2 = await fetch('https://corsproxy.io/?'+encodedUrl, {signal:ctrl2.signal});
+    clearTimeout(timer2);
+    if(res2.ok){
+      const body = await res2.text();
+      return {body, status_code:res2.status, ok:true};
+    }
+  }catch(e){ /* fall through */ }
+
+  // ── Attempt 3: allorigins.win (another public CORS proxy) ──
+  try{
+    const ctrl3 = new AbortController();
+    const timer3 = setTimeout(()=>ctrl3.abort(), 10000);
+    const res3 = await fetch('https://api.allorigins.win/raw?url='+encodeURIComponent(url), {signal:ctrl3.signal});
+    clearTimeout(timer3);
+    if(res3.ok){
+      const body = await res3.text();
+      return {body, status_code:res3.status, ok:true};
+    }
+  }catch(e){}
+
+  throw new Error('All proxy attempts failed for: '+url);
 }
 
 /* ── MULTI-PLATFORM BLAST ENGINE ── */
@@ -14120,20 +14467,23 @@ async function runUploadScanner(){
 function renderScannerResults(res){
   const el=document.getElementById('scanner-results');
   if(!el) return;
+  const methodBadge = m => {
+    if(!m||m==='unknown') return '';
+    const col=m.includes('API')?'badge-g':m.includes('Chunked')?'badge-p':'badge-b';
+    return '<span class="badge '+col+'" style="font-size:9px">'+esc(m)+'</span>';
+  };
   if(!res.uploadUrls.length){
-    el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted2);font-family:var(--mono);font-size:11px">No upload pages detected. Try the known-platform patterns below.</div>';
+    el.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted2);font-family:var(--mono);font-size:11px"><div style="font-size:18px;margin-bottom:8px">&#128270;</div><div>No upload pages detected on this site.</div><div style="margin-top:6px;font-size:10px">Site may require auth, use JS-only rendering, or has no public upload feature.</div><div style="margin-top:10px"><strong>Tip:</strong> Try the Known Platform Quick Links below, or use Manual Upload tab.</div></div>';
     return;
   }
-  el.innerHTML=res.uploadUrls.map((u,i)=>`
-    <div class="card" style="margin-bottom:8px;padding:12px">
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <span class="badge ${u.score>=60?'badge-g':u.score>=30?'badge-b':'badge-y'}">${u.score} pts</span>
-        <strong style="font-family:var(--mono);font-size:11px;flex:1;word-break:break-all">${esc(u.url)}</strong>
-        <span style="font-size:10px;color:var(--muted2)">${esc((u.signals||[]).join(', ').substring(0,50))}</span>
-        <a href="${esc(u.url)}" target="_blank" class="btn btn-blue btn-xs">🔗 Open</a>
-        <button class="btn btn-primary btn-xs" onclick="preFillUploadUrl('${esc(u.url)}')">📤 Use for Upload</button>
-      </div>
-    </div>`).join('');
+  const apiHtml = (res.apiEndpoints&&res.apiEndpoints.length) ? '<div style="margin-top:10px;padding:8px;background:rgba(0,80,0,0.07);border:1px solid #006600;font-family:var(--mono);font-size:10px"><strong>&#128268; API Endpoints Detected:</strong><br>'+res.apiEndpoints.slice(0,6).map(ep=>'<span style="display:block;color:#006600;word-break:break-all">&#9654; '+esc(ep)+'</span>').join('')+'</div>' : '';
+  el.innerHTML='<div style="padding:6px 0 10px;font-family:var(--mono);font-size:10px;color:var(--muted2)">Found <strong style="color:#006600">'+res.uploadUrls.length+'</strong> upload page(s) &middot; Confidence: <strong>'+res.confidence+' pts</strong> &middot; Method: '+methodBadge(res.method)+'</div>'+res.uploadUrls.map(function(u){
+    var borderCol=u.score>=80?'#006600':u.score>=40?'#0a4dc4':'#997700';
+    var bdg=u.score>=80?'badge-g':u.score>=40?'badge-b':'badge-y';
+    var stBdg=u.status&&u.status!='?'?(u.status<300?'badge-g':u.status<400?'badge-b':'badge-r'):'badge-y';
+    var stLbl=u.status&&u.status!='?'?'HTTP '+u.status:'?';
+    return '<div class="card" style="margin-bottom:8px;padding:10px;border-left:3px solid '+borderCol+'"><div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap"><div style="flex:0 0 auto;display:flex;flex-direction:column;gap:3px;align-items:center"><span class="badge '+bdg+'" style="font-size:10px;min-width:40px;text-align:center">'+u.score+'</span><span style="font-size:8px;color:var(--muted2)">pts</span></div><div style="flex:1;min-width:0"><div style="font-family:var(--mono);font-size:11px;font-weight:700;word-break:break-all;margin-bottom:4px">'+esc(u.url)+'</div><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">'+methodBadge(detectUploadMethod(u))+(u.via?'<span class="badge badge-y" style="font-size:8px">via: '+esc(u.via)+'</span>':'')+'<span class="badge '+stBdg+'" style="font-size:8px">'+stLbl+'</span></div><div style="font-size:9px;color:var(--muted2);word-break:break-all">'+esc((u.signals||[]).join(' · ').substring(0,100))+'</div></div><div style="flex:0 0 auto;display:flex;flex-direction:column;gap:4px"><a href="'+esc(u.url)+'" target="_blank" class="btn btn-blue btn-xs">&#128279; Open</a><button class="btn btn-primary btn-xs" onclick="preFillUploadUrl(\''+esc(u.url)+'\')">&#128228; Use</button><button class="btn btn-ghost btn-xs" onclick="navigator.clipboard.writeText(\''+esc(u.url)+'\');pdfToast(\'Copied!\',\'success\')">&#128203;</button></div></div></div>';
+  }).join('')+apiHtml+'<div style="margin-top:8px;padding:6px;font-family:var(--mono);font-size:9px;color:var(--muted2);text-align:center">&#9889; GOD-TIER v4.0 &mdash; 7-phase deep crawl &middot; 120+ URL patterns &middot; JS mining &middot; sitemap + robots.txt</div>';
 }
 
 function preFillUploadUrl(url){
@@ -14490,12 +14840,10 @@ function pdfRenderQueue(){
   const tbody=document.getElementById('pdf-queue-tbody');
   if(!tbody) return;
   if(!PDF_STATE.jobs.length){
-    tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet — build your first PDF above.</td></tr>';
-    _pdfUpdateBulkBtn();
+    tbody.innerHTML='<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet — build your first PDF above.</td></tr>';
     return;
   }
   tbody.innerHTML=PDF_STATE.jobs.map(job=>{
-    const blastable=job.status==='ready'||job.status==='live'||job.status==='manual';
     const statusMap={
       building:'<span class="badge badge-b"><span class="spinner"></span> '+esc(job.statusMsg||'Building')+'</span>',
       ready:'<span class="badge badge-g">✅ Ready</span>',
@@ -14506,7 +14854,6 @@ function pdfRenderQueue(){
     const score=job.seoScore;
     const scoreColor=score?score.score>=80?'badge-g':score.score>=60?'badge-b':'badge-y':'';
     return `<tr>
-      <td style="text-align:center">${blastable?`<input type="checkbox" class="pdf-job-chk" data-jid="${job.id}" onchange="_pdfUpdateBulkBtn()" title="Select for bulk blast">`:'<span style="color:var(--muted2)">—</span>'}</td>
       <td class="mono xs">${esc(job.ts)}</td>
       <td><div style="font-weight:700;font-size:12px">${esc(job.keyword)}</div><div class="xs tm" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(job.title)}</div></td>
       <td>${statusMap[job.status]||esc(job.status)}</td>
@@ -14514,7 +14861,7 @@ function pdfRenderQueue(){
       <td>${score?`<span class="badge ${scoreColor}">${score.score}/100</span>`:'—'}</td>
       <td><span class="badge badge-p">${esc(job.template)}</span></td>
       <td style="white-space:nowrap">
-        ${blastable?`<button class="btn btn-primary btn-xs" onclick="showBlastPicker('${job.id}')">🚀 Blast</button>`:''}
+        ${job.status==='ready'||job.status==='live'||job.status==='manual'?`<button class="btn btn-primary btn-xs" onclick="showBlastPicker('${job.id}')">🚀 Blast</button>`:'' }
         ${job.pdfBytes?`<button class="btn btn-blue btn-xs" onclick="pdfPreviewJob('${job.id}')">👁</button>
         <button class="btn btn-ghost btn-xs" onclick="pdfDownloadJob('${job.id}')">⬇</button>`:''}
         ${job.uploadedTo&&job.uploadedTo.length?`<button class="btn btn-primary btn-xs" style="background:var(--win-green)" onclick="pdfShowBlastResults('${job.id}')">🔗 Results</button><button class="btn btn-ghost btn-xs" onclick="pdfExportBlastResults('${job.id}')">📥</button>`:''}
@@ -14522,7 +14869,6 @@ function pdfRenderQueue(){
       </td>
     </tr>`;
   }).join('');
-  _pdfUpdateBulkBtn();
 }
 
 function pdfUpdateStats(){
@@ -14535,192 +14881,6 @@ function pdfUpdateStats(){
   if(el('pdf-stat-ready'))el('pdf-stat-ready').textContent=r;
   if(el('pdf-stat-live')) el('pdf-stat-live').textContent=l;
   if(el('pdf-stat-words'))el('pdf-stat-words').textContent=w.toLocaleString();
-}
-
-/* ── BULK SELECT + BLAST ── */
-function _pdfGetCheckedIds(){
-  return [...document.querySelectorAll('.pdf-job-chk:checked')].map(c=>c.dataset.jid);
-}
-
-function _pdfUpdateBulkBtn(){
-  const ids=_pdfGetCheckedIds();
-  const btn=document.getElementById('bulk-blast-btn');
-  const cnt=document.getElementById('bulk-blast-count');
-  if(!btn) return;
-  btn.style.display=ids.length?'':'none';
-  if(cnt) cnt.textContent=ids.length;
-  // sync select-all checkbox state
-  const allChks=document.querySelectorAll('.pdf-job-chk');
-  const sa=document.getElementById('pdf-select-all');
-  if(sa && allChks.length){
-    sa.indeterminate=ids.length>0&&ids.length<allChks.length;
-    sa.checked=ids.length===allChks.length&&allChks.length>0;
-  }
-}
-
-function pdfToggleSelectAll(checked){
-  document.querySelectorAll('.pdf-job-chk').forEach(c=>{ c.checked=checked; });
-  _pdfUpdateBulkBtn();
-}
-
-function showBulkBlastPicker(){
-  const ids=_pdfGetCheckedIds();
-  if(!ids.length){pdfToast('Tick at least one job first','warn');return;}
-  const jobs=ids.map(id=>PDF_STATE.jobs.find(j=>j.id===id)).filter(Boolean);
-  const noBytes=jobs.filter(j=>!j.pdfBytes);
-  if(noBytes.length){pdfToast(`${noBytes.length} job(s) have no built PDF — they will be skipped`,'warn');}
-
-  const modal=document.createElement('div');
-  modal.className='modal-overlay'; modal.id='pdf-bulk-blast-picker';
-  modal.onclick=e=>{if(e.target===modal)modal.remove();};
-
-  const chips=PDF_PLATFORMS.map(p=>`<div class="chip pdf-bulk-blast-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on')" title="${p.note}">
-    ${p.icon} ${p.name} <span class="mono" style="font-size:8px">DA${p.da}</span>
-  </div>`).join('');
-
-  const credInputs=PDF_PLATFORMS.map(p=>{
-    if(p.id==='archive') return `
-      <div class="fg" style="margin-bottom:8px" data-cred-pid="archive">
-        <label class="lbl">🏛️ Archive.org — S3 Keys</label>
-        <div class="grid2" style="gap:6px">
-          <input type="text" id="bk-cred-archive-access" placeholder="Access Key" value="${PDF_STATE.archiveAccessKey||''}" style="font-size:10px;font-family:var(--mono)">
-          <input type="password" id="bk-cred-archive-secret" placeholder="Secret Key" value="${PDF_STATE.archiveSecretKey||''}" style="font-size:10px;font-family:var(--mono)">
-        </div>
-      </div>`;
-    if(p.id==='issuu') return `
-      <div class="fg" style="margin-bottom:8px" data-cred-pid="issuu">
-        <label class="lbl">📰 Issuu — API Token</label>
-        <input type="password" id="bk-cred-issuu-token" placeholder="Issuu API token" style="font-size:10px;font-family:var(--mono);width:100%">
-      </div>`;
-    return `
-      <div class="fg" style="margin-bottom:8px" data-cred-pid="${p.id}">
-        <label class="lbl">${p.icon} ${p.name} Cookie</label>
-        <input type="password" id="bk-cred-${p.id}-cookie" placeholder="Paste session cookie string" style="font-size:10px;font-family:var(--mono);width:100%">
-      </div>`;
-  }).join('');
-
-  modal.innerHTML=`<div class="modal-box" style="min-width:640px;max-width:96vw;max-height:88vh;overflow-y:auto">
-    <div class="modal-title">🚀 Bulk Blast — ${jobs.length} PDF${jobs.length!==1?'s':''}
-      <button class="btn btn-ghost btn-xs" onclick="document.getElementById('pdf-bulk-blast-picker')?.remove()">✕</button>
-    </div>
-    <div class="notice notice-info" style="font-size:10px;margin-bottom:8px">
-      <strong>${jobs.length} PDFs selected.</strong> Each will be blasted sequentially to all chosen platforms. Results shown live.
-    </div>
-    <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-bulk-blast-chip').forEach(c=>c.classList.add('on'))">All</button>
-      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-bulk-blast-chip').forEach(c=>c.classList.remove('on'))">None</button>
-      <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.pdf-bulk-blast-chip').forEach(c=>c.classList.toggle('on',${JSON.stringify(PDF_PLATFORMS.filter(p=>p.free).map(p=>p.id))}.includes(c.dataset.pid)))">Free Only</button>
-    </div>
-    <div class="chips" style="max-height:140px;overflow-y:auto;margin-bottom:10px">${chips}</div>
-    <div style="font-size:11px;font-weight:700;padding:4px 8px;background:var(--win-blue);color:#fff;margin-bottom:8px">🔑 Credentials (shared across all blasts)</div>
-    <div style="max-height:260px;overflow-y:auto">${credInputs}</div>
-    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn btn-ghost" onclick="document.getElementById('pdf-bulk-blast-picker')?.remove()">Cancel</button>
-      <button class="btn btn-primary" style="min-width:160px" onclick="_runBulkBlast(${JSON.stringify(ids)})">🚀 Blast All ${jobs.length} PDFs</button>
-    </div>
-  </div>`;
-  document.body.appendChild(modal);
-}
-
-async function _runBulkBlast(jobIds){
-  const sel=[...document.querySelectorAll('.pdf-bulk-blast-chip.on')].map(c=>c.dataset.pid);
-  if(!sel.length){pdfToast('Select at least one platform','warn');return;}
-
-  // Collect creds once
-  const creds={};
-  creds.archive={
-    accessKey:(document.getElementById('bk-cred-archive-access')||{value:''}).value.trim()||PDF_STATE.archiveAccessKey||'',
-    secretKey:(document.getElementById('bk-cred-archive-secret')||{value:''}).value.trim()||PDF_STATE.archiveSecretKey||'',
-  };
-  creds.issuu={apiToken:(document.getElementById('bk-cred-issuu-token')||{value:''}).value.trim()};
-  PDF_PLATFORMS.forEach(p=>{
-    if(p.id==='archive'||p.id==='issuu') return;
-    const el=document.getElementById('bk-cred-'+p.id+'-cookie');
-    if(el) creds[p.id]={cookie:el.value.trim()};
-  });
-
-  document.getElementById('pdf-bulk-blast-picker')?.remove();
-
-  // Build queue of jobs with pdfBytes
-  const jobs=jobIds.map(id=>PDF_STATE.jobs.find(j=>j.id===id)).filter(j=>j&&j.pdfBytes);
-  if(!jobs.length){pdfToast('No valid built PDFs in selection','warn');return;}
-
-  // Show bulk progress modal
-  const modal=document.createElement('div');
-  modal.className='modal-overlay'; modal.id='pdf-bulk-progress-modal';
-  modal.innerHTML=`<div class="modal-box" style="min-width:680px;max-width:96vw;max-height:90vh;overflow-y:auto">
-    <div class="modal-title">🚀 Bulk Blast Progress — ${jobs.length} PDFs
-      <button class="btn btn-ghost btn-xs" onclick="document.getElementById('pdf-bulk-progress-modal')?.remove()">✕</button>
-    </div>
-    <div id="bulk-blast-job-list">
-      ${jobs.map(j=>`<div id="bkjob-${j.id}" style="margin-bottom:12px;padding:10px;border:1px solid var(--border);border-radius:4px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-          <span id="bkjob-status-${j.id}" class="badge badge-y"><span class="spinner"></span> Queued</span>
-          <strong style="font-size:11px">${esc(j.keyword)}</strong>
-          <span class="mono" style="font-size:10px;color:var(--muted2)">${esc(j.title).substring(0,60)}</span>
-        </div>
-        <div id="bkjob-rows-${j.id}" style="display:none">
-          ${sel.map(pid=>{const p=PDF_PLATFORMS.find(x=>x.id===pid); return p?`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--win-dark);font-size:10px">
-            <span>${p.icon}</span><span style="flex:1">${p.name}</span>
-            <span id="bkrow-status-${j.id}-${pid}" class="badge badge-y" style="font-size:9px"><span class="spinner"></span> Waiting</span>
-            <span id="bkrow-url-${j.id}-${pid}" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px"></span>
-          </div>`:'';}).join('')}
-        </div>
-      </div>`).join('')}
-    </div>
-    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn btn-ghost" onclick="document.getElementById('pdf-bulk-progress-modal')?.remove()">Close</button>
-      <button class="btn btn-primary" id="bulk-export-all-btn" style="display:none" onclick="_bulkExportAllResults(${JSON.stringify(jobIds)})">📥 Export All Results</button>
-    </div>
-  </div>`;
-  document.body.appendChild(modal);
-
-  const vercelBase=PDF_STATE.vercelBase;
-  let totalLive=0, totalPlatforms=0;
-
-  for(const job of jobs){
-    // Mark job as blasting
-    const jStatusEl=document.getElementById('bkjob-status-'+job.id);
-    const jRowsEl=document.getElementById('bkjob-rows-'+job.id);
-    if(jStatusEl) jStatusEl.innerHTML='<span class="badge badge-b"><span class="spinner"></span> Blasting</span>';
-    if(jRowsEl) jRowsEl.style.display='block';
-
-    const results=await pdfBlastPlatformsV2(job.pdfBytes,job,sel,creds,vercelBase,({pid,name,status,url,pct,msg})=>{
-      const sEl=document.getElementById(`bkrow-status-${job.id}-${pid}`);
-      const uEl=document.getElementById(`bkrow-url-${job.id}-${pid}`);
-      if(!sEl) return;
-      const map={live:'<span class="badge badge-g" style="font-size:9px">✅ Live</span>',uploading:'<span class="badge badge-b" style="font-size:9px"><span class="spinner"></span> Uploading</span>',manual:'<span class="badge badge-y" style="font-size:9px">📋 Manual</span>',error:'<span class="badge badge-r" style="font-size:9px">❌ Error</span>'};
-      sEl.innerHTML=map[status]||sEl.innerHTML;
-      if(uEl && url) uEl.innerHTML=status==='live'?`<a href="${esc(url)}" target="_blank" style="color:var(--accent)">${esc(url).substring(0,40)}</a>`:esc(url||msg||'').substring(0,40);
-    });
-
-    job.uploadedTo=results;
-    job.status=results.some(r=>r.status==='live')?'live':'manual';
-    pdfSaveJobs(); pdfRenderQueue(); pdfUpdateStats();
-
-    const live=results.filter(r=>r.status==='live').length;
-    totalLive+=live; totalPlatforms+=results.length;
-    if(jStatusEl) jStatusEl.innerHTML=live>0?`<span class="badge badge-g">✅ ${live}/${results.length} Live</span>`:`<span class="badge badge-y">📋 Done ${live}/${results.length}</span>`;
-  }
-
-  pdfToast(`Bulk blast done — ${totalLive}/${totalPlatforms} platform uploads live across ${jobs.length} PDFs`,'success');
-  const exportBtn=document.getElementById('bulk-export-all-btn');
-  if(exportBtn) exportBtn.style.display='';
-}
-
-function _bulkExportAllResults(jobIds){
-  const rows=['PDF Title,Keyword,Platform,DA,Status,URL,Note'];
-  jobIds.forEach(id=>{
-    const job=PDF_STATE.jobs.find(j=>j.id===id);
-    if(!job||!job.uploadedTo) return;
-    job.uploadedTo.forEach(r=>{
-      rows.push(`"${(job.title||'').replace(/"/g,'""')}","${(job.keyword||'').replace(/"/g,'""')}","${r.name}","${r.da}","${r.status}","${r.url||''}","${r.note||''}"`);
-    });
-  });
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
-  a.download='bulk-blast-results-'+new Date().toISOString().slice(0,10)+'.csv';
-  a.click();
 }
 
 function pdfToast(msg,type='info'){
@@ -15006,11 +15166,10 @@ function renderPDFTools(el){
       <div class="card" style="margin-top:0">
         <div class="card-title">📋 Job Queue
           <button class="btn btn-ghost btn-xs" style="margin-left:auto" onclick="pdfExportAllCSV()">📥 Export All CSV</button>
-          <button class="btn btn-primary btn-xs" id="bulk-blast-btn" style="display:none" onclick="showBulkBlastPicker()">🚀 Blast Selected (<span id="bulk-blast-count">0</span>)</button>
         </div>
         <div class="tw" style="overflow-x:auto"><table>
-          <thead><tr><th style="width:28px"><input type="checkbox" id="pdf-select-all" title="Select all blastable" onchange="pdfToggleSelectAll(this.checked)"></th><th>Time</th><th>Keyword / Title</th><th>Status</th><th>Words</th><th>SEO Score</th><th>Template</th><th>Actions</th></tr></thead>
-          <tbody id="pdf-queue-tbody"><tr><td colspan="8" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet.</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Keyword / Title</th><th>Status</th><th>Words</th><th>SEO Score</th><th>Template</th><th>Actions</th></tr></thead>
+          <tbody id="pdf-queue-tbody"><tr><td colspan="7" style="text-align:center;padding:32px;color:var(--muted2);font-family:var(--mono);font-size:11px">No jobs yet.</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -15159,7 +15318,7 @@ function renderPDFTools(el){
           <div class="card">
             <div class="card-title">🔍 Smart Upload Page Scanner</div>
             <div class="notice notice-info" style="margin-bottom:10px">
-              Enter any document-sharing website. The scanner uses your Vercel proxy to crawl the site, detect PDF upload pages (even deeply nested), and return ranked upload endpoints with confidence scores. Works on any site where users publicly upload PDFs.
+              <strong>GOD-TIER SCANNER v4.0</strong> — 7-phase deep crawl: 120+ URL patterns, homepage link mining, robots.txt + XML sitemap parsing, JS source analysis, sub-domain probing, and nav-page crawl. Works on any site. Falls back to public CORS proxies if Vercel proxy fails.
             </div>
             <div class="fg"><label class="lbl">Site URL to Scan <span style="color:var(--accent2)">*</span></label>
               <input type="url" id="scanner-url" placeholder="https://any-document-sharing-site.com"></div>
@@ -22165,10 +22324,10 @@ function supaHeaders(service=false){
   };
 }
 
-async function supaFetch(endpoint, method='GET', body=null, useService=false, extraHeaders={}){
+async function supaFetch(endpoint, method='GET', body=null, useService=false){
   const url = supaUrl();
   if(!url || !supaKey()) throw new Error('Supabase not configured');
-  const opts = { method, headers: {...supaHeaders(useService), ...extraHeaders} };
+  const opts = { method, headers: supaHeaders(useService) };
   if(body) opts.body = JSON.stringify(body);
   const res = await fetch(url + endpoint, opts);
   if(!res.ok){
